@@ -1,0 +1,4303 @@
+<!--
+  Self-contained data-cleaning error report.
+
+  This file is used as a template by src.report_builder.render_html. The
+  placeholder below is replaced at build time with a JSON payload of the
+  form { run_metadata, summary, issues, clusters }. No network calls are
+  made at runtime; open the generated report.html directly in a browser.
+
+  Two views share the same page:
+    * "Clusters" (default)   - one row per underlying defect after Phase-A
+                               clustering and optional Phase-B synthesis.
+    * "Raw detections"       - one row per per-type detection (a single
+                               row typically appears multiple times).
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Self-contained file:// report: only inline script + style, embedded data: images. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'" />
+  <title>Data Cleaning Error Report</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #111c32;
+      --panel-2: #18243f;
+      --border: #233559;
+      --text: #e5eaf2;
+      --muted: #8ea0bf;
+      --accent: #60a5fa;
+      --sev-high: #ef4444;
+      --sev-medium: #f59e0b;
+      --sev-low: #10b981;
+      --sev-unknown: #94a3b8;
+      --cat: #818cf8;
+      --fp: #f87171;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+        "Helvetica Neue", Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 14px;
+      line-height: 1.45;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    header {
+      padding: 20px 28px;
+      border-bottom: 1px solid var(--border);
+      background: linear-gradient(180deg, #0f172a 0%, #0b1120 100%);
+    }
+    header h1 {
+      margin: 0 0 6px 0;
+      font-size: 20px;
+      font-weight: 600;
+      letter-spacing: 0.2px;
+    }
+    header .meta {
+      color: var(--muted);
+      font-size: 12.5px;
+      display: flex;
+      gap: 18px;
+      flex-wrap: wrap;
+    }
+    header .meta code {
+      background: var(--panel-2);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 12px;
+      color: var(--text);
+    }
+    main { padding: 20px 28px 60px; }
+
+    .source-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 2px;
+      border-bottom: 1px solid var(--border);
+      margin: 4px 0 18px;
+      padding-bottom: 0;
+    }
+    .source-tabs button {
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid transparent;
+      border-bottom: none;
+      padding: 7px 14px;
+      font-size: 12.5px;
+      font-weight: 600;
+      font-family: inherit;
+      border-radius: 6px 6px 0 0;
+      cursor: pointer;
+      margin-bottom: -1px;
+      letter-spacing: 0.2px;
+      max-width: 260px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .source-tabs button:hover { color: var(--text); }
+    .source-tabs button.active {
+      background: var(--panel);
+      border-color: var(--border);
+      color: var(--accent);
+    }
+    .source-tabs .tab-count {
+      color: var(--muted);
+      font-weight: 500;
+      margin-left: 6px;
+      font-size: 11.5px;
+    }
+    .source-tabs button.active .tab-count { color: var(--text); }
+    .source-tabs button.workbook-tab {
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      border-color: var(--accent);
+      color: var(--text);
+    }
+    .source-tabs button.workbook-tab.active {
+      background: rgba(125, 200, 247, 0.08);
+    }
+    /* Search-box for flat-corpus tab lists (many independent CSVs,
+       e.g. curated_bing21). Filters visible buttons on input. */
+    .source-tabs-search {
+      flex: 0 0 100%;
+      margin: 4px 0 6px;
+    }
+    .source-tabs-search input {
+      width: 260px;
+      max-width: 100%;
+      padding: 5px 9px;
+      font-family: inherit;
+      font-size: 12px;
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+    }
+    .source-tabs-search input::placeholder { color: var(--muted); }
+
+    .view-toggle {
+      display: inline-flex;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 3px;
+      margin-bottom: 18px;
+    }
+    .view-toggle button {
+      background: transparent;
+      color: var(--muted);
+      border: none;
+      padding: 6px 14px;
+      font-size: 13px;
+      font-weight: 600;
+      border-radius: 6px;
+      cursor: pointer;
+      letter-spacing: 0.3px;
+    }
+    .view-toggle button.active {
+      background: var(--accent);
+      color: #0b1120;
+    }
+    .view { display: none; }
+    .view.active { display: block; }
+
+    .grid {
+      display: grid;
+      gap: 16px;
+    }
+    .grid.cards {
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 16px;
+    }
+    .card .label {
+      color: var(--muted);
+      font-size: 11.5px;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      margin-bottom: 4px;
+    }
+    .card .value {
+      font-size: 22px;
+      font-weight: 600;
+    }
+    .card.sev-high .value { color: var(--sev-high); }
+    .card.sev-medium .value { color: var(--sev-medium); }
+    .card.sev-low .value { color: var(--sev-low); }
+    .card.fp .value { color: var(--fp); }
+    .card .gt-card-sub {
+      font-size: 11.5px;
+      margin-top: 6px;
+      line-height: 1.4;
+    }
+
+    /* ---- Good-Turing view ---- */
+    .gt-explainer {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 16px;
+      margin-bottom: 16px;
+    }
+    .gt-explainer > summary {
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      padding: 2px 0;
+    }
+    .gt-explainer-body {
+      padding-top: 8px;
+      font-size: 12.5px;
+      line-height: 1.55;
+      color: var(--fg);
+    }
+    .gt-explainer-body p { margin: 6px 0 10px 0; }
+    .gt-explainer-body code {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 0 4px;
+      font-size: 11.5px;
+    }
+    .gt-glossary {
+      display: grid;
+      grid-template-columns: minmax(160px, 220px) 1fr;
+      gap: 6px 14px;
+      margin: 10px 0 4px 0;
+    }
+    .gt-glossary dt {
+      font-weight: 600;
+      color: var(--accent);
+      font-size: 12.5px;
+    }
+    .gt-glossary dd {
+      margin: 0;
+      font-size: 12.5px;
+      color: var(--fg);
+    }
+    .card[title] { cursor: help; }
+    #view-gt .issues th[title] { cursor: help; border-bottom-style: dotted; }
+
+    .gt-variant-list {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      margin-top: 10px;
+    }
+    .gt-variant-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 14px;
+    }
+    .gt-variant-header {
+      font-size: 13px;
+      margin-bottom: 8px;
+    }
+    .gt-variant-header .chip {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: rgba(96,165,250,0.18);
+      color: var(--accent);
+      margin-left: 4px;
+    }
+    .gt-variant-header .chip.danger {
+      background: rgba(239,68,68,0.18);
+      color: #fca5a5;
+    }
+    .gt-variant-pair {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-top: 8px;
+    }
+    .gt-variant-side .muted {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 4px;
+    }
+    .gt-variant-pre {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font-size: 11.5px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 260px;
+      overflow: auto;
+      margin: 0;
+    }
+    #gt-variants-container details {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 12px;
+      margin-bottom: 10px;
+    }
+    #gt-variants-container summary {
+      cursor: pointer;
+      font-size: 13px;
+      padding: 4px 0;
+    }
+    #gt-variants-container summary .chip {
+      display: inline-block;
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: rgba(96,165,250,0.18);
+      color: var(--accent);
+      margin-left: 6px;
+    }
+
+    .charts {
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      margin-top: 16px;
+    }
+    .chart-panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+    }
+    .chart-panel h2 {
+      margin: 0 0 10px 0;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+    }
+    .bar-row {
+      display: grid;
+      grid-template-columns: 200px 1fr 48px;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 6px;
+      font-size: 13px;
+    }
+    .bar-row .bar-label {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .bar-row .bar-track {
+      background: var(--panel-2);
+      border-radius: 999px;
+      height: 12px;
+      overflow: hidden;
+    }
+    .bar-row .bar-fill {
+      height: 100%;
+      border-radius: 999px;
+    }
+    .bar-row .bar-count {
+      text-align: right;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .toolbar {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin: 22px 0 12px;
+      align-items: center;
+    }
+    .toolbar input,
+    .toolbar select {
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 13px;
+      outline: none;
+    }
+    .toolbar input { min-width: 280px; flex: 1 1 280px; }
+    .toolbar input:focus,
+    .toolbar select:focus { border-color: var(--accent); }
+    .toolbar .spacer { flex: 1 1 auto; }
+    .toolbar .muted { color: var(--muted); font-size: 12.5px; }
+
+    table.issues {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    table.issues th,
+    table.issues td {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+      text-align: left;
+      font-size: 13px;
+    }
+    table.issues th {
+      background: var(--panel-2);
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      font-size: 11.5px;
+      cursor: pointer;
+      user-select: none;
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+    table.issues th.sort-asc::after { content: " \25B2"; color: var(--accent); }
+    table.issues th.sort-desc::after { content: " \25BC"; color: var(--accent); }
+    table.issues tbody tr.main:last-child td { border-bottom: none; }
+    table.issues tbody tr.main:hover { background: var(--panel-2); cursor: pointer; }
+    table.issues td.row-num { font-variant-numeric: tabular-nums; font-weight: 600; }
+    table.issues td.obs,
+    table.issues td.expl,
+    table.issues td.fix,
+    table.issues td.primary-cell {
+      max-width: 360px;
+      overflow-wrap: anywhere;
+    }
+    .pill {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 11.5px;
+      font-weight: 600;
+      text-transform: capitalize;
+      letter-spacing: 0.3px;
+    }
+    .pill.sev-high { background: rgba(239, 68, 68, 0.15); color: #fca5a5; border: 1px solid rgba(239,68,68,0.4); }
+    .pill.sev-medium { background: rgba(245, 158, 11, 0.12); color: #fcd34d; border: 1px solid rgba(245,158,11,0.4); }
+    .pill.sev-low { background: rgba(16, 185, 129, 0.12); color: #6ee7b7; border: 1px solid rgba(16,185,129,0.4); }
+    .pill.sev-unknown { background: rgba(148,163,184,0.12); color: #cbd5e1; border: 1px solid rgba(148,163,184,0.35); }
+    .pill.cat {
+      background: rgba(129,140,248,0.12);
+      color: #c7d2fe;
+      border: 1px solid rgba(129,140,248,0.35);
+    }
+    .pill.etype {
+      background: rgba(244, 114, 182, 0.12);
+      color: #fbcfe8;
+      border: 1px solid rgba(244, 114, 182, 0.40);
+      max-width: 220px;
+      display: inline-block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      vertical-align: middle;
+    }
+    .pill.confidence-high { background: rgba(16, 185, 129, 0.12); color: #6ee7b7; border: 1px solid rgba(16,185,129,0.4); }
+    .pill.confidence-medium { background: rgba(96, 165, 250, 0.12); color: #bfdbfe; border: 1px solid rgba(96, 165, 250, 0.4); }
+    .pill.confidence-low { background: rgba(148,163,184,0.12); color: #cbd5e1; border: 1px solid rgba(148,163,184,0.35); }
+    .pill.confidence-unknown { background: rgba(148,163,184,0.08); color: #94a3b8; border: 1px solid rgba(148,163,184,0.25); }
+    .pill.fp {
+      background: rgba(248, 113, 113, 0.15);
+      color: #fecaca;
+      border: 1px solid rgba(248, 113, 113, 0.4);
+    }
+    .pill.source {
+      background: rgba(96, 165, 250, 0.10);
+      color: #bfdbfe;
+      border: 1px solid rgba(96, 165, 250, 0.35);
+      max-width: 180px;
+      display: inline-block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      vertical-align: middle;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
+    }
+    .columns-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+    .columns-chips .chip {
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      padding: 2px 6px;
+      border-radius: 6px;
+      font-size: 11.5px;
+      color: var(--muted);
+    }
+    .etype-chips { display: flex; flex-wrap: wrap; gap: 4px; max-width: 360px; }
+    .etype-chips .chip {
+      background: rgba(244, 114, 182, 0.08);
+      border: 1px solid rgba(244, 114, 182, 0.25);
+      padding: 2px 6px;
+      border-radius: 6px;
+      font-size: 11px;
+      color: #fbcfe8;
+      white-space: nowrap;
+    }
+    .etype-chips .chip.primary {
+      background: rgba(244, 114, 182, 0.2);
+      border-color: rgba(244, 114, 182, 0.55);
+      color: #fff;
+      font-weight: 600;
+    }
+
+    /* Drill-down rows */
+    tr.drill { display: none; background: #0c1426; }
+    tr.drill.open { display: table-row; }
+    tr.drill td {
+      padding: 14px 18px !important;
+      border-bottom: 1px solid var(--border) !important;
+    }
+    .drill-section { margin-top: 14px; }
+    .drill-section:first-child { margin-top: 0; }
+    .drill-section h3 {
+      margin: 0 0 8px;
+      color: var(--muted);
+      font-size: 11.5px;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      font-weight: 600;
+    }
+    .row-values-grid {
+      display: grid;
+      grid-template-columns: 220px 1fr;
+      gap: 2px 12px;
+      font-size: 12.5px;
+    }
+    .row-values-grid .k { color: var(--muted); }
+    .row-values-grid .v { color: var(--text); overflow-wrap: anywhere; }
+    .row-values-grid .v.empty { color: #6b7a97; font-style: italic; }
+
+    .detection-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-bottom: 8px;
+      font-size: 12.5px;
+    }
+    .detection-card .det-head {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-bottom: 6px;
+    }
+    .detection-card .det-head .det-key {
+      font-weight: 600;
+      color: #fbcfe8;
+    }
+    .detection-card .det-field { margin-top: 4px; }
+    .detection-card .det-field .k {
+      color: var(--muted);
+      font-size: 11.5px;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      margin-right: 6px;
+    }
+
+    .synthesis-block {
+      background: #0c1426;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: 12.5px;
+    }
+    .synthesis-block .k {
+      color: var(--muted);
+      font-size: 11.5px;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      margin-right: 6px;
+    }
+    .synthesis-block .row-line {
+      margin: 3px 0;
+      overflow-wrap: anywhere;
+    }
+    .synthesis-block .error-line { color: #fca5a5; }
+
+    .empty {
+      padding: 40px;
+      text-align: center;
+      color: var(--muted);
+    }
+    .footer-note {
+      margin-top: 18px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    /* =========================================================
+       Run parameters panel - shows exact experiment config
+       ========================================================= */
+    details.run-params {
+      margin: 10px 0 6px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    details.run-params > summary {
+      cursor: pointer;
+      padding: 8px 12px;
+      font-size: 13px;
+      color: var(--muted);
+      font-weight: 600;
+      list-style: none;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    details.run-params > summary::-webkit-details-marker { display: none; }
+    details.run-params > summary::before {
+      content: "\25B8";
+      display: inline-block;
+      transition: transform 0.15s;
+      color: var(--muted);
+    }
+    details.run-params[open] > summary::before {
+      transform: rotate(90deg);
+    }
+    details.run-params > summary:hover { color: var(--accent); }
+    .run-params-body {
+      padding: 6px 14px 14px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 14px 24px;
+      font-size: 12.5px;
+    }
+    .run-params-group { display: flex; flex-direction: column; gap: 4px; }
+    .run-params-group h3 {
+      margin: 6px 0 2px;
+      font-size: 11.5px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      font-weight: 700;
+    }
+    .run-params-row {
+      display: grid;
+      grid-template-columns: 130px 1fr;
+      gap: 10px;
+      align-items: baseline;
+    }
+    .run-params-row .k {
+      color: var(--muted);
+      font-weight: 500;
+    }
+    .run-params-row .v {
+      color: var(--text);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+    .run-params-row .v.list {
+      font-family: inherit;
+    }
+    .run-params-row .v .chip {
+      display: inline-block;
+      margin: 1px 4px 1px 0;
+      padding: 1px 8px;
+      font-size: 11px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      color: var(--text);
+    }
+    .run-params-row .v.empty { color: var(--muted); font-style: italic; }
+
+    /* =========================================================
+       Annotations - review labels persisted in localStorage
+       ========================================================= */
+    .annotations-bar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      margin: 0 0 16px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 12.5px;
+    }
+    .annotations-bar .label {
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      font-size: 11px;
+    }
+    .annotations-bar .counts {
+      display: inline-flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .annotations-bar .spacer { flex: 1 1 auto; }
+    .annotations-bar button {
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 5px 10px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .annotations-bar button:hover { border-color: var(--accent); color: var(--accent); }
+    .annotations-bar button.danger:hover { border-color: #ef4444; color: #ef4444; }
+
+    .annot-pill {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.3px;
+      text-transform: uppercase;
+      border: 1px solid transparent;
+    }
+    .annot-pill.tp,
+    .annot-pill.ok      { background: rgba(16, 185, 129, 0.2);  color: #a7f3d0; border-color: rgba(16, 185, 129, 0.4); }
+    .annot-pill.fp,
+    .annot-pill.err     { background: rgba(239, 68, 68, 0.2);   color: #fecaca; border-color: rgba(239, 68, 68, 0.4); }
+    .annot-pill.fn      { background: rgba(99, 102, 241, 0.22); color: #c7d2fe; border-color: rgba(99, 102, 241, 0.4); }
+    .annot-pill.highlight,
+    .annot-pill.amb     { background: rgba(250, 204, 21, 0.2); color: #fde68a; border-color: rgba(250, 204, 21, 0.4); }
+    .annot-pill.empty   { background: transparent; color: var(--muted); border-color: var(--border); }
+
+    .annot-controls {
+      display: inline-flex;
+      gap: 2px;
+      align-items: center;
+    }
+    .annot-controls button {
+      background: var(--bg);
+      color: var(--muted);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 2px 8px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      letter-spacing: 0.3px;
+    }
+    .annot-controls button:hover { color: var(--text); }
+    .annot-controls button.active.tp,
+    .annot-controls button.active.ok   { background: rgba(16,185,129,0.3); color: #a7f3d0; border-color: rgba(16,185,129,0.5); }
+    .annot-controls button.active.fp,
+    .annot-controls button.active.err  { background: rgba(239,68,68,0.3);  color: #fecaca; border-color: rgba(239,68,68,0.5); }
+    .annot-controls button.active.highlight,
+    .annot-controls button.active.amb  { background: rgba(250,204,21,0.3); color: #fde68a; border-color: rgba(250,204,21,0.5); }
+    .annot-note {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 2px 6px;
+      font-size: 11.5px;
+      color: var(--text);
+      min-width: 120px;
+    }
+
+    /* Row-level highlighting based on annotation label.
+       New schema: -1 = error (red), 0 = ambiguous (yellow), 1 = no error (green). */
+    tr.annot-err td { background: rgba(239, 68, 68, 0.06); }
+    tr.annot-ok  td { background: rgba(16, 185, 129, 0.06); }
+    tr.annot-amb td { background: rgba(250, 204, 21, 0.08); }
+
+    /* User-added false negatives in the Source data view. */
+    table.data-grid tbody td.fn-flag {
+      background: rgba(99, 102, 241, 0.20) !important;
+      box-shadow: inset 3px 0 0 #6366f1 !important;
+      cursor: pointer;
+    }
+    /* A cell that is BOTH flagged by the model AND labeled by the
+       reviewer gets a coloured dot on top of the existing tint.
+       -1 error = red, 0 ambiguous = yellow, +1 no error = green. */
+    table.data-grid tbody td.annot-err::after,
+    table.data-grid tbody td.annot-ok::after,
+    table.data-grid tbody td.annot-amb::after {
+      content: "";
+      position: absolute;
+      right: 3px;
+      top: 3px;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+    }
+    table.data-grid tbody td { position: relative; }
+    table.data-grid tbody td.annot-err::after { background: #ef4444; }
+    table.data-grid tbody td.annot-ok::after  { background: #10b981; }
+    table.data-grid tbody td.annot-amb::after { background: #facc15; }
+
+    /* Cell popover for Source data labeling. */
+    .cell-popover {
+      position: fixed;
+      z-index: 9500;
+      min-width: 260px;
+      background: #0b1120;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      font-size: 12.5px;
+      box-shadow: 0 18px 40px rgba(0,0,0,0.55);
+    }
+    .cell-popover h3 {
+      margin: 0 0 8px;
+      font-size: 12px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      font-weight: 700;
+    }
+    .cell-popover .target {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 4px 8px;
+      margin-bottom: 10px;
+      font-size: 11.5px;
+      overflow-wrap: anywhere;
+    }
+    .cell-popover label {
+      display: block;
+      margin: 8px 0 4px;
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+    }
+    .cell-popover select, .cell-popover textarea, .cell-popover input {
+      width: 100%;
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 6px;
+      font-size: 12.5px;
+      box-sizing: border-box;
+      font-family: inherit;
+    }
+    .cell-popover textarea { min-height: 50px; resize: vertical; }
+    .cell-popover .row-buttons {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 10px;
+      justify-content: flex-end;
+    }
+    .cell-popover .row-buttons button {
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 5px 10px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .cell-popover .row-buttons button.primary {
+      background: var(--accent);
+      color: #0b1120;
+      border-color: var(--accent);
+      font-weight: 600;
+    }
+    .cell-popover .row-buttons button.danger {
+      color: #fecaca;
+      border-color: rgba(239,68,68,0.4);
+    }
+    .popover-backdrop {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.3);
+      z-index: 9400;
+    }
+
+    /* =========================================================
+       Source data view - false-negative review
+       ========================================================= */
+    .data-legend {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 12px;
+      margin: 0 0 12px;
+      font-size: 12.5px;
+      color: var(--muted);
+    }
+    .data-legend .swatch {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .data-legend .box {
+      width: 12px;
+      height: 12px;
+      border-radius: 3px;
+      border: 1px solid var(--border);
+      display: inline-block;
+    }
+
+    #data-scroll {
+      max-height: 70vh;
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+    table.data-grid {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+      font-size: 12.5px;
+    }
+    table.data-grid thead th {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      background: var(--panel);
+      color: var(--text);
+      font-weight: 600;
+      text-align: left;
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+    table.data-grid tbody td {
+      padding: 6px 10px;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+      vertical-align: top;
+      font-variant-numeric: tabular-nums;
+      max-width: 420px;
+      overflow-wrap: anywhere;
+    }
+    table.data-grid tbody td.row-idx {
+      color: var(--muted);
+      font-weight: 600;
+      text-align: right;
+      white-space: nowrap;
+      border-right: 1px solid var(--border);
+      background: var(--bg);
+      position: sticky;
+      left: 0;
+      z-index: 1;
+    }
+    table.data-grid thead th.row-idx {
+      left: 0;
+      z-index: 3;
+      border-right: 1px solid var(--border);
+      background: var(--panel);
+      text-align: right;
+    }
+    table.data-grid tbody tr.row-flagged td.row-idx {
+      color: var(--accent);
+    }
+    table.data-grid tbody td.empty-cell {
+      color: var(--muted);
+      font-style: italic;
+    }
+    table.data-grid tbody td.flagged {
+      background: rgba(239, 68, 68, 0.20);
+      box-shadow: inset 3px 0 0 #ef4444;
+      cursor: help;
+    }
+    table.data-grid tbody td .flag-count {
+      display: inline-block;
+      margin-left: 6px;
+      padding: 0 6px;
+      font-size: 11px;
+      font-weight: 700;
+      color: #0b1120;
+      background: rgba(255,255,255,0.75);
+      border-radius: 10px;
+      vertical-align: middle;
+    }
+
+    #data-empty {
+      padding: 40px;
+      text-align: center;
+      color: var(--muted);
+    }
+    #data-placeholder {
+      padding: 40px;
+      text-align: center;
+      color: var(--muted);
+      background: var(--panel);
+      border: 1px dashed var(--border);
+      border-radius: 8px;
+    }
+    #data-placeholder .source-quickjump {
+      display: grid;
+      gap: 10px;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      margin-top: 18px;
+      text-align: left;
+    }
+    #data-placeholder .source-quickjump button {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 10px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+      text-align: left;
+      font-size: 12.5px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    #data-placeholder .source-quickjump button:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    #data-placeholder .source-quickjump .source-name {
+      font-weight: 600;
+      color: var(--text);
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }
+    #data-placeholder .source-quickjump .source-stats {
+      color: var(--muted);
+      font-size: 11.5px;
+    }
+
+    /* Column-values panel */
+    .colvalues-panel {
+      margin-top: 18px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+    .colvalues-panel > header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+    }
+    .colvalues-panel > header .spacer { flex: 1 1 auto; }
+    .colvalues-panel select {
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 8px;
+      font-size: 12.5px;
+    }
+    .colvalues-body {
+      max-height: 360px;
+      overflow: auto;
+    }
+    .colvalues-body table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12.5px;
+    }
+    .colvalues-body th,
+    .colvalues-body td {
+      padding: 6px 12px;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+      text-align: left;
+      vertical-align: top;
+      overflow-wrap: anywhere;
+    }
+    .colvalues-body thead th {
+      position: sticky;
+      top: 0;
+      background: var(--panel);
+      font-weight: 600;
+    }
+    .colvalues-body tr.flagged .val {
+      background: rgba(239, 68, 68, 0.12);
+      border-left: 3px solid #ef4444;
+      padding-left: 9px;
+    }
+    .colvalues-body td.freq {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .colvalues-body td.flag-badge {
+      text-align: right;
+      white-space: nowrap;
+    }
+    .colvalues-body .pill.sm {
+      font-size: 10.5px;
+      padding: 1px 6px;
+    }
+    .colvalues-body td.val.empty-cell {
+      color: var(--muted);
+      font-style: italic;
+    }
+    .cell-tooltip {
+      position: fixed;
+      z-index: 9000;
+      max-width: 420px;
+      background: #0b1120;
+      color: #f1f5f9;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: 12px;
+      box-shadow: 0 18px 40px rgba(0,0,0,0.45);
+      pointer-events: none;
+    }
+    .cell-tooltip .tt-row {
+      margin: 4px 0;
+      overflow-wrap: anywhere;
+    }
+    .cell-tooltip .tt-row .k {
+      color: var(--muted);
+      margin-right: 6px;
+      text-transform: uppercase;
+      font-size: 10.5px;
+      letter-spacing: 0.5px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Data Cleaning Error Report</h1>
+    <div class="meta" id="meta"></div>
+    <details class="run-params" id="run-params">
+      <summary>Run parameters</summary>
+      <div class="run-params-body" id="run-params-body"></div>
+    </details>
+  </header>
+
+  <main>
+    <div class="annotations-bar" id="annotations-bar">
+      <span class="label">My review</span>
+      <span class="counts" id="annot-counts"></span>
+      <span class="muted" style="font-size:11.5px" title="Unlabeled flagged cells are treated as +1 (no error) by default. Label a cell to override.">
+        Default: unlabeled &rarr; +1 (no error)
+      </span>
+      <div class="spacer"></div>
+      <select id="annot-filter" title="Filter the current view by annotation label">
+        <option value="">All items</option>
+        <option value="err">Only &minus;1 (error)</option>
+        <option value="amb">Only 0 (ambiguous)</option>
+        <option value="ok">Only +1 (no error, explicit)</option>
+        <option value="unlabeled">Only unlabeled (assumed +1)</option>
+      </select>
+      <button type="button" id="annot-export" title="Download all annotations as a JSON file">Export JSON</button>
+      <button type="button" id="annot-import" title="Load annotations from a JSON file">Import JSON</button>
+      <input type="file" id="annot-import-file" accept="application/json,.json" style="display:none" />
+      <button type="button" id="annot-clear" class="danger" title="Clear every annotation for this run">Clear all</button>
+    </div>
+    <nav class="source-tabs" id="source-tabs" style="display:none" aria-label="Source CSV tabs"></nav>
+
+    <div class="view-toggle" id="view-toggle">
+      <button type="button" data-target="clusters" class="active">Clusters</button>
+      <button type="button" data-target="raw">Raw detections</button>
+      <button type="button" data-target="data" title="Inspect the raw CSV with detections highlighted - useful for finding false negatives">Source data</button>
+      <button type="button" data-target="gt" id="view-gt-btn" style="display:none" title="Adaptive-mode Good-Turing / Chao1 false-negative estimate and per-pass prompt variants">Good-Turing</button>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- Clusters view (default)                                       -->
+    <!-- ============================================================ -->
+    <section class="view active" id="view-clusters">
+      <section class="grid cards" id="cluster-cards"></section>
+
+      <section class="grid charts">
+        <div class="chart-panel" id="panel-cluster-source" style="display:none">
+          <h2>Clusters by source</h2>
+          <div id="chart-cluster-source"></div>
+        </div>
+        <div class="chart-panel">
+          <h2>Clusters by primary error type</h2>
+          <div id="chart-cluster-primary"></div>
+        </div>
+        <div class="chart-panel">
+          <h2>Clusters by confidence (Phase B)</h2>
+          <div id="chart-cluster-confidence"></div>
+        </div>
+        <div class="chart-panel">
+          <h2>Top columns (across all detections)</h2>
+          <div id="chart-cluster-columns"></div>
+        </div>
+      </section>
+
+      <div class="toolbar">
+        <input id="cluster-q" type="search" placeholder="Search row, explanation, fix, observations..." />
+        <select id="cluster-source-filter" data-multi-source-only="1"><option value="">All sources</option></select>
+        <select id="cluster-primary-filter"><option value="">All primary types</option></select>
+        <select id="cluster-confidence-filter"><option value="">All confidences</option></select>
+        <select id="cluster-fp-filter">
+          <option value="">All (incl. false positives)</option>
+          <option value="exclude">Hide likely false positives</option>
+          <option value="only">Only likely false positives</option>
+        </select>
+        <select id="cluster-evidence-filter">
+          <option value="">All clusters</option>
+          <option value="multi">Multi-type only</option>
+          <option value="single">Single-type only</option>
+        </select>
+        <div class="spacer"></div>
+        <span class="muted" id="cluster-count-label"></span>
+      </div>
+
+      <table class="issues" id="clusters-table">
+        <thead>
+          <tr>
+            <th data-sort="source" data-multi-source-only="1">Source</th>
+            <th data-sort="row" class="sort-asc">Row</th>
+            <th data-sort="primary_error_type">Primary type</th>
+            <th data-sort="error_types">All types</th>
+            <th data-sort="evidence_count">#Detections</th>
+            <th data-sort="confidence">Confidence</th>
+            <th data-sort="explanation">Canonical explanation</th>
+            <th data-sort="fix">Suggested fix</th>
+            <th data-sort="annot_label" title="Your review label">Review</th>
+          </tr>
+        </thead>
+        <tbody id="clusters-body"></tbody>
+      </table>
+      <div id="clusters-empty" class="empty" style="display:none">No clusters match the current filters.</div>
+
+      <p class="footer-note">Click any row to see the underlying per-type detections and the full source-row values.</p>
+    </section>
+
+    <!-- ============================================================ -->
+    <!-- Raw detections view                                           -->
+    <!-- ============================================================ -->
+    <section class="view" id="view-raw">
+      <section class="grid cards" id="raw-cards"></section>
+
+      <section class="grid charts">
+        <div class="chart-panel" id="panel-issues-source" style="display:none">
+          <h2>Detections by source</h2>
+          <div id="chart-issues-source"></div>
+        </div>
+        <div class="chart-panel">
+          <h2>Detections by error type</h2>
+          <div id="chart-error-type"></div>
+        </div>
+        <div class="chart-panel">
+          <h2>Detections by taxonomy category</h2>
+          <div id="chart-category"></div>
+        </div>
+        <div class="chart-panel">
+          <h2>Top columns</h2>
+          <div id="chart-columns"></div>
+        </div>
+      </section>
+
+      <div class="toolbar">
+        <input id="q" type="search" placeholder="Search row, observed, explanation, fix..." />
+        <select id="source-filter" data-multi-source-only="1"><option value="">All sources</option></select>
+        <select id="etype-filter"><option value="">All error types</option></select>
+        <select id="cat-filter"><option value="">All categories</option></select>
+        <select id="col-filter"><option value="">All columns</option></select>
+        <div class="spacer"></div>
+        <span class="muted" id="count-label"></span>
+      </div>
+
+      <table class="issues" id="issues-table">
+        <thead>
+          <tr>
+            <th data-sort="source" data-multi-source-only="1">Source</th>
+            <th data-sort="row" class="sort-asc">Row</th>
+            <th data-sort="error_type_name">Error type</th>
+            <th data-sort="error_type_category">Category</th>
+            <th data-sort="columns">Columns</th>
+            <th data-sort="observed">Observed</th>
+            <th data-sort="explanation">Explanation</th>
+            <th data-sort="suggested_fix">Suggested fix</th>
+            <th data-sort="annot_label" title="Your review label">Review</th>
+          </tr>
+        </thead>
+        <tbody id="issues-body"></tbody>
+      </table>
+      <div id="empty" class="empty" style="display:none">No detections match the current filters.</div>
+
+      <p class="footer-note">Each row is a single per-type detection. Use the Clusters view to see one canonical record per underlying defect.</p>
+    </section>
+
+    <!-- ============================================================ -->
+    <!-- Source data view (manual false-negative review)               -->
+    <!-- ============================================================ -->
+    <section class="view" id="view-data">
+      <section class="grid cards" id="data-cards"></section>
+
+      <!-- Shown when no specific source is selected in the source-tab
+           strip. Displays a quick-jump list of sources and explains the
+           view. -->
+      <div id="data-placeholder" style="display:none">
+        <div><strong>Pick a source above</strong> to inspect its raw rows with detections highlighted.</div>
+        <div class="muted" style="margin-top:8px;font-size:12.5px">
+          This view is designed for manual false-negative review: flagged cells are highlighted, and unflagged cells render plain so you can scan for anything the model missed.
+        </div>
+        <div class="source-quickjump" id="data-quickjump"></div>
+      </div>
+
+      <div id="data-scope" style="display:none">
+        <div class="toolbar">
+          <input id="data-q" type="search" placeholder="Search cell values..." />
+          <select id="data-col-filter"><option value="">All columns</option></select>
+          <select id="data-row-filter">
+            <option value="">All rows</option>
+            <option value="flagged">Only flagged rows</option>
+            <option value="unflagged">Only unflagged rows</option>
+          </select>
+          <div class="spacer"></div>
+          <span class="muted" id="data-count-label"></span>
+        </div>
+
+        <div class="data-legend">
+          <span class="swatch"><span class="box" style="background:rgba(239,68,68,0.45)"></span>flagged cell</span>
+          <span class="muted">&middot; hover a flagged cell to see the detection(s)</span>
+        </div>
+
+        <div id="data-scroll">
+          <table class="data-grid" id="data-table">
+            <thead><tr id="data-head"></tr></thead>
+            <tbody id="data-body"></tbody>
+          </table>
+        </div>
+        <div id="data-empty" style="display:none">No rows match the current filters.</div>
+
+        <!-- Column-values panel: per-column distinct-value distribution.
+             Makes typos/variants the model missed visible at a glance. -->
+        <aside class="colvalues-panel" id="colvalues-panel">
+          <header>
+            <span>Column values</span>
+            <select id="colvalues-col"></select>
+            <select id="colvalues-sort">
+              <option value="freq">Most frequent first</option>
+              <option value="alpha">A-Z</option>
+              <option value="rare">Rarest first</option>
+            </select>
+            <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--muted);font-weight:500">
+              <input type="checkbox" id="colvalues-flagged-only" /> Only flagged values
+            </label>
+            <div class="spacer"></div>
+            <span class="muted" id="colvalues-count"></span>
+          </header>
+          <div class="colvalues-body">
+            <table>
+              <thead>
+                <tr>
+                  <th>Value</th>
+                  <th style="text-align:right">Frequency</th>
+                  <th style="text-align:right">Flagged?</th>
+                </tr>
+              </thead>
+              <tbody id="colvalues-body"></tbody>
+            </table>
+          </div>
+        </aside>
+      </div>
+
+      <p class="footer-note">Tip: filter by one column + sort by frequency to eyeball a column's distinct values. Rare variants next to flagged ones are prime false-negative candidates.</p>
+    </section>
+
+    <!-- ============================================================ -->
+    <!-- Good-Turing view (adaptive mode only)                         -->
+    <!-- ============================================================ -->
+    <section class="view" id="view-gt">
+      <div id="gt-empty" class="empty" style="display:none">
+        This run was produced in <code>mode=single</code> - no Good-Turing data to show.
+      </div>
+
+      <div id="gt-body" style="display:none">
+        <!-- ------------------------------------------------------------ -->
+        <!-- "What am I looking at?" explainer                            -->
+        <!-- ------------------------------------------------------------ -->
+        <details class="gt-explainer" open>
+          <summary>How to read these numbers</summary>
+          <div class="gt-explainer-body">
+            <p>
+              In adaptive mode we run the detector <em>K</em> times, perturbing
+              the prompt or the row/column order each pass, then canonicalise
+              every detection into a <strong>species</strong>
+              <code>(source, error_type, column, row)</code>. The counts
+              <em>n<sub>r</sub></em> below are how many species were seen in
+              exactly <em>r</em> of the <em>K</em> runs. The two estimators
+              turn those counts into a &ldquo;how much are we missing?&rdquo;
+              number.
+            </p>
+            <dl class="gt-glossary">
+              <dt>S_obs (observed species)</dt>
+              <dd>
+                Count of <em>distinct</em> defect locations the detector
+                flagged across all completed passes. Grows monotonically; a
+                flattening <code>S_obs</code> curve is the main qualitative
+                signal that coverage is saturating.
+              </dd>
+              <dt>n<sub>1</sub> / singletons &middot; n<sub>2</sub> / doubletons</dt>
+              <dd>
+                Species seen in exactly 1 run (<em>n<sub>1</sub></em>) or 2
+                runs (<em>n<sub>2</sub></em>). Many singletons &rarr; the
+                detector is noisy / unsettled and there is likely more to
+                find; few singletons &rarr; every pass keeps surfacing the
+                same defects, so coverage is probably close to complete.
+              </dd>
+              <dt>GT missing mass</dt>
+              <dd>
+                Good-Turing estimator of the probability that the next
+                perturbed run surfaces a <em>never-before-seen</em> defect:
+                <code>n<sub>1</sub> / &Sigma;<sub>r</sub> r &middot; n<sub>r</sub></code>.
+                Numerically equal to the detector's estimated
+                <em>miss probability per new draw</em>. Adaptive mode stops
+                once this drops below <code>target_missing_mass</code>
+                (provided <code>min_runs</code> passes have completed).
+              </dd>
+              <dt>Est. FN rate</dt>
+              <dd>
+                Estimated fraction of defects the detector is missing overall,
+                with a log-normal 95% CI. Headline answer to
+                &ldquo;how much should I trust this run?&rdquo; Derived from
+                Chao1: <code>1 - S_obs / S_est</code>.
+              </dd>
+              <dt>Chao1 total (S_est)</dt>
+              <dd>
+                Non-parametric lower bound on the true number of defects in
+                the data, computed from <em>n<sub>1</sub></em> and
+                <em>n<sub>2</sub></em>:
+                <code>S_est = S_obs + n<sub>1</sub><sup>2</sup> / (2&middot;n<sub>2</sub>)</code>
+                (with a bias correction when <em>n<sub>2</sub></em> = 0). The
+                CI is log-normal on the <em>hidden</em> count
+                <code>S_est - S_obs</code>.
+              </dd>
+              <dt>Prompt column (progression)</dt>
+              <dd>
+                <code>seed</code> means that pass used the hand-written error
+                type definition; <code>variant</code> means an LLM rewrote
+                <code>description</code> / <code>notes</code> / <code>example</code>
+                first. Counts after the chip tell you how many types were
+                successfully rewritten vs. fell back to the seed.
+              </dd>
+            </dl>
+            <p class="muted">
+              <strong>Rule of thumb.</strong> If GT missing mass keeps falling
+              and <code>S_obs</code> flattens by run K, the detector has
+              covered its addressable population. If GT missing mass is still
+              large (&gt; ~5%) at the cap, raise <code>gt.num_runs</code> or
+              strengthen the perturbation (<code>prompt_ensemble: true</code>
+              usually helps far more than row shuffling for cell-local
+              errors).
+            </p>
+          </div>
+        </details>
+
+        <section class="grid cards" id="gt-cards"></section>
+
+        <div class="chart-panel">
+          <h2>Progression (recomputed after every pass)</h2>
+          <p class="footer-note">
+            One row per completed pass. Watch
+            <strong>GT missing mass</strong> trend toward your target and
+            <strong>S_obs</strong> flatten - that's the signal coverage is
+            saturating.
+          </p>
+          <table class="issues" id="gt-progression-table">
+            <thead>
+              <tr>
+                <th title="Pass index (0 = identity baseline when enabled). The trailing fraction is runs completed so far / total.">Run</th>
+                <th title="Raw detections the detector returned in THIS pass (before canonicalising into species). Compare to the next column to see what fraction were new.">Detections (this run)</th>
+                <th title="S_obs: distinct species (source, error_type, column, row) seen across all passes so far. Monotonic.">S_obs (cumulative)</th>
+                <th title="Good-Turing missing mass: estimated probability that a fresh perturbed run surfaces a never-before-seen defect. Adaptive stop kicks in when this falls below the target.">GT missing mass</th>
+                <th title="Chao1-derived estimate of the fraction of defects the detector is missing, with a log-normal 95% CI.">Est. FN rate</th>
+                <th title="Chao1 point estimate of the TRUE number of defects: S_obs + n1^2 / (2 n2). A lower bound on the population size.">Chao1 total</th>
+                <th title="Log-normal 95% CI on the Chao1 total.">Chao1 95% CI</th>
+                <th title="Was this pass run with the hand-written seed prompt, or an LLM-rewritten variant?">Prompt</th>
+              </tr>
+            </thead>
+            <tbody id="gt-progression-body"></tbody>
+          </table>
+        </div>
+
+        <div class="chart-panel" id="gt-saturation-panel" style="display:none;">
+          <h2>Per-type saturation</h2>
+          <p class="footer-note">
+            Under the unified per-arm stop logic, each
+            <code>(stop_scope, error_type)</code> pair is its own arm.
+            A type becomes "saturated" once <em>all</em> of its arms
+            cross the stop predicate (after at least
+            <code>min_runs</code> passes). Saturated types are pruned
+            from later passes &mdash; both detector calls and prompt
+            variants &mdash; so cost shrinks pass-over-pass. The "Arms
+            saturated" column tracks this at the finer arm grain.
+          </p>
+          <div id="gt-saturation-summary" class="muted" style="margin-bottom:8px;"></div>
+          <table class="issues" id="gt-saturation-table">
+            <thead>
+              <tr>
+                <th title="Pass index. The trailing fraction is runs completed so far.">Run</th>
+                <th title="Types whose every observed arm crossed the stop predicate this pass.">Newly saturated types</th>
+                <th title="Cumulative count of saturated types after this pass.">Saturated total</th>
+                <th title="Types still being detected after this pass.">Active next pass</th>
+                <th title="Per-arm detail: which (scope, type) arms saturated this pass and the cumulative arm count.">Arms saturated</th>
+              </tr>
+            </thead>
+            <tbody id="gt-saturation-body"></tbody>
+          </table>
+        </div>
+
+        <section class="grid charts">
+          <div class="chart-panel">
+            <h2>Per error type</h2>
+            <p class="footer-note">
+              Same estimators, scoped to each error type. Types with a high
+              missing mass are the detectors still surfacing novel defects -
+              more passes or a stronger prompt ensemble will help them most.
+            </p>
+            <table class="issues" id="gt-per-type-table">
+              <thead>
+                <tr>
+                  <th>Error type</th>
+                  <th title="Distinct species flagged for this error type across all passes.">S_obs</th>
+                  <th title="Good-Turing missing mass restricted to this error type.">Missing mass</th>
+                  <th title="Estimated FN rate for this error type (point + 95% CI).">Est. FN rate</th>
+                  <th title="Chao1 total-population estimate for this error type.">Chao1 total</th>
+                  <th title="Log-normal 95% CI on Chao1 total.">Chao1 95% CI</th>
+                </tr>
+              </thead>
+              <tbody id="gt-per-type-body"></tbody>
+            </table>
+          </div>
+          <div class="chart-panel" id="gt-per-source-panel">
+            <h2>Per source</h2>
+            <p class="footer-note">
+              Same estimators, scoped to each CSV. Sources with high missing
+              mass relative to their <code>S_obs</code> are the ones where
+              hidden defects are most likely.
+            </p>
+            <table class="issues" id="gt-per-source-table">
+              <thead>
+                <tr>
+                  <th>Source</th>
+                  <th title="Distinct species flagged in this CSV across all passes.">S_obs</th>
+                  <th title="Good-Turing missing mass restricted to this CSV.">Missing mass</th>
+                  <th title="Estimated FN rate for this CSV (point + 95% CI).">Est. FN rate</th>
+                  <th title="Chao1 total-population estimate for this CSV.">Chao1 total</th>
+                  <th title="Log-normal 95% CI on Chao1 total.">Chao1 95% CI</th>
+                </tr>
+              </thead>
+              <tbody id="gt-per-source-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <div class="chart-panel" id="gt-per-arm-panel" style="display:none;">
+          <h2>Per arm (scope &times; error type)</h2>
+          <p class="footer-note">
+            Each row treats one <em>(scope, error type)</em> pair as an
+            independent experiment with its own Chao1 / Good-Turing
+            bundle. Status reflects the per-arm stop predicate:
+            <span class="chip">saturated</span> p<sub>miss</sub> below
+            target with enough observations,
+            <span class="chip">exhausted</span> hit K<sub>max</sub>
+            still above target,
+            <span class="chip">insufficient</span> too few observations
+            to decide,
+            <span class="chip">active</span> still running, and
+            <span class="chip">&mdash;</span> not applicable.
+            This is an additive view &mdash; the global stop rule still
+            decides when the loop halts.
+          </p>
+          <div class="muted" id="gt-per-arm-summary" style="margin-bottom:8px;"></div>
+          <table class="issues" id="gt-per-arm-table">
+            <thead>
+              <tr>
+                <th>Scope</th>
+                <th>Error type</th>
+                <th title="Per-arm K (number of passes this arm was probed in).">K</th>
+                <th title="Distinct species found within this arm.">S_obs</th>
+                <th title="Per-arm Good-Turing missing mass.">p_miss</th>
+                <th title="Per-arm estimated FN rate (point + 95% CI).">Est. FN rate</th>
+                <th title="Per-arm Chao1 total estimate.">Chao1 total</th>
+                <th title="Per-arm stop status (saturated/active/exhausted/insufficient).">Status</th>
+              </tr>
+            </thead>
+            <tbody id="gt-per-arm-body"></tbody>
+          </table>
+        </div>
+
+        <div class="chart-panel" id="gt-variants-panel">
+          <h2>Prompt variants per pass</h2>
+          <p class="footer-note" id="gt-variants-note">
+            Every non-identity pass asks the rewriter LLM to produce a semantically
+            equivalent but linguistically different version of each selected error
+            type's <code>description</code>, <code>notes</code>, and <code>example</code>.
+            Click a pass to expand seed vs. variant side-by-side. Records that
+            failed to parse or errored fall back to the seed automatically.
+          </p>
+          <div id="gt-variants-container"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script id="report-data" type="application/json">
+/*__REPORT_DATA_JSON__*/
+  </script>
+
+  <script>
+    (function () {
+      "use strict";
+
+      var raw = document.getElementById("report-data").textContent.trim();
+      var DATA = { run_metadata: {}, summary: {}, issues: [], clusters: [] };
+      try { DATA = JSON.parse(raw); } catch (e) {
+        // Use textContent + a constructed element so a future
+        // contributor templating ``e.message`` in here cannot create
+        // an XSS vector.
+        var msg = document.createElement("p");
+        msg.style.padding = "20px";
+        msg.textContent = "Failed to parse embedded report data.";
+        document.body.replaceChildren(msg);
+        return;
+      }
+
+      var issues = DATA.issues || [];
+      var clusters = DATA.clusters || [];
+      var summary = DATA.summary || {};
+      var meta = DATA.run_metadata || {};
+      var sourceData = DATA.source_data || {};
+
+      var CONF_ORDER = { high: 0, medium: 1, low: 2, unknown: 3 };
+      var CONF_COLOR = {
+        high: "#10b981",
+        medium: "#60a5fa",
+        low: "#f59e0b",
+        unknown: "#94a3b8"
+      };
+
+      function h(tag, attrs, children) {
+        var el = document.createElement(tag);
+        if (attrs) {
+          for (var k in attrs) {
+            if (k === "class") el.className = attrs[k];
+            else if (k === "text") el.textContent = attrs[k];
+            else el.setAttribute(k, attrs[k]);
+          }
+        }
+        (children || []).forEach(function (c) {
+          if (c == null) return;
+          if (typeof c === "string") el.appendChild(document.createTextNode(c));
+          else el.appendChild(c);
+        });
+        return el;
+      }
+
+      function metaItem(label, value) {
+        return h("span", null, [
+          label + ": ",
+          h("code", { text: String(value == null ? "\u2014" : value) })
+        ]);
+      }
+
+      // ===================================================================
+      // Annotations store
+      // ===================================================================
+      //
+      // Label schema (per the reviewer workflow):
+      //
+      //   "-1"  the cell contains an error. If the detection has an
+      //         LLM-generated explanation, the reviewer can choose
+      //         whether to adopt it verbatim (use_llm_comment = true)
+      //         or write their own note (use_llm_comment = false).
+      //   "0"   ambiguous / interesting case, worth a second look.
+      //   "1"   no error. This is the DEFAULT for every flagged item
+      //         that the reviewer doesn't explicitly label, so a typical
+      //         review workflow is "label the real errors with -1,
+      //         star the ambiguous ones with 0, and leave everything
+      //         else alone" - unlabeled items are treated as +1 in every
+      //         count / filter.
+      //
+      // A stored annotation has the shape:
+      //   { label: "-1" | "0" | "1",
+      //     use_llm_comment: boolean,   // only meaningful for "-1"
+      //     note: string,
+      //     ts: iso-timestamp }
+      //
+      // Everything is persisted to localStorage keyed by the run id so
+      // reloads preserve work and annotations for different runs don't
+      // collide.
+      //
+      //   annotations = {
+      //     detections: {  [issueId]: AnnotationRecord },
+      //     clusters:   {  [clusterId]: AnnotationRecord },
+      //     falseNegatives: {  [source+"::"+row+"::"+col]: {
+      //       source, row, column, note, ts } }
+      //   }
+      //
+      // Export/Import JSON makes reviews shareable.
+      //
+      // Legacy migration: earlier reports used labels {"tp","fp",
+      // "highlight"}. On load, we map
+      //   "tp"        -> "-1"   (reviewer confirmed the LLM; error exists)
+      //   "fp"        -> "1"    (reviewer refuted the LLM; no error)
+      //   "highlight" -> "0"    (bookmarked / ambiguous)
+      // so existing saved reviews surface cleanly under the new schema.
+      var ANNOT_STORAGE_PREFIX = "gpt5-data-quality-annot::";
+      var ANNOT_RUN_ID = (meta && meta.run_id) || "anon";
+      var ANNOT_KEY = ANNOT_STORAGE_PREFIX + ANNOT_RUN_ID;
+
+      // Canonical label values as stored on disk.
+      var LABEL_ERROR = "-1";
+      var LABEL_AMBIG = "0";
+      var LABEL_OK = "1";
+      var VALID_LABELS = { "-1": true, "0": true, "1": true };
+
+      // Map label value -> short CSS class suffix. CSS class names
+      // can't start with a digit or '-', so we use `err` / `amb` / `ok`.
+      function labelClass(label) {
+        if (label === LABEL_ERROR) return "err";
+        if (label === LABEL_AMBIG) return "amb";
+        if (label === LABEL_OK) return "ok";
+        return "";
+      }
+      // Inverse: class suffix (used by the filter dropdown) -> label.
+      function classToLabel(cls) {
+        if (cls === "err") return LABEL_ERROR;
+        if (cls === "amb") return LABEL_AMBIG;
+        if (cls === "ok") return LABEL_OK;
+        return "";
+      }
+      function labelDisplay(label) {
+        if (label === LABEL_ERROR) return "\u22121"; // minus sign
+        if (label === LABEL_AMBIG) return "0";
+        if (label === LABEL_OK) return "+1";
+        return "\u2014";
+      }
+      // Migrate a single record from the legacy {tp,fp,highlight} enum
+      // to the new {-1,0,1} schema. Returns a fresh object, or null
+      // if the record has no recognised label (gets dropped).
+      function migrateRecord(rec) {
+        if (!rec || typeof rec !== "object") return null;
+        var lbl = rec.label;
+        if (lbl === "tp") lbl = LABEL_ERROR;
+        else if (lbl === "fp") lbl = LABEL_OK;
+        else if (lbl === "highlight") lbl = LABEL_AMBIG;
+        if (!VALID_LABELS[lbl]) return null;
+        return {
+          label: lbl,
+          use_llm_comment: !!rec.use_llm_comment,
+          note: rec.note || "",
+          ts: rec.ts || new Date().toISOString()
+        };
+      }
+      function migrateBucket(bucket) {
+        var out = {};
+        if (!bucket || typeof bucket !== "object") return out;
+        Object.keys(bucket).forEach(function (k) {
+          var m = migrateRecord(bucket[k]);
+          if (m) out[k] = m;
+        });
+        return out;
+      }
+
+      function emptyAnnotations() {
+        return { detections: {}, clusters: {}, falseNegatives: {} };
+      }
+      var annotations = (function loadAnnotations() {
+        try {
+          var raw = localStorage.getItem(ANNOT_KEY);
+          if (!raw) return emptyAnnotations();
+          var parsed = JSON.parse(raw);
+          if (!parsed || typeof parsed !== "object") return emptyAnnotations();
+          return {
+            detections: migrateBucket(parsed.detections),
+            clusters: migrateBucket(parsed.clusters),
+            falseNegatives: parsed.falseNegatives || {}
+          };
+        } catch (e) { return emptyAnnotations(); }
+      })();
+
+      function saveAnnotations() {
+        try {
+          localStorage.setItem(ANNOT_KEY, JSON.stringify(annotations));
+        } catch (e) {
+          console.warn("Could not persist annotations:", e);
+        }
+      }
+
+      function fnKey(source, row, column) {
+        return source + "::" + row + "::" + (column || "");
+      }
+
+      // Stable IDs for detections + clusters. Issues don't have server-
+      // side IDs, so we derive one from their fingerprint fields and add
+      // a positional suffix to disambiguate near-duplicates.
+      function buildIssueIds() {
+        var seen = {};
+        issues.forEach(function (iss, i) {
+          var base = [
+            iss.source || "",
+            iss.row == null ? "" : iss.row,
+            iss.error_type || "",
+            (iss.columns || []).join(",")
+          ].join("|");
+          var n = (seen[base] = (seen[base] || 0) + 1);
+          iss._id = base + (n > 1 ? ("#" + n) : "");
+          iss._pos = i;
+        });
+      }
+      buildIssueIds();
+
+      function getAnnot(kind, id) {
+        if (kind === "detection") return annotations.detections[id];
+        if (kind === "cluster") return annotations.clusters[id];
+        return null;
+      }
+      // setAnnot: persist a label change.
+      //   label     : "-1" | "0" | "1" | null (null removes the record)
+      //   patch     : optional {note, use_llm_comment} overrides;
+      //               anything omitted is kept from the existing record.
+      function setAnnot(kind, id, label, patch) {
+        var bucket = kind === "cluster" ? annotations.clusters : annotations.detections;
+        var prev = bucket[id] || {};
+        patch = patch || {};
+        if (label == null) {
+          delete bucket[id];
+        } else {
+          if (!VALID_LABELS[label]) {
+            console.warn("setAnnot: unknown label", label);
+            return;
+          }
+          bucket[id] = {
+            label: label,
+            // "Use LLM's comment" is only meaningful for LABEL_ERROR
+            // (the reviewer is stating an error and may want to adopt
+            // the LLM's explanation verbatim vs. providing their own).
+            // For other labels we clear it to avoid stale state.
+            use_llm_comment: label === LABEL_ERROR
+              ? (patch.use_llm_comment != null
+                  ? !!patch.use_llm_comment
+                  : (prev.use_llm_comment != null ? !!prev.use_llm_comment : true))
+              : false,
+            note: patch.note != null ? patch.note : (prev.note || ""),
+            ts: new Date().toISOString()
+          };
+        }
+        saveAnnotations();
+        onAnnotationsChanged();
+      }
+      function setFn(source, row, column, data) {
+        var k = fnKey(source, row, column);
+        if (!data) {
+          delete annotations.falseNegatives[k];
+        } else {
+          annotations.falseNegatives[k] = {
+            source: source,
+            row: row,
+            column: column,
+            note: data.note || "",
+            ts: new Date().toISOString()
+          };
+        }
+        saveAnnotations();
+        onAnnotationsChanged();
+      }
+      function getFn(source, row, column) {
+        return annotations.falseNegatives[fnKey(source, row, column)];
+      }
+
+      function countAnnotations() {
+        function count(bucket) {
+          var r = { err: 0, amb: 0, ok: 0, total: 0 };
+          Object.keys(bucket).forEach(function (k) {
+            var lbl = (bucket[k] && bucket[k].label) || "";
+            var cls = labelClass(lbl);
+            if (r[cls] != null) r[cls]++;
+            r.total++;
+          });
+          return r;
+        }
+        return {
+          detections: count(annotations.detections),
+          clusters: count(annotations.clusters),
+          falseNegatives: Object.keys(annotations.falseNegatives).length
+        };
+      }
+
+      // onAnnotationsChanged is wired later (after view renderers are
+      // defined) so we use a trampoline to avoid hoisting issues.
+      function onAnnotationsChanged() {
+        if (typeof onAnnotationsChanged_real === "function") {
+          onAnnotationsChanged_real();
+        }
+      }
+      var onAnnotationsChanged_real = null;
+
+      // Three-button label toggle (-1 / 0 / +1) with an optional note
+      // pencil. `opts.llmComment`, when a non-empty string, is used as
+      // the fallback comment for the "-1" label - the reviewer can keep
+      // the LLM explanation by leaving their own note empty, or
+      // override it by typing one, without needing an extra checkbox.
+      //
+      // Semantics recap:
+      //   -1  error in cell  (if LLM comment exists, it's adopted by
+      //                       default - use_llm_comment = true)
+      //    0  ambiguous / interesting
+      //   +1  no error       (also the default when nothing is labeled)
+      function buildAnnotControls(kind, id, opts) {
+        opts = opts || {};
+        var llmComment = opts.llmComment || "";
+        var current = getAnnot(kind, id) || {};
+        var wrap = h("div", { class: "annot-controls" });
+        var btns = [
+          { k: LABEL_ERROR, label: "\u22121", cls: "err",
+            title: "Error in this cell (-1). If the model has an explanation, it is adopted as the comment unless you add your own note." },
+          { k: LABEL_AMBIG, label: "0", cls: "amb",
+            title: "Ambiguous / interesting case (0)." },
+          { k: LABEL_OK, label: "+1", cls: "ok",
+            title: "No error (+1). This is the default for any unlabeled cell, so you only need to click +1 if you want to EXPLICITLY mark it reviewed." }
+        ];
+        btns.forEach(function (b) {
+          var on = current.label === b.k;
+          var btn = h("button", {
+            type: "button",
+            class: on ? "active " + b.cls : "",
+            title: b.title,
+            text: b.label
+          });
+          btn.addEventListener("click", function (ev) {
+            ev.stopPropagation();
+            var existing = getAnnot(kind, id) || {};
+            // Clicking the active button again clears the label
+            // (reverts to "unlabeled" which is implicitly +1).
+            if (existing.label === b.k) {
+              setAnnot(kind, id, null);
+              return;
+            }
+            var patch = {};
+            // Freshly chose -1: adopt the LLM comment by default if
+            // one is available; otherwise fall back to an empty note.
+            if (b.k === LABEL_ERROR) {
+              patch.use_llm_comment = !existing.note && !!llmComment;
+            }
+            setAnnot(kind, id, b.k, patch);
+          });
+          wrap.appendChild(btn);
+        });
+        // Pencil shows which comment is currently attached (LLM's or
+        // reviewer's). Clicking it opens a prompt that lets the
+        // reviewer override the comment for LABEL_ERROR (or simply add
+        // a note for the other labels).
+        function pencilTitle(rec) {
+          if (!rec || !rec.label) return "Add review note";
+          if (rec.label === LABEL_ERROR && rec.use_llm_comment && llmComment) {
+            return "Using LLM comment:\n" + llmComment + "\n\nClick to override.";
+          }
+          if (rec.note) return rec.note;
+          return "Add review note";
+        }
+        function pencilGlyph(rec) {
+          if (!rec) return "\u270E";
+          if (rec.label === LABEL_ERROR && rec.use_llm_comment && llmComment) {
+            return "\u270E llm";
+          }
+          if (rec.note) return "\u270E note";
+          return "\u270E";
+        }
+        var noteBtn = h("button", {
+          type: "button",
+          class: (current.note || (current.label === LABEL_ERROR && current.use_llm_comment && llmComment)) ? "active" : "",
+          title: pencilTitle(current),
+          text: pencilGlyph(current)
+        });
+        noteBtn.addEventListener("click", function (ev) {
+          ev.stopPropagation();
+          var cur = getAnnot(kind, id) || {};
+          var placeholderMsg = "Review note (leave empty to use the LLM's comment):";
+          var isError = cur.label === LABEL_ERROR;
+          var promptMsg = (isError && llmComment)
+            ? placeholderMsg + "\n\nLLM comment:\n" + llmComment
+            : "Review note (leave empty to clear):";
+          var next = window.prompt(promptMsg, cur.note || "");
+          if (next === null) return; // cancel
+          next = next.trim();
+          if (!cur.label) {
+            // No label yet - treat a note-only edit as LABEL_OK with
+            // a custom reviewer rationale.
+            setAnnot(kind, id, LABEL_OK, { note: next, use_llm_comment: false });
+            return;
+          }
+          var patch = { note: next };
+          if (isError) {
+            // Empty note on -1 means "fall back to the LLM comment"
+            // whenever one is available.
+            patch.use_llm_comment = (next === "") && !!llmComment;
+          }
+          setAnnot(kind, id, cur.label, patch);
+        });
+        wrap.appendChild(noteBtn);
+        return wrap;
+      }
+
+      // Read-only pill used for sorting/display purposes outside the
+      // interactive toggle group. Shows the stored label value.
+      function annotPill(label) {
+        if (!label) return h("span", { class: "annot-pill empty", text: "\u2014" });
+        var cls = labelClass(label);
+        return h("span", {
+          class: "annot-pill " + (cls || "empty"),
+          text: labelDisplay(label)
+        });
+      }
+
+      // ---- Meta header ---------------------------------------------------
+      var metaEl = document.getElementById("meta");
+      var sourceCount = (meta.sources && meta.sources.length) || 1;
+      var sourceLabel = sourceCount > 1
+        ? sourceCount + " files (" + meta.sources.slice(0, 3).join(", ") +
+          (sourceCount > 3 ? ", ..." : "") + ")"
+        : (meta.csv_path || meta.source);
+      var modeLabel = meta.mode || "single";
+      if (modeLabel === "adaptive" && meta.good_turing) {
+        modeLabel = "adaptive (" +
+          (meta.good_turing.num_runs_completed != null ? meta.good_turing.num_runs_completed : "?") +
+          "/" + (meta.good_turing.num_runs_max != null ? meta.good_turing.num_runs_max : "?") +
+          " passes, " + (meta.good_turing.gt_mode || "?") + ")";
+      } else if (modeLabel === "adaptive" && DATA.good_turing) {
+        modeLabel = "adaptive (" +
+          (DATA.good_turing.num_runs_completed != null ? DATA.good_turing.num_runs_completed : "?") +
+          "/" + (DATA.good_turing.num_runs_max != null ? DATA.good_turing.num_runs_max : "?") +
+          " passes, " + (DATA.good_turing.gt_mode || "?") + ")";
+      }
+      [
+        ["Run", meta.run_id],
+        ["Mode", modeLabel],
+        ["Model", meta.model],
+        ["Error types", meta.error_types_count != null ? meta.error_types_count : Object.keys(summary.issues_by_error_type || {}).length],
+        [sourceCount > 1 ? "Sources" : "Source", sourceLabel],
+        ["Chunks", summary.chunks],
+        ["LLM calls", summary.llm_calls],
+        ["Clusters", summary.clusters_total],
+        ["Synthesis", (meta.synthesis && meta.synthesis.enabled) ? "on" : "off"],
+        ["Generated", meta.generated_at]
+      ].forEach(function (kv) { metaEl.appendChild(metaItem(kv[0], kv[1])); });
+
+      // ---- Run parameters panel -----------------------------------------
+      // Shows the exact experiment configuration that produced this
+      // report. Lives in a <details> element so it's out of the way by
+      // default but one click away when you need the provenance.
+      (function renderRunParams() {
+        var body = document.getElementById("run-params-body");
+        function row(k, v, opts) {
+          opts = opts || {};
+          var vEl = h("div", { class: "v" + (opts.list ? " list" : "") });
+          if (v == null || v === "" || (Array.isArray(v) && !v.length)) {
+            vEl.className = "v empty";
+            vEl.textContent = opts.emptyLabel || "\u2014";
+          } else if (Array.isArray(v)) {
+            v.forEach(function (item) {
+              vEl.appendChild(h("span", { class: "chip", text: String(item) }));
+            });
+          } else if (typeof v === "object") {
+            vEl.textContent = JSON.stringify(v);
+          } else {
+            vEl.textContent = String(v);
+          }
+          return h("div", { class: "run-params-row" }, [
+            h("span", { class: "k", text: k }),
+            vEl
+          ]);
+        }
+        function group(title, rows) {
+          var g = h("div", { class: "run-params-group" });
+          g.appendChild(h("h3", { text: title }));
+          rows.forEach(function (r) { g.appendChild(r); });
+          return g;
+        }
+        var syn = meta.synthesis || {};
+        body.appendChild(group("Model & reasoning", [
+          row("model", meta.model),
+          row("reasoning effort", meta.reasoning_effort),
+          row("reasoning summary", meta.reasoning_summary),
+          row("concurrency", meta.concurrency)
+        ]));
+        body.appendChild(group("Chunking", [
+          row("chunk size", meta.chunk_size),
+          row("max chunks", meta.max_chunks),
+          row("column mode", meta.column_mode),
+          row("columns filter", meta.active_columns, { list: true, emptyLabel: "(all columns)" }),
+          row("chunk count", meta.chunk_count),
+          row("detection calls", meta.detection_call_count)
+        ]));
+        body.appendChild(group("Error types", [
+          row("count", meta.error_types_count),
+          row("keys", meta.error_types || [], { list: true }),
+          row("definitions", meta.error_types_file)
+        ]));
+        var sourcesRows = [
+          row("source count", meta.source_count),
+          row("sources", meta.sources || [], { list: true })
+        ];
+        if (meta.chunks_per_source) {
+          var chunkList = Object.keys(meta.chunks_per_source).map(function (k) {
+            return k + " (" + meta.chunks_per_source[k] + ")";
+          });
+          sourcesRows.push(row("chunks per source", chunkList, { list: true }));
+        }
+        if (meta.csv_glob) sourcesRows.push(row("csv glob", meta.csv_glob));
+        body.appendChild(group("Sources", sourcesRows));
+        body.appendChild(group("Phase B synthesis", [
+          row("enabled", syn.enabled ? "yes" : "no"),
+          row("effort", syn.effort),
+          row("concurrency", syn.concurrency),
+          row("prompt file", syn.prompt_file)
+        ]));
+
+        // Adaptive-mode parameters - only rendered when the config
+        // snapshot carries a good_turing block (i.e. mode=adaptive).
+        var gt = meta.good_turing || (DATA.good_turing || null);
+        if (gt) {
+          body.appendChild(group("Adaptive / Good-Turing", [
+            row("gt_mode", gt.gt_mode),
+            row("runs completed", (gt.num_runs_completed != null ? gt.num_runs_completed : "?") +
+                                  " / " + (gt.num_runs_max != null ? gt.num_runs_max : "?")),
+            row("min runs", gt.min_runs),
+            row("target missing mass", gt.target_missing_mass),
+            row("stop scope", gt.stop_scope || (gt.target_policy === "per_type" ? "dataset" : "column")),
+            row("base seed", gt.base_seed),
+            row("prompt ensemble", gt.prompt_ensemble ? "on" : "off"),
+            row("variant effort", gt.variant_generation_effort),
+            row("variant template", gt.prompt_variant_template),
+            row("shuffle rows", gt.shuffle_rows ? "on" : "off"),
+            row("shuffle columns", gt.shuffle_columns ? "on" : "off"),
+            row("identity baseline", gt.include_identity_run ? "yes" : "no"),
+            row("stop reason", gt.stop_reason)
+          ]));
+        }
+      })();
+
+      // ---- Multi-source visibility ---------------------------------------
+      // Hide source columns / filters / charts when there's only one CSV.
+      var IS_MULTI_SOURCE = sourceCount > 1;
+      if (!IS_MULTI_SOURCE) {
+        document.querySelectorAll("[data-multi-source-only]").forEach(function (el) {
+          el.style.display = "none";
+        });
+      }
+
+      // ---- Multi-table grouping ------------------------------------------
+      // For multi-table corpora (curated_pbi, Bing21 reconstructed) each
+      // run targets multiple CSVs that group into "workbooks" - all
+      // CSVs sharing the same parent directory belong to the same
+      // logical table. Surfacing that grouping in the UI is what makes
+      // inter-table errors auditable.
+      var WORKBOOK_BY_SOURCE = {};   // source basename -> workbook (parent dir name)
+      var WORKBOOK_TO_SOURCES = {};  // workbook -> [sources]
+      (function () {
+        var paths = (meta.csv_paths || []);
+        for (var i = 0; i < paths.length; i++) {
+          var raw = String(paths[i] || "").replace(/\\/g, "/");
+          var parts = raw.split("/");
+          var name = parts[parts.length - 1] || raw;
+          var parent = parts.length >= 2 ? parts[parts.length - 2] : "";
+          if (!name || WORKBOOK_BY_SOURCE.hasOwnProperty(name)) continue;
+          WORKBOOK_BY_SOURCE[name] = parent;
+          if (parent) {
+            (WORKBOOK_TO_SOURCES[parent] = WORKBOOK_TO_SOURCES[parent] || []).push(name);
+          }
+        }
+      })();
+      // Workbook grouping is meaningful only when there are at least 2
+      // distinct workbooks AND at least one of them owns 2+ CSVs.
+      var IS_MULTI_WORKBOOK = (function () {
+        var keys = Object.keys(WORKBOOK_TO_SOURCES);
+        if (keys.length < 2) return false;
+        for (var i = 0; i < keys.length; i++) {
+          if (WORKBOOK_TO_SOURCES[keys[i]].length >= 2) return true;
+        }
+        return false;
+      })();
+      function workbookOf(src) {
+        return WORKBOOK_BY_SOURCE[src || ""] || "";
+      }
+      // Short, human-friendly label for a source filename. Detects the
+      // Bing21 convention "<wb_sha>.xlsx_<sheet_sha>.csv" - those names
+      // are unreadable at full length (40-char shas) but the leading
+      // bytes of each sha are enough to disambiguate within a corpus.
+      // Falls back to the original name for anything that doesn't
+      // match the pattern.
+      var SHORT_SOURCE_CACHE = {};
+      function shortSource(src) {
+        if (!src) return "";
+        if (SHORT_SOURCE_CACHE.hasOwnProperty(src)) return SHORT_SOURCE_CACHE[src];
+        var m = src.match(/^([0-9a-f]{8})[0-9a-f]*\.xlsx_([0-9a-f]{6})[0-9a-f]*\.csv$/i);
+        var label = m ? (m[1] + ".xlsx / " + m[2]) : src;
+        SHORT_SOURCE_CACHE[src] = label;
+        return label;
+      }
+      function displaySource(src) {
+        if (!IS_MULTI_WORKBOOK) return shortSource(src || "");
+        var wb = workbookOf(src);
+        return wb ? wb + " / " + (src || "") : (src || "");
+      }
+
+      // Active source tab ("" = all, "workbook:<wb>" = whole workbook,
+      // "<csv>" = one CSV). Drives cards, charts, table filters, and
+      // the "All sources" chart visibility. Mutated by buildSourceTabs()
+      // below.
+      var activeSource = "";
+      function activeSourceMatches(src) {
+        if (!activeSource) return true;
+        if (activeSource.indexOf("workbook:") === 0) {
+          return workbookOf(src) === activeSource.slice("workbook:".length);
+        }
+        return (src || "") === activeSource;
+      }
+
+      // ---- Shared helpers ------------------------------------------------
+      function renderBars(target, rows, colorFor) {
+        target.innerHTML = "";
+        if (!rows.length) {
+          target.appendChild(h("div", { class: "empty", text: "(no data)" }));
+          return;
+        }
+        var max = Math.max.apply(null, rows.map(function (r) { return r.count; }));
+        rows.forEach(function (r) {
+          var pct = max > 0 ? (r.count / max) * 100 : 0;
+          var fill = h("div", { class: "bar-fill" });
+          fill.style.width = pct + "%";
+          fill.style.background = colorFor(r.key);
+          target.appendChild(h("div", { class: "bar-row" }, [
+            h("div", { class: "bar-label", title: r.key, text: r.key }),
+            h("div", { class: "bar-track" }, [fill]),
+            h("div", { class: "bar-count", text: String(r.count) })
+          ]));
+        });
+      }
+
+      function sortedCounterRows(counter) {
+        return Object.keys(counter || {})
+          .map(function (k) { return { key: k, count: counter[k] }; })
+          .sort(function (a, b) { return b.count - a.count; });
+      }
+
+      function clusterPrimary(cluster) {
+        if (cluster.synthesis && cluster.synthesis.primary_error_type) {
+          return cluster.synthesis.primary_error_type;
+        }
+        return (cluster.error_types && cluster.error_types[0]) || "unknown";
+      }
+
+      function clusterConfidence(cluster) {
+        if (cluster.synthesis && cluster.synthesis.confidence) {
+          return cluster.synthesis.confidence;
+        }
+        return cluster.evidence_count === 1 ? "n/a" : "unknown";
+      }
+
+      function clusterExplanation(cluster) {
+        if (cluster.synthesis && cluster.synthesis.canonical_explanation) {
+          return cluster.synthesis.canonical_explanation;
+        }
+        if (cluster.detections && cluster.detections[0]) {
+          return cluster.detections[0].explanation || "";
+        }
+        return "";
+      }
+
+      function clusterFix(cluster) {
+        if (cluster.synthesis && cluster.synthesis.canonical_fix) {
+          return cluster.synthesis.canonical_fix;
+        }
+        if (cluster.detections && cluster.detections[0]) {
+          return cluster.detections[0].suggested_fix || "";
+        }
+        return "";
+      }
+
+      function clusterIsFP(cluster) {
+        return !!(cluster.synthesis && cluster.synthesis.is_likely_false_positive);
+      }
+
+      // ---- View toggle ---------------------------------------------------
+      // activeView is tracked so that tab switches / filter changes know
+      // whether the Source data view needs a re-render (expensive enough
+      // that we lazily refresh it only when visible).
+      var activeView = "clusters";
+      document.querySelectorAll("#view-toggle button").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          document.querySelectorAll("#view-toggle button").forEach(function (b) {
+            b.classList.toggle("active", b === btn);
+          });
+          var target = btn.getAttribute("data-target");
+          activeView = target;
+          document.querySelectorAll(".view").forEach(function (v) {
+            v.classList.toggle("active", v.id === "view-" + target);
+          });
+          if (target === "data") renderDataView();
+          if (target === "gt") renderGoodTuringView();
+        });
+      });
+
+      // ==================================================================
+      // Good-Turing view (adaptive mode only)
+      // ==================================================================
+      //
+      // Rendered lazily on first open. Payload lives under DATA.good_turing
+      // and is populated by experiments.run_cleaning_detection when the
+      // experiment runs in `mode=adaptive`. In single mode the button
+      // stays hidden (no DATA.good_turing), and this function is a no-op.
+      var gtRendered = false;
+      function renderGoodTuringView() {
+        if (gtRendered) return;
+        gtRendered = true;
+        var gt = DATA.good_turing;
+        var body = document.getElementById("gt-body");
+        var empty = document.getElementById("gt-empty");
+        if (!gt || !gt.enabled) {
+          body.style.display = "none";
+          empty.style.display = "block";
+          return;
+        }
+        body.style.display = "block";
+        empty.style.display = "none";
+
+        // ---- Cards ----
+        var overall = gt.overall || {};
+        var chao1 = overall.chao1 || {};
+        var fn = overall.estimated_fn_rate || {};
+        var cards = document.getElementById("gt-cards");
+        [
+          {
+            label: "Mode",
+            value: gt.gt_mode || "?",
+            sub: gt.stop_reason ? "stop: " + gt.stop_reason : "",
+            tip: "adaptive = stop early once GT missing mass drops below the target (but never before min_runs). fixed = always run gt.num_runs passes regardless of coverage."
+          },
+          {
+            label: "Passes completed",
+            value: (gt.num_runs_completed != null ? gt.num_runs_completed : "?") +
+                   " / " + (gt.num_runs_max != null ? gt.num_runs_max : "?"),
+            sub: "min " + (gt.min_runs != null ? gt.min_runs : "?"),
+            tip: "How many perturbed passes the detector actually ran, out of the configured cap. In adaptive mode this can be less than the cap if coverage saturated."
+          },
+          {
+            label: "GT missing mass",
+            value: pctStr(overall.good_turing_missing_mass),
+            sub: "target \u2264 " + pctStr(gt.target_missing_mass) +
+                 " (stop_scope=" + (gt.stop_scope || (gt.target_policy === "per_type" ? "dataset" : "column")) + ")" +
+                 ((gt.saturated_types && gt.saturated_types.length)
+                   ? " | saturated: " + gt.saturated_types.length
+                   : ""),
+            tip: "Good-Turing estimator: n1 / sum_r (r * n_r). Probability that one more perturbed run surfaces a never-before-seen defect. Under the unified per-arm stop logic, each (stop_scope, error_type) arm is tracked independently; an error type is pruned from later passes once every one of its arms saturates."
+          },
+          {
+            label: "Est. FN rate",
+            value: pctStr(fn.point),
+            sub: fn.ci_95 ? "95% CI " + pctStr(fn.ci_95[0]) + " - " + pctStr(fn.ci_95[1]) : "",
+            tip: "Estimated fraction of defects the detector is MISSING overall, with a log-normal 95% CI. Derived from Chao1 as 1 - S_obs / S_est."
+          },
+          {
+            label: "Observed species",
+            value: overall.n_observed != null ? String(overall.n_observed) : "?",
+            sub: "singletons: " + (overall.n_singletons != null ? overall.n_singletons : "?") +
+                 " | doubletons: " + (overall.n_doubletons != null ? overall.n_doubletons : "?"),
+            tip: "S_obs is the number of DISTINCT defect locations (source, error_type, column, row) seen across all passes. Singletons (n1) / doubletons (n2) are species seen in exactly 1 / 2 passes - the raw material the estimators consume."
+          },
+          {
+            label: "Chao1 total",
+            value: num1(chao1.estimated_total),
+            sub: chao1.ci_95 ? "95% CI " + num1(chao1.ci_95[0]) + " - " + num1(chao1.ci_95[1]) : "",
+            tip: "Chao1 point estimate of the TRUE number of defects in the data: S_obs + n1^2 / (2 * n2). This is a non-parametric LOWER bound on the population size; the gap between this and S_obs is the estimated hidden count."
+          },
+          {
+            label: "Prompt ensemble",
+            value: gt.prompt_ensemble ? "on" : "off",
+            sub: gt.prompt_ensemble ? "effort: " + (gt.variant_generation_effort || "?") : "",
+            tip: "If on, every non-identity pass asks an LLM to rewrite each error type's description/notes/example, giving the detector a genuinely different prompt each pass. Recommended for cell-local errors where row shuffling barely moves the detector."
+          },
+          {
+            label: "Frame shuffle",
+            value: (gt.shuffle_rows ? "rows" : "") +
+                   ((gt.shuffle_rows && gt.shuffle_columns) ? " + " : "") +
+                   (gt.shuffle_columns ? "columns" : "") ||
+                   (gt.include_identity_run ? "off" : "off (no identity)"),
+            sub: "seed: " + (gt.base_seed != null ? gt.base_seed : "?"),
+            tip: "Row/column order perturbation. Cheap but weak for single-cell error types; shown here for reproducibility. base_seed is the reproducibility root - same seed + same K reproduces the same perturbations."
+          }
+        ].forEach(function (c) {
+          var el = h("div", { class: "card" }, [
+            h("div", { class: "label", text: c.label }),
+            h("div", { class: "value", text: String(c.value) })
+          ]);
+          if (c.tip) el.setAttribute("title", c.tip);
+          if (c.sub) el.appendChild(h("div", { class: "gt-card-sub muted", text: c.sub }));
+          cards.appendChild(el);
+        });
+
+        // ---- Progression table ----
+        var progBody = document.getElementById("gt-progression-body");
+        var runsMeta = gt.runs || [];
+        (gt.progression || []).forEach(function (p) {
+          var metaRow = runsMeta[p.run_id] || {};
+          var pv = metaRow.prompt_variants || {};
+          var promptCell;
+          if (pv.enabled) {
+            promptCell = h("span", null, [
+              h("span", { class: "chip", text: "variant" }),
+              " " + (pv.count_ok != null ? pv.count_ok : "?") + " ok" +
+                (pv.count_fallback ? " / " + pv.count_fallback + " fallback" : "")
+            ]);
+          } else {
+            promptCell = h("span", { class: "chip", text: "seed" });
+          }
+          progBody.appendChild(h("tr", null, [
+            h("td", { text: "#" + p.run_id + " (" + p.runs_so_far + "/" +
+                             (gt.num_runs_completed || "?") + ")" }),
+            h("td", { text: String(p.detections_this_run) }),
+            h("td", { text: String(p.n_observed) }),
+            h("td", { text: pctStr(p.good_turing_missing_mass) }),
+            h("td", { text: pctStr(p.fn_rate_point) +
+                           (p.fn_rate_ci_95_low != null
+                             ? " [" + pctStr(p.fn_rate_ci_95_low) + ", " + pctStr(p.fn_rate_ci_95_high) + "]"
+                             : "") }),
+            h("td", { text: num1(p.chao1_estimated_total) }),
+            h("td", { text: p.chao1_ci_95_low != null
+                             ? "[" + num1(p.chao1_ci_95_low) + ", " + num1(p.chao1_ci_95_high) + "]"
+                             : "\u2014" }),
+            h("td", null, [promptCell])
+          ]));
+        });
+
+        // ---- Per-type saturation history ----
+        // Always render when saturation_history is present; the
+        // unified per-arm stop logic populates it for every run.
+        if (gt.saturation_history && gt.saturation_history.length) {
+          var satPanel = document.getElementById("gt-saturation-panel");
+          satPanel.style.display = "block";
+          var hist = gt.saturation_history || [];
+          var allSat = gt.saturated_types || [];
+          var seedTotal = (hist.length && hist[0])
+            ? (allSat.length + (hist[0].active_types_for_next_pass || []).length)
+            : allSat.length;
+          document.getElementById("gt-saturation-summary").textContent =
+            "Saturated " + allSat.length + (seedTotal ? " / " + seedTotal : "") +
+            " seed type(s)" +
+            (allSat.length ? ": " + allSat.join(", ") : ".");
+          var satBody = document.getElementById("gt-saturation-body");
+          if (!hist.length) {
+            satBody.appendChild(h("tr", null, [
+              h("td", { colspan: "5", class: "muted",
+                        text: "(no per-pass saturation events recorded)" })
+            ]));
+          } else {
+            hist.forEach(function (p) {
+              var newly = (p.newly_saturated || []).join(", ") || "\u2014";
+              var totalArr = p.saturated_total || [];
+              var totalCell = (totalArr.length ? totalArr.join(", ") + " (" + totalArr.length + ")" : "\u2014");
+              var activeArr = p.active_types_for_next_pass || [];
+              var activeCell = (activeArr.length ? activeArr.join(", ") + " (" + activeArr.length + ")" : "\u2014 (all saturated)");
+              // Per-arm column. ``newly_saturated_arms`` is an array of
+              // {scope_kind, scope_label, type_key, status, n_observed,
+              //  good_turing_missing_mass, k} entries; we render a short
+              // "<scope_label>: <type> (<status>)" list capped at 4
+              // entries per cell to keep the table readable. The
+              // cumulative arm count is shown as a chip on the right.
+              var armsArr = p.newly_saturated_arms || [];
+              var armsTotal = (typeof p.saturated_arms_total === "number")
+                ? p.saturated_arms_total : null;
+              var armsCell;
+              if (!armsArr.length && armsTotal == null) {
+                armsCell = "\u2014";
+              } else {
+                var head = armsArr.slice(0, 4).map(function (a) {
+                  return (a.scope_label || "(?)") + ": " + (a.type_key || "?")
+                    + " (" + (a.status || "?") + ")";
+                }).join("; ");
+                var more = armsArr.length > 4
+                  ? " \u2026 +" + (armsArr.length - 4) + " more" : "";
+                var totalChip = (armsTotal != null)
+                  ? "  [\u03A3 " + armsTotal + "]" : "";
+                armsCell = (head ? head + more : "\u2014") + totalChip;
+              }
+              satBody.appendChild(h("tr", null, [
+                h("td", { text: "#" + p.run_id + " (" + p.runs_so_far + "/" +
+                                 (gt.num_runs_completed || "?") + ")" }),
+                h("td", { text: newly }),
+                h("td", { text: totalCell }),
+                h("td", { text: activeCell }),
+                h("td", { text: armsCell, class: "muted",
+                          style: "font-size:11.5px;" })
+              ]));
+            });
+          }
+        }
+
+        // ---- Per error type / per source tables ----
+        function fillBreakdown(tbodyId, data) {
+          var tb = document.getElementById(tbodyId);
+          var keys = Object.keys(data || {}).sort();
+          if (!keys.length) {
+            tb.appendChild(h("tr", null, [
+              h("td", { colspan: "6", class: "muted", text: "(no data)" })
+            ]));
+            return;
+          }
+          keys.forEach(function (k) {
+            var v = data[k] || {};
+            var c = v.chao1 || {};
+            var f = v.estimated_fn_rate || {};
+            tb.appendChild(h("tr", null, [
+              h("td", { text: k }),
+              h("td", { text: String(v.n_observed != null ? v.n_observed : "?") }),
+              h("td", { text: pctStr(v.good_turing_missing_mass) }),
+              h("td", { text: pctStr(f.point) +
+                             (f.ci_95 ? " [" + pctStr(f.ci_95[0]) + ", " + pctStr(f.ci_95[1]) + "]" : "") }),
+              h("td", { text: num1(c.estimated_total) }),
+              h("td", { text: c.ci_95 ? "[" + num1(c.ci_95[0]) + ", " + num1(c.ci_95[1]) + "]" : "\u2014" })
+            ]));
+          });
+        }
+        fillBreakdown("gt-per-type-body", gt.per_error_type);
+        // Hide per-source when there's only one CSV (redundant with overall).
+        if (gt.per_source && Object.keys(gt.per_source).length >= 2) {
+          fillBreakdown("gt-per-source-body", gt.per_source);
+        } else {
+          document.getElementById("gt-per-source-panel").style.display = "none";
+        }
+
+        // ---- Per arm (scope x error_type) ----
+        renderPerArmTable(gt.per_arm);
+
+        // ---- Variant diffs per pass ----
+        var varsContainer = document.getElementById("gt-variants-container");
+        var varsPerRun = gt.variant_records_per_run || [];
+        if (!gt.prompt_ensemble || !varsPerRun.length) {
+          document.getElementById("gt-variants-panel").style.display = "none";
+        } else {
+          varsPerRun.forEach(function (runBlock) {
+            var recs = runBlock.records || [];
+            var okCount = recs.filter(function (r) { return r.ok; }).length;
+            var summaryEl = h("summary", null, [
+              "Pass #" + runBlock.run_id + " \u2014 " + recs.length + " type(s), ",
+              h("span", { class: "chip", text: okCount + " rewritten" }),
+              okCount < recs.length
+                ? h("span", { class: "chip", text: (recs.length - okCount) + " fallback" })
+                : null
+            ]);
+            var det = h("details");
+            det.appendChild(summaryEl);
+            var list = h("div", { class: "gt-variant-list" });
+            recs.forEach(function (r) {
+              list.appendChild(renderVariantRecord(r));
+            });
+            det.appendChild(list);
+            varsContainer.appendChild(det);
+          });
+        }
+      }
+
+      function renderPerArmTable(perArm) {
+        var panel = document.getElementById("gt-per-arm-panel");
+        if (!perArm || !Array.isArray(perArm.arms) || !perArm.arms.length) {
+          panel.style.display = "none";
+          return;
+        }
+        panel.style.display = "block";
+        var arms = perArm.arms.slice();
+        // Sort: insufficient/active first (most actionable), then by
+        // descending p_miss so the riskiest arms surface near the top.
+        var STATUS_RANK = {
+          insufficient: 0, active: 1, exhausted: 2,
+          saturated: 3, not_applicable: 4
+        };
+        arms.sort(function (a, b) {
+          var ra = STATUS_RANK[a.status];
+          var rb = STATUS_RANK[b.status];
+          if (ra == null) ra = 99;
+          if (rb == null) rb = 99;
+          if (ra !== rb) return ra - rb;
+          var pa = a.good_turing_missing_mass != null ? a.good_turing_missing_mass : -1;
+          var pb = b.good_turing_missing_mass != null ? b.good_turing_missing_mass : -1;
+          return pb - pa;
+        });
+        // Summary line: counts by status.
+        var counts = {};
+        arms.forEach(function (a) {
+          counts[a.status] = (counts[a.status] || 0) + 1;
+        });
+        var sumParts = [];
+        ["saturated", "active", "exhausted", "insufficient", "not_applicable"]
+          .forEach(function (st) {
+            if (counts[st]) sumParts.push(counts[st] + " " + st);
+          });
+        document.getElementById("gt-per-arm-summary").textContent =
+          arms.length + " arm(s) at scope_kind=" +
+          (perArm.scope_kind || "?") + ": " +
+          (sumParts.length ? sumParts.join(", ") : "(no statuses set)");
+
+        var STATUS_CHIP_CLASS = {
+          saturated: "chip",
+          active: "chip",
+          exhausted: "chip danger",
+          insufficient: "chip",
+          not_applicable: "chip"
+        };
+        var tb = document.getElementById("gt-per-arm-body");
+        tb.replaceChildren();
+        arms.forEach(function (a) {
+          var scopeId = Array.isArray(a.scope_id) ? a.scope_id.join(" / ") : "";
+          var c = a.chao1 || {};
+          var f = a.estimated_fn_rate || {};
+          var fnText = pctStr(f.point) +
+            (f.ci_95
+              ? " [" + pctStr(f.ci_95[0]) + ", " + pctStr(f.ci_95[1]) + "]"
+              : "");
+          var statusChip = h("span", {
+            class: STATUS_CHIP_CLASS[a.status] || "chip",
+            text: a.status || "?"
+          });
+          tb.appendChild(h("tr", null, [
+            h("td", { text: scopeId || (a.scope_kind || "?") }),
+            h("td", null, [h("code", { text: a.error_type || "?" })]),
+            h("td", { text: String(a.num_runs != null ? a.num_runs : "?") }),
+            h("td", { text: String(a.n_observed != null ? a.n_observed : "?") }),
+            h("td", { text: pctStr(a.good_turing_missing_mass) }),
+            h("td", { text: fnText }),
+            h("td", { text: num1(c.estimated_total) }),
+            h("td", null, [statusChip])
+          ]));
+        });
+      }
+
+      function renderVariantRecord(r) {
+        var header = h("div", { class: "gt-variant-header" }, [
+          h("code", { text: r.type_key }),
+          " ",
+          r.ok
+            ? h("span", { class: "chip", text: "ok" })
+            : h("span", { class: "chip danger", text: "fallback" +
+                (r.error ? " \u2014 " + r.error : "") })
+        ]);
+        function pair(label, seed, variant) {
+          var left = h("div", { class: "gt-variant-side" }, [
+            h("div", { class: "muted", text: "seed " + label }),
+            h("pre", { class: "gt-variant-pre", text: String(seed || "") })
+          ]);
+          var right = h("div", { class: "gt-variant-side" }, [
+            h("div", { class: "muted", text: "variant " + label }),
+            h("pre", { class: "gt-variant-pre", text: String(variant || "") })
+          ]);
+          return h("div", { class: "gt-variant-pair" }, [left, right]);
+        }
+        return h("div", { class: "gt-variant-card" }, [
+          header,
+          pair("description", r.seed_description, r.variant_description),
+          pair("notes", r.seed_notes, r.variant_notes),
+          pair("example", r.seed_example, r.variant_example)
+        ]);
+      }
+
+      function pctStr(p) {
+        if (p == null || isNaN(p)) return "\u2014";
+        return (100.0 * p).toFixed(2) + "%";
+      }
+      function num1(n) {
+        if (n == null || isNaN(n)) return "\u2014";
+        return Number(n).toFixed(1);
+      }
+
+      // Reveal the Good-Turing tab if (and only if) this run has GT data.
+      (function maybeShowGoodTuringTab() {
+        var gt = DATA.good_turing;
+        if (gt && gt.enabled) {
+          document.getElementById("view-gt-btn").style.display = "";
+        }
+      })();
+
+      // ==================================================================
+      // Clusters view
+      // ==================================================================
+
+      // ---- Source-scoped counters / rendering ------------------------
+      // All metric cards and charts are recomputed whenever the active
+      // source tab changes, so switching tabs gives a fully scoped view
+      // (cards, charts, and tables all agree).
+
+      function incr(map, key) { map[key] = (map[key] || 0) + 1; }
+
+      function computeClusterCounters(list) {
+        var out = {
+          total: list.length,
+          multi: 0, single: 0, fp: 0,
+          primary: {}, confidence: {},
+          columns: {}, source: {}
+        };
+        list.forEach(function (c) {
+          if ((c.evidence_count || 0) >= 2) out.multi++; else out.single++;
+          if (clusterIsFP(c)) out.fp++;
+          incr(out.primary, clusterPrimary(c));
+          incr(out.confidence, clusterConfidence(c));
+          if (c.source) incr(out.source, c.source);
+          (c.columns || []).forEach(function (col) { incr(out.columns, col); });
+        });
+        return out;
+      }
+
+      function computeIssueCounters(list) {
+        var out = {
+          total: list.length,
+          error_type: {}, error_type_name: {},
+          category: {}, columns: {}, source: {}
+        };
+        list.forEach(function (i) {
+          incr(out.error_type, i.error_type || "unknown");
+          incr(out.error_type_name, i.error_type_name || i.error_type || "unknown");
+          incr(out.category, i.error_type_category || i.category || "unknown");
+          if (i.source) incr(out.source, i.source);
+          (i.columns || []).forEach(function (col) { incr(out.columns, col); });
+        });
+        return out;
+      }
+
+      function counterRows(counter) {
+        return Object.keys(counter || {})
+          .map(function (k) { return { key: k, count: counter[k] }; })
+          .sort(function (a, b) { return b.count - a.count; });
+      }
+
+      function renderClusterCards(scopedClusters, cc) {
+        var container = document.getElementById("cluster-cards");
+        container.innerHTML = "";
+        var cards = [
+          { label: "Total clusters", value: cc.total, cls: "" },
+          { label: "Multi-type", value: cc.multi, cls: "" },
+          { label: "Single-type", value: cc.single, cls: "" },
+          { label: "Likely false positive", value: cc.fp, cls: "fp" }
+        ];
+        cards.forEach(function (card) {
+          container.appendChild(h("div", { class: "card " + card.cls }, [
+            h("div", { class: "label", text: card.label }),
+            h("div", { class: "value", text: String(card.value) })
+          ]));
+        });
+      }
+
+      function renderClusterCharts(cc) {
+        var srcPanel = document.getElementById("panel-cluster-source");
+        if (IS_MULTI_SOURCE && !activeSource) {
+          var srcRows = counterRows(cc.source);
+          if (srcRows.length) {
+            srcPanel.style.display = "";
+            renderBars(document.getElementById("chart-cluster-source"), srcRows,
+                       function () { return "#60a5fa"; });
+          } else {
+            srcPanel.style.display = "none";
+          }
+        } else {
+          srcPanel.style.display = "none";
+        }
+
+        renderBars(
+          document.getElementById("chart-cluster-primary"),
+          counterRows(cc.primary),
+          function () { return "#f472b6"; }
+        );
+        var confRows = counterRows(cc.confidence).sort(function (a, b) {
+          return (CONF_ORDER[a.key] || 99) - (CONF_ORDER[b.key] || 99);
+        });
+        renderBars(
+          document.getElementById("chart-cluster-confidence"),
+          confRows,
+          function (k) { return CONF_COLOR[k] || CONF_COLOR.unknown; }
+        );
+        renderBars(
+          document.getElementById("chart-cluster-columns"),
+          counterRows(cc.columns).slice(0, 15),
+          function () { return "#60a5fa"; }
+        );
+      }
+
+      // ---- Cluster filters -------------------------------------------
+      var cPrimary = {}, cConf = {}, cSource = {};
+      clusters.forEach(function (c) {
+        cPrimary[clusterPrimary(c)] = true;
+        cConf[clusterConfidence(c)] = true;
+        if (c.source) cSource[c.source] = true;
+      });
+      function fillSelect(id, keys, sortFn) {
+        var sel = document.getElementById(id);
+        var list = Object.keys(keys);
+        if (sortFn) list.sort(sortFn); else list.sort();
+        list.forEach(function (k) {
+          sel.appendChild(h("option", { value: k, text: k }));
+        });
+      }
+      // Source-filter dropdowns (clusters + detections). For
+      // multi-workbook corpora we render <optgroup>s per workbook with
+      // a synthetic "workbook:<name>" entry at the top of each group
+      // so the user can scope to all CSVs of one logical table at
+      // once. Filter logic below handles the prefix.
+      function fillSourceFilter(id, keys) {
+        var sel = document.getElementById(id);
+        var seen = Object.keys(keys);
+        if (!IS_MULTI_WORKBOOK) {
+          seen.sort();
+          seen.forEach(function (k) {
+            // value=full source (stable filter key); text=short label.
+            var opt = h("option", { value: k, text: shortSource(k) });
+            opt.title = k;
+            sel.appendChild(opt);
+          });
+          return;
+        }
+        var byWb = {};
+        var orphans = [];
+        seen.forEach(function (s) {
+          var wb = workbookOf(s);
+          if (wb && (WORKBOOK_TO_SOURCES[wb] || []).length >= 2) {
+            (byWb[wb] = byWb[wb] || []).push(s);
+          } else {
+            orphans.push(s);
+          }
+        });
+        Object.keys(byWb).sort().forEach(function (wb) {
+          var og = document.createElement("optgroup");
+          og.label = wb + "  \u2014  " + byWb[wb].length + " files";
+          var allOpt = h("option", { value: "workbook:" + wb, text: "(all in " + wb + ")" });
+          og.appendChild(allOpt);
+          byWb[wb].sort().forEach(function (s) {
+            og.appendChild(h("option", { value: s, text: s }));
+          });
+          sel.appendChild(og);
+        });
+        if (orphans.length) {
+          var og2 = document.createElement("optgroup");
+          og2.label = "(other)";
+          orphans.sort().forEach(function (s) {
+            og2.appendChild(h("option", { value: s, text: s }));
+          });
+          sel.appendChild(og2);
+        }
+      }
+      function sourceFilterMatches(filterValue, src) {
+        if (!filterValue) return true;
+        if (filterValue.indexOf("workbook:") === 0) {
+          return workbookOf(src) === filterValue.slice("workbook:".length);
+        }
+        return (src || "") === filterValue;
+      }
+      fillSelect("cluster-primary-filter", cPrimary);
+      fillSelect("cluster-confidence-filter", cConf, function (a, b) {
+        return (CONF_ORDER[a] || 99) - (CONF_ORDER[b] || 99);
+      });
+      if (IS_MULTI_SOURCE) {
+        fillSourceFilter("cluster-source-filter", cSource);
+      }
+
+      var cQ = document.getElementById("cluster-q");
+      var cSourceEl = document.getElementById("cluster-source-filter");
+      var cPrimaryEl = document.getElementById("cluster-primary-filter");
+      var cConfEl = document.getElementById("cluster-confidence-filter");
+      var cFpEl = document.getElementById("cluster-fp-filter");
+      var cEvEl = document.getElementById("cluster-evidence-filter");
+      var cBody = document.getElementById("clusters-body");
+      var cEmpty = document.getElementById("clusters-empty");
+      var cCountLabel = document.getElementById("cluster-count-label");
+
+      var cSort = { key: "row", dir: "asc" };
+
+      function cSortVal(c, key) {
+        switch (key) {
+          case "confidence": return CONF_ORDER[clusterConfidence(c)] != null ? CONF_ORDER[clusterConfidence(c)] : 9;
+          case "evidence_count": return c.evidence_count || 0;
+          case "primary_error_type": return clusterPrimary(c);
+          case "explanation": return clusterExplanation(c);
+          case "fix": return clusterFix(c);
+          case "error_types": return (c.error_types || []).join(",");
+          case "row": return c.row == null ? 1 << 30 : c.row;
+          case "source": return displaySource(c.source);
+          case "annot_label": return (getAnnot("cluster", c.cluster_id) || {}).label || "~";
+          default: return c[key];
+        }
+      }
+      function cCmp(a, b, key) {
+        var va = cSortVal(a, key), vb = cSortVal(b, key);
+        if (typeof va === "number" && typeof vb === "number") return va - vb;
+        if (va == null) return -1;
+        if (vb == null) return 1;
+        return String(va).localeCompare(String(vb));
+      }
+
+      function applyClusterFilters() {
+        var q = cQ.value.trim().toLowerCase();
+        var primary = cPrimaryEl.value;
+        var conf = cConfEl.value;
+        var fp = cFpEl.value;
+        var ev = cEvEl.value;
+
+        // Tab wins over the dropdown; the dropdown is kept in sync /
+        // disabled when a tab is active.
+        var src = activeSource || (IS_MULTI_SOURCE ? cSourceEl.value : "");
+
+        var annotFilter = annotFilterEl ? annotFilterEl.value : "";
+
+        var filtered = clusters.filter(function (c) {
+          if (src && !sourceFilterMatches(src, c.source)) return false;
+          if (primary && clusterPrimary(c) !== primary) return false;
+          if (conf && clusterConfidence(c) !== conf) return false;
+          if (fp === "exclude" && clusterIsFP(c)) return false;
+          if (fp === "only" && !clusterIsFP(c)) return false;
+          if (ev === "multi" && c.evidence_count < 2) return false;
+          if (ev === "single" && c.evidence_count !== 1) return false;
+          if (annotFilter) {
+            var lbl = (getAnnot("cluster", c.cluster_id) || {}).label || "";
+            // Filter dropdown values are class suffixes (err/amb/ok)
+            // or "unlabeled"; convert class -> label for the compare.
+            if (annotFilter === "unlabeled") {
+              if (lbl) return false;
+            } else {
+              if (lbl !== classToLabel(annotFilter)) return false;
+            }
+          }
+          if (!q) return true;
+          var detHay = (c.detections || []).map(function (d) {
+            return (d.error_type || "") + " " + (d.observed || "") + " " + (d.explanation || "") + " " + (d.suggested_fix || "");
+          }).join(" | ");
+          var syn = c.synthesis || {};
+          var hay = [
+            String(c.row == null ? "" : c.row),
+            c.source || "",
+            c.cluster_id || "",
+            clusterPrimary(c),
+            (c.error_types || []).join(" "),
+            (c.columns || []).join(" "),
+            syn.canonical_explanation || "",
+            syn.canonical_fix || "",
+            syn.root_cause || "",
+            syn.reviewer_note || "",
+            detHay
+          ].join(" \u0001 ").toLowerCase();
+          return hay.indexOf(q) !== -1;
+        });
+
+        filtered.sort(function (a, b) {
+          var c = cCmp(a, b, cSort.key);
+          return cSort.dir === "asc" ? c : -c;
+        });
+
+        renderClusters(filtered);
+      }
+
+      function renderRowValuesGrid(rowValues) {
+        rowValues = rowValues || {};
+        var keys = Object.keys(rowValues).sort();
+        if (!keys.length) {
+          return h("div", { class: "muted", text: "(no row values captured)" });
+        }
+        var grid = h("div", { class: "row-values-grid" });
+        keys.forEach(function (k) {
+          var v = rowValues[k];
+          var empty = v === "" || v == null;
+          grid.appendChild(h("div", { class: "k", text: k }));
+          grid.appendChild(h("div", {
+            class: empty ? "v empty" : "v",
+            text: empty ? "(empty)" : String(v)
+          }));
+        });
+        return grid;
+      }
+
+      function renderDetection(det, isPrimary) {
+        var pill = h("span", {
+          class: "pill etype",
+          title: det.error_type || "",
+          text: det.error_type_name || det.error_type || "unknown"
+        });
+        var head = h("div", { class: "det-head" }, [
+          pill,
+          h("span", {
+            class: "pill cat",
+            text: det.error_type_category || "unknown"
+          }),
+          isPrimary
+            ? h("span", { class: "pill fp", text: "primary" })
+            : null
+        ]);
+        var fields = [];
+        if (det.columns && det.columns.length) {
+          var cols = h("div", { class: "columns-chips" },
+            det.columns.map(function (c) { return h("span", { class: "chip", text: c }); })
+          );
+          fields.push(h("div", { class: "det-field" }, [
+            h("span", { class: "k", text: "columns" }), cols
+          ]));
+        }
+        if (det.observed) {
+          fields.push(h("div", { class: "det-field" }, [
+            h("span", { class: "k", text: "observed" }),
+            document.createTextNode(det.observed)
+          ]));
+        }
+        if (det.affected_rows && det.affected_rows.length > 1) {
+          fields.push(h("div", { class: "det-field" }, [
+            h("span", { class: "k", text: "affected rows" }),
+            document.createTextNode(det.affected_rows.join(", "))
+          ]));
+        }
+        if (det.explanation) {
+          fields.push(h("div", { class: "det-field" }, [
+            h("span", { class: "k", text: "explanation" }),
+            document.createTextNode(det.explanation)
+          ]));
+        }
+        if (det.suggested_fix) {
+          fields.push(h("div", { class: "det-field" }, [
+            h("span", { class: "k", text: "suggested_fix" }),
+            document.createTextNode(det.suggested_fix)
+          ]));
+        }
+        return h("div", { class: "detection-card" }, [head].concat(fields));
+      }
+
+      function renderSynthesisBlock(cluster) {
+        var syn = cluster.synthesis;
+        if (!syn) {
+          if (cluster.evidence_count === 1) {
+            return h("div", { class: "muted", text: "Single-type cluster - Phase-B synthesis skipped (nothing to reconcile)." });
+          }
+          return h("div", { class: "muted", text: "No synthesis available." });
+        }
+        var lines = [];
+        if (syn.error) {
+          lines.push(h("div", { class: "row-line error-line" }, [
+            h("span", { class: "k", text: "LLM error" }),
+            document.createTextNode(syn.error)
+          ]));
+        }
+        if (syn.parse_error) {
+          lines.push(h("div", { class: "row-line error-line" }, [
+            h("span", { class: "k", text: "Parse error" }),
+            document.createTextNode(syn.parse_error)
+          ]));
+        }
+        if (syn.primary_error_type) {
+          lines.push(h("div", { class: "row-line" }, [
+            h("span", { class: "k", text: "Primary" }),
+            document.createTextNode(syn.primary_error_type)
+          ]));
+        }
+        if (syn.supporting_error_types && syn.supporting_error_types.length) {
+          lines.push(h("div", { class: "row-line" }, [
+            h("span", { class: "k", text: "Supporting" }),
+            document.createTextNode(syn.supporting_error_types.join(", "))
+          ]));
+        }
+        if (syn.root_cause) {
+          lines.push(h("div", { class: "row-line" }, [
+            h("span", { class: "k", text: "Root cause" }),
+            document.createTextNode(syn.root_cause)
+          ]));
+        }
+        if (syn.canonical_explanation) {
+          lines.push(h("div", { class: "row-line" }, [
+            h("span", { class: "k", text: "Explanation" }),
+            document.createTextNode(syn.canonical_explanation)
+          ]));
+        }
+        if (syn.canonical_fix) {
+          lines.push(h("div", { class: "row-line" }, [
+            h("span", { class: "k", text: "Fix" }),
+            document.createTextNode(syn.canonical_fix)
+          ]));
+        }
+        if (syn.confidence) {
+          lines.push(h("div", { class: "row-line" }, [
+            h("span", { class: "k", text: "Confidence" }),
+            document.createTextNode(syn.confidence)
+          ]));
+        }
+        if (syn.is_likely_false_positive) {
+          lines.push(h("div", { class: "row-line" }, [
+            h("span", { class: "pill fp", text: "likely false positive" })
+          ]));
+        }
+        if (syn.reviewer_note) {
+          lines.push(h("div", { class: "row-line" }, [
+            h("span", { class: "k", text: "Reviewer note" }),
+            document.createTextNode(syn.reviewer_note)
+          ]));
+        }
+        return h("div", { class: "synthesis-block" }, lines);
+      }
+
+      function renderClusters(rows) {
+        cBody.innerHTML = "";
+        if (!rows.length) {
+          cEmpty.style.display = "";
+          cCountLabel.textContent = "0 of " + clusters.length + " clusters";
+          return;
+        }
+        cEmpty.style.display = "none";
+        cCountLabel.textContent = rows.length + " of " + clusters.length + " clusters";
+
+        rows.forEach(function (c, idx) {
+          var primary = clusterPrimary(c);
+          var confidence = clusterConfidence(c);
+          var explanation = clusterExplanation(c);
+          var fix = clusterFix(c);
+
+          var primaryPill = h("span", {
+            class: "pill etype",
+            title: primary,
+            text: primary
+          });
+          var fpPill = clusterIsFP(c)
+            ? h("span", { class: "pill fp", text: "FP?" })
+            : null;
+
+          var etypeChips = h("div", { class: "etype-chips" },
+            (c.error_types || []).map(function (k) {
+              var isPrimary = k === primary;
+              return h("span", {
+                class: isPrimary ? "chip primary" : "chip",
+                title: k,
+                text: k
+              });
+            })
+          );
+
+          var mainCells = [];
+          if (IS_MULTI_SOURCE) {
+            mainCells.push(h("td", null, [h("span", {
+              class: "pill source",
+              title: displaySource(c.source) || "",
+              text: displaySource(c.source) || "\u2014"
+            })]));
+          } else {
+            mainCells.push(h("td", { style: "display:none" }));
+          }
+          mainCells.push(
+            h("td", { class: "row-num", text: c.row == null ? "\u2014" : String(c.row) }),
+            h("td", { class: "primary-cell" }, [primaryPill, fpPill ? h("span", { text: " " }) : null, fpPill]),
+            h("td", null, [etypeChips]),
+            h("td", { class: "row-num", text: String(c.evidence_count || 0) }),
+            h("td", null, [h("span", {
+              class: "pill confidence-" + (CONF_ORDER[confidence] != null ? confidence : "unknown"),
+              text: confidence
+            })]),
+            h("td", { class: "expl", text: explanation }),
+            h("td", { class: "fix", text: fix }),
+            h("td", { class: "annot-cell" }, [
+              buildAnnotControls("cluster", c.cluster_id, { llmComment: explanation })
+            ])
+          );
+          var annotLabel = (getAnnot("cluster", c.cluster_id) || {}).label || "";
+          var annotCls = labelClass(annotLabel);
+          var mainRow = h("tr", {
+            class: "main" + (annotCls ? " annot-" + annotCls : "")
+          }, mainCells);
+
+          var drillRow = h("tr", { class: "drill" });
+          // colspan accounts for the (possibly hidden) source column +
+          // the Review column.
+          var drillCell = h("td", { colspan: "9" });
+
+          // Synthesis section
+          drillCell.appendChild(h("div", { class: "drill-section" }, [
+            h("h3", { text: "Synthesis (Phase B)" }),
+            renderSynthesisBlock(c)
+          ]));
+
+          // Row values
+          drillCell.appendChild(h("div", { class: "drill-section" }, [
+            h("h3", { text: "Source row values" }),
+            renderRowValuesGrid(c.row_values)
+          ]));
+
+          // Per-type detections
+          var detWrapper = h("div", { class: "drill-section" }, [
+            h("h3", { text: c.evidence_count + " per-type detection(s)" })
+          ]);
+          (c.detections || []).forEach(function (det) {
+            detWrapper.appendChild(renderDetection(det, det.error_type === primary));
+          });
+          drillCell.appendChild(detWrapper);
+
+          drillRow.appendChild(drillCell);
+
+          mainRow.addEventListener("click", function () {
+            drillRow.classList.toggle("open");
+          });
+
+          cBody.appendChild(mainRow);
+          cBody.appendChild(drillRow);
+        });
+      }
+
+      document.querySelectorAll("#clusters-table th[data-sort]").forEach(function (th) {
+        th.addEventListener("click", function () {
+          var key = th.getAttribute("data-sort");
+          if (cSort.key === key) {
+            cSort.dir = cSort.dir === "asc" ? "desc" : "asc";
+          } else {
+            cSort.key = key;
+            cSort.dir = "asc";
+          }
+          document.querySelectorAll("#clusters-table th[data-sort]").forEach(function (t) {
+            t.classList.remove("sort-asc", "sort-desc");
+          });
+          th.classList.add(cSort.dir === "asc" ? "sort-asc" : "sort-desc");
+          applyClusterFilters();
+        });
+      });
+
+      [cQ, cPrimaryEl, cConfEl, cFpEl, cEvEl, cSourceEl].forEach(function (el) {
+        if (!el) return;
+        el.addEventListener(el.tagName === "SELECT" ? "change" : "input", applyClusterFilters);
+      });
+
+      // ==================================================================
+      // Raw detections view
+      // ==================================================================
+
+      function renderRawCards(scopedIssues, ic) {
+        var container = document.getElementById("raw-cards");
+        container.innerHTML = "";
+        var cards = [
+          { label: "Total detections", value: ic.total, cls: "" },
+          // Chunk-level diagnostics stay run-wide (they're not
+          // per-source in summary.json).
+          { label: "Chunks with errors", value: summary.chunks_with_errors || 0, cls: "" },
+          { label: "Parse errors", value: summary.chunks_with_parse_errors || 0, cls: "" }
+        ];
+        cards.forEach(function (c) {
+          container.appendChild(h("div", { class: "card " + c.cls }, [
+            h("div", { class: "label", text: c.label }),
+            h("div", { class: "value", text: String(c.value) })
+          ]));
+        });
+      }
+
+      function renderRawCharts(ic) {
+        var srcPanel = document.getElementById("panel-issues-source");
+        if (IS_MULTI_SOURCE && !activeSource) {
+          var srcRows = counterRows(ic.source);
+          if (srcRows.length) {
+            srcPanel.style.display = "";
+            renderBars(document.getElementById("chart-issues-source"), srcRows,
+                       function () { return "#60a5fa"; });
+          } else {
+            srcPanel.style.display = "none";
+          }
+        } else {
+          srcPanel.style.display = "none";
+        }
+
+        // Prefer the human-readable name when present so the chart
+        // labels match the rest of the UI.
+        renderBars(
+          document.getElementById("chart-error-type"),
+          counterRows(ic.error_type_name),
+          function () { return "#f472b6"; }
+        );
+        renderBars(
+          document.getElementById("chart-category"),
+          counterRows(ic.category),
+          function () { return "#818cf8"; }
+        );
+        renderBars(
+          document.getElementById("chart-columns"),
+          counterRows(ic.columns).slice(0, 15),
+          function () { return "#60a5fa"; }
+        );
+      }
+
+      var catSet = {}, colSet = {}, etypeSet = {}, srcSet = {};
+      issues.forEach(function (i) {
+        catSet[i.error_type_category || i.category || "unknown"] = true;
+        etypeSet[i.error_type || "unknown"] = true;
+        (i.columns || []).forEach(function (c) { colSet[c] = true; });
+        if (i.source) srcSet[i.source] = true;
+      });
+      fillSelect("etype-filter", etypeSet);
+      fillSelect("cat-filter", catSet);
+      fillSelect("col-filter", colSet);
+      if (IS_MULTI_SOURCE) {
+        fillSourceFilter("source-filter", srcSet);
+      }
+
+      var qEl = document.getElementById("q");
+      var srcEl = document.getElementById("source-filter");
+      var etypeEl = document.getElementById("etype-filter");
+      var catEl = document.getElementById("cat-filter");
+      var colEl = document.getElementById("col-filter");
+      var bodyEl = document.getElementById("issues-body");
+      var emptyEl = document.getElementById("empty");
+      var countEl = document.getElementById("count-label");
+
+      var sortState = { key: "row", dir: "asc" };
+
+      function cmp(a, b, key) {
+        if (key === "columns") {
+          return (a.columns || []).join(",").localeCompare((b.columns || []).join(","));
+        }
+        if (key === "source") {
+          return String(a.source || "").localeCompare(String(b.source || ""));
+        }
+        if (key === "annot_label") {
+          var la = (getAnnot("detection", a._id) || {}).label || "~";
+          var lb = (getAnnot("detection", b._id) || {}).label || "~";
+          return la.localeCompare(lb);
+        }
+        var va = a[key], vb = b[key];
+        if (typeof va === "number" && typeof vb === "number") return va - vb;
+        if (va == null) return -1;
+        if (vb == null) return 1;
+        return String(va).localeCompare(String(vb));
+      }
+
+      function applyRawFilters() {
+        var q = qEl.value.trim().toLowerCase();
+        var etype = etypeEl.value;
+        var cat = catEl.value;
+        var col = colEl.value;
+        var src = activeSource || (IS_MULTI_SOURCE ? srcEl.value : "");
+
+        var annotFilter = annotFilterEl ? annotFilterEl.value : "";
+
+        var filtered = issues.filter(function (i) {
+          if (src && !sourceFilterMatches(src, i.source)) return false;
+          if (etype && (i.error_type || "unknown") !== etype) return false;
+          if (cat && (i.error_type_category || i.category || "unknown") !== cat) return false;
+          if (col && (i.columns || []).indexOf(col) === -1) return false;
+          if (annotFilter) {
+            var lbl = (getAnnot("detection", i._id) || {}).label || "";
+            if (annotFilter === "unlabeled") {
+              if (lbl) return false;
+            } else {
+              if (lbl !== classToLabel(annotFilter)) return false;
+            }
+          }
+          if (!q) return true;
+          var hay = [
+            String(i.row || ""),
+            i.source || "",
+            i.observed || "",
+            i.explanation || "",
+            i.suggested_fix || "",
+            i.error_type || "",
+            i.error_type_name || "",
+            (i.columns || []).join(" ")
+          ].join(" \u0001 ").toLowerCase();
+          return hay.indexOf(q) !== -1;
+        });
+
+        filtered.sort(function (a, b) {
+          var c = cmp(a, b, sortState.key);
+          return sortState.dir === "asc" ? c : -c;
+        });
+
+        renderRaw(filtered);
+      }
+
+      function renderRaw(rows) {
+        bodyEl.innerHTML = "";
+        if (!rows.length) {
+          emptyEl.style.display = "";
+          countEl.textContent = "0 of " + issues.length + " detections";
+          return;
+        }
+        emptyEl.style.display = "none";
+        countEl.textContent = rows.length + " of " + issues.length + " detections";
+
+        rows.forEach(function (i) {
+          var chips = h("div", { class: "columns-chips" },
+            (i.columns || []).map(function (c) { return h("span", { class: "chip", text: c }); })
+          );
+          var rowValues = h("div", { class: "row-values-grid" },
+            Object.keys(i.row_values || {}).map(function (k) {
+              var v = i.row_values[k];
+              var empty = v === "" || v == null;
+              return [
+                h("div", { class: "k", text: k }),
+                h("div", {
+                  class: empty ? "v empty" : "v",
+                  text: empty ? "(empty)" : String(v)
+                })
+              ];
+            }).reduce(function (acc, pair) { return acc.concat(pair); }, [])
+          );
+          var rvWrap = h("div", { class: "row-values", style: "display:none; margin-top:6px;" }, [rowValues]);
+          var obsChildren = [h("div", { text: i.observed || "" })];
+          if (i.affected_rows && i.affected_rows.length > 1) {
+            obsChildren.push(h("div", {
+              class: "muted",
+              style: "font-size:11px; margin-top:2px;",
+              text: "affected rows: " + i.affected_rows.join(", ")
+            }));
+          }
+          obsChildren.push(rvWrap);
+          var obs = h("td", { class: "obs" }, obsChildren);
+          var etypeLabel = i.error_type_name || i.error_type || "unknown";
+          var etypePill = h("span", {
+            class: "pill etype",
+            title: i.error_type || "",
+            text: etypeLabel
+          });
+          var catLabel = i.error_type_category || i.category || "unknown";
+          var sourceCell;
+          if (IS_MULTI_SOURCE) {
+            sourceCell = h("td", null, [h("span", {
+              class: "pill source",
+              title: displaySource(i.source) || "",
+              text: displaySource(i.source) || "\u2014"
+            })]);
+          } else {
+            sourceCell = h("td", { style: "display:none" });
+          }
+          var annotLabelRaw = (getAnnot("detection", i._id) || {}).label || "";
+          var annotClsRaw = labelClass(annotLabelRaw);
+          var tr = h("tr", {
+            class: "main" + (annotClsRaw ? " annot-" + annotClsRaw : "")
+          }, [
+            sourceCell,
+            h("td", { class: "row-num", text: i.row == null ? "\u2014" : String(i.row) }),
+            h("td", null, [etypePill]),
+            h("td", null, [h("span", { class: "pill cat", text: catLabel })]),
+            h("td", null, [chips]),
+            obs,
+            h("td", { class: "expl", text: i.explanation || "" }),
+            h("td", { class: "fix", text: i.suggested_fix || "" }),
+            h("td", { class: "annot-cell" }, [
+              buildAnnotControls("detection", i._id, { llmComment: i.explanation || "" })
+            ])
+          ]);
+          tr.addEventListener("click", function () {
+            rvWrap.style.display = rvWrap.style.display === "none" ? "block" : "none";
+          });
+          bodyEl.appendChild(tr);
+        });
+      }
+
+      document.querySelectorAll("#issues-table th[data-sort]").forEach(function (th) {
+        th.addEventListener("click", function () {
+          var key = th.getAttribute("data-sort");
+          if (sortState.key === key) {
+            sortState.dir = sortState.dir === "asc" ? "desc" : "asc";
+          } else {
+            sortState.key = key;
+            sortState.dir = "asc";
+          }
+          document.querySelectorAll("#issues-table th[data-sort]").forEach(function (t) {
+            t.classList.remove("sort-asc", "sort-desc");
+          });
+          th.classList.add(sortState.dir === "asc" ? "sort-asc" : "sort-desc");
+          applyRawFilters();
+        });
+      });
+
+      qEl.addEventListener("input", applyRawFilters);
+      etypeEl.addEventListener("change", applyRawFilters);
+      catEl.addEventListener("change", applyRawFilters);
+      colEl.addEventListener("change", applyRawFilters);
+      if (IS_MULTI_SOURCE && srcEl) {
+        srcEl.addEventListener("change", applyRawFilters);
+      }
+
+      // ==================================================================
+      // Source data view (false-negative review)
+      // ==================================================================
+      //
+      // The view embeds the raw analysed CSV and highlights every cell
+      // that any detection touched. Unflagged cells are
+      // plain, so a reviewer can skim the table for errors the model
+      // missed. A side panel shows the distinct-value distribution for
+      // any chosen column, which is the fastest way to eyeball missed
+      // typos / text / pattern variants.
+
+      // cellIndex[source][row][col] = array of detections on that cell.
+      // Built once on load. Detections with `affected_rows` are expanded
+      // across all listed rows so the highlight shows up everywhere the
+      // LLM marked the defect.
+      var cellIndex = (function () {
+        var idx = {};
+        function ensure(src, row) {
+          if (!idx[src]) idx[src] = {};
+          if (!idx[src][row]) idx[src][row] = {};
+          return idx[src][row];
+        }
+        issues.forEach(function (iss) {
+          var src = iss.source;
+          if (!src) return;
+          var rows = [];
+          if (Array.isArray(iss.affected_rows) && iss.affected_rows.length) {
+            iss.affected_rows.forEach(function (r) {
+              if (typeof r === "number") rows.push(r);
+            });
+          }
+          if (iss.row != null && rows.indexOf(iss.row) === -1) rows.push(iss.row);
+          if (!rows.length) return;
+          var cols = (iss.columns && iss.columns.length)
+            ? iss.columns
+            : ["__row__"]; // row-level finding with no column set
+          rows.forEach(function (r) {
+            cols.forEach(function (c) {
+              var cellMap = ensure(src, r);
+              if (!cellMap[c]) cellMap[c] = [];
+              cellMap[c].push(iss);
+            });
+          });
+        });
+        return idx;
+      })();
+
+      // ---- Tooltip (single shared element) ----------------------------
+      var tipEl = null;
+      function ensureTip() {
+        if (tipEl) return tipEl;
+        tipEl = h("div", { class: "cell-tooltip" });
+        tipEl.style.display = "none";
+        document.body.appendChild(tipEl);
+        return tipEl;
+      }
+      function showCellTooltip(target, detections) {
+        if (!detections || !detections.length) return;
+        var tt = ensureTip();
+        tt.innerHTML = "";
+        tt.appendChild(h("div", { class: "tt-row" }, [
+          h("span", { class: "k", text: "on this cell" }),
+          document.createTextNode(
+            detections.length + " detection" + (detections.length > 1 ? "s" : "")
+          )
+        ]));
+        detections.slice(0, 5).forEach(function (d) {
+          var line = h("div", { class: "tt-row" });
+          line.appendChild(h("strong", {
+            text: d.error_type_name || d.error_type || "unknown"
+          }));
+          if (d.explanation) {
+            line.appendChild(document.createElement("br"));
+            line.appendChild(document.createTextNode(d.explanation));
+          } else if (d.observed) {
+            line.appendChild(document.createElement("br"));
+            line.appendChild(document.createTextNode("observed: " + d.observed));
+          }
+          tt.appendChild(line);
+        });
+        if (detections.length > 5) {
+          tt.appendChild(h("div", { class: "tt-row muted", text: "... and " + (detections.length - 5) + " more" }));
+        }
+        var r = target.getBoundingClientRect();
+        tt.style.display = "block";
+        var top = r.bottom + 6;
+        var left = r.left;
+        // Flip above if it would go off the bottom.
+        if (top + tt.offsetHeight > window.innerHeight - 10) {
+          top = Math.max(10, r.top - tt.offsetHeight - 6);
+        }
+        // Keep in viewport horizontally.
+        left = Math.min(left, window.innerWidth - tt.offsetWidth - 10);
+        tt.style.top = top + "px";
+        tt.style.left = Math.max(10, left) + "px";
+      }
+      function hideCellTooltip() {
+        if (tipEl) tipEl.style.display = "none";
+      }
+      window.addEventListener("scroll", hideCellTooltip, true);
+      window.addEventListener("resize", hideCellTooltip);
+
+      // ---- Cell popover (review + false negative) --------------------
+      // Lets reviewers add labels directly from the Source data view.
+      // - Flagged cell: toggle TP / FP / highlight on each linked
+      //   detection and add a note.
+      // - Unflagged cell: create (or edit) a user false-negative record
+      //   capturing a note. That record lights the cell blue
+      //   so it's easy to spot on a second pass.
+      var popoverEl = null, popoverBackdrop = null;
+      function hideCellPopover() {
+        if (popoverEl) { popoverEl.remove(); popoverEl = null; }
+        if (popoverBackdrop) { popoverBackdrop.remove(); popoverBackdrop = null; }
+      }
+      function openCellPopover(anchor, ctx) {
+        hideCellPopover();
+        popoverBackdrop = h("div", { class: "popover-backdrop" });
+        popoverBackdrop.addEventListener("click", hideCellPopover);
+        document.body.appendChild(popoverBackdrop);
+
+        var pop = h("div", { class: "cell-popover" });
+        pop.addEventListener("click", function (e) { e.stopPropagation(); });
+
+        var title = ctx.detections.length
+          ? "Review detections on this cell"
+          : "Mark as false negative";
+        pop.appendChild(h("h3", { text: title }));
+        pop.appendChild(h("div", {
+          class: "target",
+          text: ctx.source + "  |  row " + ctx.row + "  |  " + ctx.column +
+                "  =  " + (ctx.value == null || ctx.value === "" ? "(empty)" : ctx.value)
+        }));
+
+        if (ctx.detections.length) {
+          // Per-detection label toggles so the reviewer can label each
+          // verdict on the cell independently.
+          var detsWrap = h("div");
+          ctx.detections.forEach(function (d) {
+            var block = h("div", { style: "margin-bottom:10px; padding-bottom:8px; border-bottom:1px solid var(--border)" });
+            block.appendChild(h("div", { style: "font-weight:600; margin-bottom:4px" }, [
+              h("span", { text: d.error_type_name || d.error_type || "unknown" })
+            ]));
+            if (d.explanation) {
+              block.appendChild(h("div", {
+                class: "muted",
+                style: "font-size:11.5px; margin-bottom:6px",
+                text: "LLM: " + d.explanation
+              }));
+            }
+            block.appendChild(
+              buildAnnotControls("detection", d._id, { llmComment: d.explanation || "" })
+            );
+            detsWrap.appendChild(block);
+          });
+          pop.appendChild(detsWrap);
+        }
+
+        // Always offer the FN slot (useful when a cell is flagged for
+        // the WRONG reason but actually has a different missed defect,
+        // or simply when the reviewer wants to record a miss here).
+        var fnCurrent = getFn(ctx.source, ctx.row, ctx.column) || {};
+        var fnExists = !!fnCurrent.ts;
+        if (ctx.detections.length) {
+          pop.appendChild(h("label", { text: "Also mark as false negative?" }));
+        }
+
+        pop.appendChild(h("label", { text: "Note (optional)" }));
+        var noteEl = h("textarea", {
+          placeholder: "What error did the model miss here?"
+        });
+        noteEl.value = fnCurrent.note || "";
+        pop.appendChild(noteEl);
+
+        var buttons = h("div", { class: "row-buttons" });
+        if (fnExists) {
+          var rmBtn = h("button", { type: "button", class: "danger", text: "Remove FN" });
+          rmBtn.addEventListener("click", function () {
+            setFn(ctx.source, ctx.row, ctx.column, null);
+            hideCellPopover();
+          });
+          buttons.appendChild(rmBtn);
+        }
+        var cancelBtn = h("button", { type: "button", text: "Close" });
+        cancelBtn.addEventListener("click", hideCellPopover);
+        buttons.appendChild(cancelBtn);
+        var saveBtn = h("button", { type: "button", class: "primary", text: fnExists ? "Update FN" : "Save FN" });
+        saveBtn.addEventListener("click", function () {
+          setFn(ctx.source, ctx.row, ctx.column, {
+            note: noteEl.value.trim()
+          });
+          hideCellPopover();
+        });
+        buttons.appendChild(saveBtn);
+        pop.appendChild(buttons);
+
+        document.body.appendChild(pop);
+        // Position below anchor, flipping if it would clip.
+        var r = anchor.getBoundingClientRect();
+        var top = r.bottom + 6;
+        var left = Math.min(r.left, window.innerWidth - pop.offsetWidth - 10);
+        if (top + pop.offsetHeight > window.innerHeight - 10) {
+          top = Math.max(10, r.top - pop.offsetHeight - 6);
+        }
+        pop.style.top = top + "px";
+        pop.style.left = Math.max(10, left) + "px";
+        popoverEl = pop;
+      }
+      window.addEventListener("keydown", function (e) {
+        if (e.key === "Escape") hideCellPopover();
+      });
+
+      // ---- Data view DOM refs -----------------------------------------
+      var dataPlaceholder = document.getElementById("data-placeholder");
+      var dataQuickjump = document.getElementById("data-quickjump");
+      var dataScope = document.getElementById("data-scope");
+      var dataCards = document.getElementById("data-cards");
+      var dataHead = document.getElementById("data-head");
+      var dataBody = document.getElementById("data-body");
+      var dataEmpty = document.getElementById("data-empty");
+      var dataCountLabel = document.getElementById("data-count-label");
+      var dataQ = document.getElementById("data-q");
+      var dataColFilter = document.getElementById("data-col-filter");
+      var dataRowFilter = document.getElementById("data-row-filter");
+      var colvaluesPanel = document.getElementById("colvalues-panel");
+      var colvaluesCol = document.getElementById("colvalues-col");
+      var colvaluesSort = document.getElementById("colvalues-sort");
+      var colvaluesFlaggedOnly = document.getElementById("colvalues-flagged-only");
+      var colvaluesBody = document.getElementById("colvalues-body");
+      var colvaluesCount = document.getElementById("colvalues-count");
+
+      dataQ.addEventListener("input", function () { renderDataTable(); });
+      dataColFilter.addEventListener("change", function () {
+        renderDataTable();
+        renderColumnValues();
+      });
+      dataRowFilter.addEventListener("change", function () { renderDataTable(); });
+      colvaluesCol.addEventListener("change", renderColumnValues);
+      colvaluesSort.addEventListener("change", renderColumnValues);
+      colvaluesFlaggedOnly.addEventListener("change", renderColumnValues);
+
+      function dataQuickjumpClick(src) {
+        activeSource = src;
+        var tabsEl = document.getElementById("source-tabs");
+        if (tabsEl) {
+          tabsEl.querySelectorAll("button").forEach(function (b) {
+            b.classList.toggle("active", b.getAttribute("data-source") === src);
+          });
+        }
+        [cSourceEl, srcEl].forEach(function (sel) {
+          if (!sel) return;
+          sel.value = "";
+          sel.disabled = !!activeSource;
+          sel.parentElement && (sel.style.opacity = activeSource ? "0.45" : "1");
+        });
+        refreshMetrics();
+      }
+
+      function renderDataPlaceholder() {
+        dataQuickjump.innerHTML = "";
+        var sources = Object.keys(sourceData).sort();
+        if (!sources.length) {
+          dataPlaceholder.appendChild(h("div", { class: "muted", text: "No source data embedded in this report." }));
+          return;
+        }
+        sources.forEach(function (src) {
+          var sd = sourceData[src] || {};
+          var total = sd.total_rows || 0;
+          // Count rows that have at least one flagged cell.
+          var flagged = 0;
+          var rowIdx = cellIndex[src] || {};
+          Object.keys(rowIdx).forEach(function (r) {
+            if (Object.keys(rowIdx[r] || {}).length) flagged++;
+          });
+          var btn = h("button", { type: "button" }, [
+            h("span", { class: "source-name", text: src }),
+            h("span", {
+              class: "source-stats",
+              text: total + " row" + (total === 1 ? "" : "s") +
+                    " \u00b7 " + flagged + " flagged \u00b7 " +
+                    (total - flagged) + " unflagged"
+            })
+          ]);
+          btn.addEventListener("click", function () { dataQuickjumpClick(src); });
+          dataQuickjump.appendChild(btn);
+        });
+      }
+
+      function renderDataCards(src, sd) {
+        dataCards.innerHTML = "";
+        var rowIdx = cellIndex[src] || {};
+        var total = sd.total_rows || 0;
+        var flaggedRows = 0, flaggedCells = 0;
+        Object.keys(rowIdx).forEach(function (r) {
+          var cols = rowIdx[r] || {};
+          var cells = Object.keys(cols).filter(function (c) { return c !== "__row__"; }).length;
+          if (cells || Object.keys(cols).indexOf("__row__") !== -1) flaggedRows++;
+          flaggedCells += cells;
+        });
+        var totalCells = total * (sd.columns || []).length;
+
+        // User false-negative count scoped to this source.
+        var fnCount = 0;
+        Object.keys(annotations.falseNegatives || {}).forEach(function (k) {
+          if (annotations.falseNegatives[k].source === src) fnCount++;
+        });
+
+        var cards = [
+          { label: "Rows", value: total },
+          { label: "Columns", value: (sd.columns || []).length },
+          { label: "Flagged rows", value: flaggedRows, cls: "sev-medium" },
+          { label: "Unflagged rows", value: Math.max(0, total - flaggedRows) },
+          { label: "Flagged cells", value: flaggedCells, cls: "sev-high" },
+          { label: "Flagged / total cells",
+            value: totalCells
+              ? ((flaggedCells / totalCells) * 100).toFixed(2) + "%"
+              : "\u2014" },
+          { label: "User FNs (this file)", value: fnCount, cls: fnCount ? "fp" : "" }
+        ];
+        cards.forEach(function (card) {
+          dataCards.appendChild(h("div", { class: "card " + (card.cls || "") }, [
+            h("div", { class: "label", text: card.label }),
+            h("div", { class: "value", text: String(card.value) })
+          ]));
+        });
+      }
+
+      function renderDataTable() {
+        var src = activeSource;
+        if (!src || !sourceData[src]) return;
+        var sd = sourceData[src];
+        var cols = sd.columns || [];
+        var rows = sd.rows || [];
+        var rowIdx = cellIndex[src] || {};
+
+        // Header
+        dataHead.innerHTML = "";
+        dataHead.appendChild(h("th", { class: "row-idx", title: "Row index (0-based)", text: "#" }));
+        cols.forEach(function (c) {
+          dataHead.appendChild(h("th", { title: c, text: c }));
+        });
+
+        var q = dataQ.value.trim().toLowerCase();
+        var colFilter = dataColFilter.value;
+        var rowFilter = dataRowFilter.value;
+
+        dataBody.innerHTML = "";
+        var shown = 0;
+        rows.forEach(function (row) {
+          var cellsOn = rowIdx[row.row] || {};
+          var hasAnyFlag = Object.keys(cellsOn).length > 0;
+
+          if (rowFilter === "flagged" && !hasAnyFlag) return;
+          if (rowFilter === "unflagged" && hasAnyFlag) return;
+
+          // Search: match any visible cell value.
+          if (q) {
+            var hit = false;
+            for (var i = 0; i < cols.length; i++) {
+              if (colFilter && cols[i] !== colFilter) continue;
+              var v = (row.values[i] || "").toLowerCase();
+              if (v.indexOf(q) !== -1) { hit = true; break; }
+            }
+            if (!hit) return;
+          }
+
+          var tr = h("tr", { class: hasAnyFlag ? "row-flagged" : "" });
+          var rowLevelDets = cellsOn["__row__"] || [];
+          var idxTd = h("td", {
+            class: "row-idx" + (rowLevelDets.length ? " flagged" : ""),
+            text: String(row.row)
+          });
+          if (rowLevelDets.length) {
+            idxTd.title = rowLevelDets.length + " row-level detection(s)";
+            idxTd.addEventListener("mouseenter", function () { showCellTooltip(idxTd, rowLevelDets); });
+            idxTd.addEventListener("mouseleave", hideCellTooltip);
+          }
+          tr.appendChild(idxTd);
+
+          cols.forEach(function (c, i) {
+            var v = row.values[i];
+            var show = !colFilter || colFilter === c;
+            if (!show) {
+              tr.appendChild(h("td", { class: "muted", style: "opacity:0.25", text: "" }));
+              return;
+            }
+            var dets = cellsOn[c] || [];
+            var fnRec = getFn(src, row.row, c);
+
+            // Cell-level annotation: if any detection on the cell has
+            // a reviewer label, we also tint the cell with a small
+            // coloured dot. -1 (error) wins over 0 and +1.
+            var cellAnnotClass = "";
+            var priority = { err: 3, amb: 2, ok: 1 };
+            for (var di = 0; di < dets.length; di++) {
+              var dlabel = (getAnnot("detection", dets[di]._id) || {}).label || "";
+              var dcls = labelClass(dlabel);
+              if (dcls && (!cellAnnotClass || priority[dcls] > priority[cellAnnotClass])) {
+                cellAnnotClass = dcls;
+              }
+            }
+
+            var cellClass = "";
+            if (dets.length) {
+              cellClass = "flagged";
+            }
+            if (fnRec && !dets.length) {
+              cellClass += " fn-flag";
+            }
+            if (cellAnnotClass) {
+              cellClass += " annot-" + cellAnnotClass;
+            }
+            var empty = v === "" || v == null;
+            var td = h("td", {
+              class: cellClass + (empty ? " empty-cell" : ""),
+              title: empty ? "(empty)" : v
+            });
+            td.textContent = empty ? "(empty)" : v;
+            if (dets.length > 1) {
+              td.appendChild(h("span", { class: "flag-count", text: String(dets.length) }));
+            }
+            if (dets.length) {
+              td.addEventListener("mouseenter", function () { showCellTooltip(td, dets); });
+              td.addEventListener("mouseleave", hideCellTooltip);
+            }
+            // Click any cell to open the review popover: users can
+            // label linked detections (flagged cell) OR mark the cell
+            // as a user false negative (unflagged cell).
+            td.addEventListener("click", function (ev) {
+              ev.stopPropagation();
+              hideCellTooltip();
+              openCellPopover(td, {
+                source: src,
+                row: row.row,
+                column: c,
+                value: v,
+                detections: dets
+              });
+            });
+            tr.appendChild(td);
+          });
+          dataBody.appendChild(tr);
+          shown++;
+        });
+
+        dataEmpty.style.display = shown ? "none" : "block";
+        dataCountLabel.textContent = "Showing " + shown + " of " + rows.length + " row" +
+          (rows.length === 1 ? "" : "s") +
+          (sd.truncated ? " (truncated from " + sd.total_rows + ")" : "");
+      }
+
+      function renderColumnValues() {
+        var src = activeSource;
+        colvaluesBody.innerHTML = "";
+        if (!src || !sourceData[src]) {
+          colvaluesCount.textContent = "";
+          return;
+        }
+        var sd = sourceData[src];
+        var cols = sd.columns || [];
+        var colChoice = colvaluesCol.value;
+        if (!colChoice && cols.length) {
+          colChoice = cols[0];
+          colvaluesCol.value = colChoice;
+        }
+        if (!colChoice) {
+          colvaluesCount.textContent = "";
+          return;
+        }
+        var colIdx = cols.indexOf(colChoice);
+        if (colIdx < 0) { colvaluesCount.textContent = ""; return; }
+
+        // freq + flag lookup for each distinct value in the column.
+        var freq = {}, flaggedCounts = {};
+        var rowIdx = cellIndex[src] || {};
+        (sd.rows || []).forEach(function (row) {
+          var v = row.values[colIdx];
+          var key = v == null ? "" : String(v);
+          freq[key] = (freq[key] || 0) + 1;
+          var cells = rowIdx[row.row] || {};
+          if (cells[colChoice]) {
+            flaggedCounts[key] = (flaggedCounts[key] || 0) + 1;
+          }
+        });
+
+        var list = Object.keys(freq).map(function (k) {
+          return {
+            value: k,
+            freq: freq[k],
+            flagged: flaggedCounts[k] || 0
+          };
+        });
+
+        if (colvaluesFlaggedOnly.checked) {
+          list = list.filter(function (v) { return v.flagged > 0; });
+        }
+
+        var sortMode = colvaluesSort.value;
+        list.sort(function (a, b) {
+          if (sortMode === "alpha") return a.value.localeCompare(b.value);
+          if (sortMode === "rare") return a.freq - b.freq || a.value.localeCompare(b.value);
+          return b.freq - a.freq || a.value.localeCompare(b.value);
+        });
+
+        list.forEach(function (v) {
+          var empty = v.value === "";
+          var tr = h("tr", { class: v.flagged ? "flagged" : "" });
+          tr.appendChild(h("td", {
+            class: "val" + (empty ? " empty-cell" : ""),
+            title: empty ? "(empty)" : v.value,
+            text: empty ? "(empty)" : v.value
+          }));
+          tr.appendChild(h("td", { class: "freq", text: String(v.freq) }));
+          var flagCell = h("td", { class: "flag-badge" });
+          if (v.flagged > 0) {
+            flagCell.appendChild(h("span", {
+              class: "pill sev-medium sm",
+              text: v.flagged + "x flag"
+            }));
+          } else {
+            flagCell.appendChild(h("span", { class: "muted", text: "\u2014" }));
+          }
+          tr.appendChild(flagCell);
+          colvaluesBody.appendChild(tr);
+        });
+
+        colvaluesCount.textContent = list.length + " distinct value" +
+          (list.length === 1 ? "" : "s");
+      }
+
+      function populateDataFilters() {
+        var src = activeSource;
+        if (!src || !sourceData[src]) return;
+        var cols = (sourceData[src].columns || []).slice();
+
+        dataColFilter.innerHTML = "";
+        dataColFilter.appendChild(h("option", { value: "", text: "All columns" }));
+        cols.forEach(function (c) {
+          dataColFilter.appendChild(h("option", { value: c, text: c }));
+        });
+
+        colvaluesCol.innerHTML = "";
+        cols.forEach(function (c) {
+          colvaluesCol.appendChild(h("option", { value: c, text: c }));
+        });
+      }
+
+      function renderDataView() {
+        // For single-source runs there is no tab strip, so pick the
+        // only available source automatically.
+        if (!activeSource) {
+          var sources = Object.keys(sourceData);
+          if (sources.length === 1) activeSource = sources[0];
+        }
+        if (activeSource && sourceData[activeSource]) {
+          dataPlaceholder.style.display = "none";
+          dataScope.style.display = "";
+          populateDataFilters();
+          renderDataCards(activeSource, sourceData[activeSource]);
+          renderDataTable();
+          renderColumnValues();
+        } else {
+          dataScope.style.display = "none";
+          dataPlaceholder.style.display = "";
+          renderDataPlaceholder();
+        }
+      }
+
+      // ==================================================================
+      // Source tabs + unified refresh
+      // ==================================================================
+
+      function scopedClusters() {
+        if (!activeSource) return clusters;
+        return clusters.filter(function (c) { return activeSourceMatches(c.source); });
+      }
+      function scopedIssues() {
+        if (!activeSource) return issues;
+        return issues.filter(function (i) { return activeSourceMatches(i.source); });
+      }
+
+      function refreshMetrics() {
+        var sc = scopedClusters();
+        var si = scopedIssues();
+        renderClusterCards(sc, computeClusterCounters(sc));
+        renderClusterCharts(computeClusterCounters(sc));
+        renderRawCards(si, computeIssueCounters(si));
+        renderRawCharts(computeIssueCounters(si));
+        applyClusterFilters();
+        applyRawFilters();
+        if (activeView === "data") renderDataView();
+      }
+
+      function buildSourceTabs() {
+        if (!IS_MULTI_SOURCE) return;
+        var tabsEl = document.getElementById("source-tabs");
+        tabsEl.style.display = "";
+
+        // Per-source cluster counts for the badge on each tab.
+        var counts = {};
+        clusters.forEach(function (c) {
+          if (c.source) counts[c.source] = (counts[c.source] || 0) + 1;
+        });
+
+        var sources = (meta.sources && meta.sources.slice()) || [];
+        // Include any source seen in clusters that wasn't in meta (defensive).
+        Object.keys(counts).forEach(function (s) {
+          if (sources.indexOf(s) === -1) sources.push(s);
+        });
+        sources.sort();
+
+        function mkTab(value, label, count, fullTitle) {
+          var btn = h("button", { type: "button", "data-source": value,
+                                   title: (fullTitle || label) });
+          btn.appendChild(document.createTextNode(label));
+          if (count != null) {
+            btn.appendChild(h("span", { class: "tab-count", text: "(" + count + ")" }));
+          }
+          btn.addEventListener("click", function () {
+            activeSource = value;
+            tabsEl.querySelectorAll("button").forEach(function (b) {
+              b.classList.toggle("active", b === btn);
+            });
+            // The Source filter dropdowns become redundant when a tab
+            // is chosen (they'd just duplicate the scope). Keep them
+            // in sync for the "All" tab and disabled otherwise.
+            [cSourceEl, srcEl].forEach(function (sel) {
+              if (!sel) return;
+              sel.value = "";
+              sel.disabled = !!activeSource;
+              sel.parentElement && (sel.style.opacity = activeSource ? "0.45" : "1");
+            });
+            refreshMetrics();
+          });
+          return btn;
+        }
+
+        tabsEl.appendChild(mkTab("", "All sources", clusters.length));
+        if (IS_MULTI_WORKBOOK) {
+          // Workbook-level tabs first - clicking one scopes the whole
+          // report to a single multi-CSV workbook (the natural unit for
+          // inter-table errors).
+          var wbCounts = {};
+          var wbBuckets = {};
+          sources.forEach(function (s) {
+            var wb = workbookOf(s);
+            if (!wb || (WORKBOOK_TO_SOURCES[wb] || []).length < 2) return;
+            wbCounts[wb] = (wbCounts[wb] || 0) + (counts[s] || 0);
+            (wbBuckets[wb] = wbBuckets[wb] || []).push(s);
+          });
+          var wbList = Object.keys(wbBuckets).sort();
+          wbList.forEach(function (wb) {
+            var btn = mkTab("workbook:" + wb,
+              wb + " (" + wbBuckets[wb].length + " files)",
+              wbCounts[wb] || 0);
+            btn.classList.add("workbook-tab");
+            tabsEl.appendChild(btn);
+          });
+          // Per-CSV tabs grouped under their workbook (visually adjacent
+          // because we sort by displaySource = "<wb> / <file>").
+          sources.slice().sort(function (a, b) {
+            var da = displaySource(a), db = displaySource(b);
+            return da < db ? -1 : da > db ? 1 : 0;
+          }).forEach(function (s) {
+            tabsEl.appendChild(mkTab(s, displaySource(s), counts[s] || 0, s));
+          });
+        } else {
+          sources.forEach(function (s) {
+            tabsEl.appendChild(mkTab(s, shortSource(s), counts[s] || 0, s));
+          });
+        }
+        tabsEl.querySelector("button").classList.add("active");
+
+        // Filter box for flat corpora with many independent tables
+        // (e.g. curated_bing21: 20+ unrelated CSVs). Only adds value
+        // when there are more than ~12 source tabs and no workbook
+        // grouping is collapsing them already.
+        if (!IS_MULTI_WORKBOOK && sources.length > 12) {
+          var wrap = h("div", { class: "source-tabs-search" });
+          var input = h("input", {
+            type: "search",
+            placeholder: "Filter sources \u2026 (e.g. " +
+              shortSource(sources[0]).slice(0, 6) + ")"
+          });
+          wrap.appendChild(input);
+          // Insert *before* the tabs row so the search visually
+          // anchors above the buttons.
+          tabsEl.parentNode.insertBefore(wrap, tabsEl);
+          input.addEventListener("input", function () {
+            var q = input.value.trim().toLowerCase();
+            tabsEl.querySelectorAll("button").forEach(function (btn) {
+              var src = btn.getAttribute("data-source") || "";
+              // Always keep "All sources" (empty data-source) visible.
+              if (!src) { btn.style.display = ""; return; }
+              var hay = (src + " " + shortSource(src)).toLowerCase();
+              btn.style.display = (!q || hay.indexOf(q) !== -1) ? "" : "none";
+            });
+          });
+        }
+      }
+
+      buildSourceTabs();
+
+      // ==================================================================
+      // Annotations bar: live counts, filter, import/export, clear.
+      // ==================================================================
+      var annotCountsEl = document.getElementById("annot-counts");
+      var annotFilterEl = document.getElementById("annot-filter");
+      var annotExportBtn = document.getElementById("annot-export");
+      var annotImportBtn = document.getElementById("annot-import");
+      var annotImportFile = document.getElementById("annot-import-file");
+      var annotClearBtn = document.getElementById("annot-clear");
+
+      function renderAnnotCounts() {
+        annotCountsEl.innerHTML = "";
+        var c = countAnnotations();
+        var errs = c.detections.err + c.clusters.err;
+        var ambs = c.detections.amb + c.clusters.amb;
+        var oks  = c.detections.ok  + c.clusters.ok;
+        var fns = c.falseNegatives;
+        function pill(label, val, cls) {
+          return h("span", { class: "annot-pill " + cls, text: label + ": " + val });
+        }
+        annotCountsEl.appendChild(pill("\u22121 error", errs, "err"));
+        annotCountsEl.appendChild(pill("0 ambig", ambs, "amb"));
+        annotCountsEl.appendChild(pill("+1 no error", oks, "ok"));
+        annotCountsEl.appendChild(pill("User FN", fns, "fn"));
+      }
+
+      function redrawCurrentViews() {
+        // Re-apply filters so the tables/cells reflect the new labels.
+        applyClusterFilters();
+        applyRawFilters();
+        if (activeView === "data") renderDataView();
+        renderAnnotCounts();
+      }
+      // Connect the previously-declared trampoline.
+      onAnnotationsChanged_real = redrawCurrentViews;
+
+      annotFilterEl.addEventListener("change", function () {
+        applyClusterFilters();
+        applyRawFilters();
+      });
+
+      annotExportBtn.addEventListener("click", function () {
+        var payload = {
+          run_id: ANNOT_RUN_ID,
+          exported_at: new Date().toISOString(),
+          annotations: annotations
+        };
+        var blob = new Blob(
+          [JSON.stringify(payload, null, 2)],
+          { type: "application/json" }
+        );
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement("a");
+        a.href = url;
+        a.download = "annotations-" + ANNOT_RUN_ID + ".json";
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(function () {
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+        }, 0);
+      });
+
+      annotImportBtn.addEventListener("click", function () {
+        annotImportFile.click();
+      });
+      annotImportFile.addEventListener("change", function () {
+        var f = annotImportFile.files && annotImportFile.files[0];
+        if (!f) return;
+        var reader = new FileReader();
+        reader.onload = function () {
+          try {
+            var parsed = JSON.parse(reader.result);
+            var incoming = parsed.annotations || parsed;
+            if (!incoming || typeof incoming !== "object") throw new Error("bad file");
+            var mode = window.confirm(
+              "Import annotations?\n\nOK = merge with current review.\nCancel = REPLACE current review."
+            );
+            if (mode) {
+              // Merge: last-writer-wins per key. Migrate incoming
+              // records so legacy exports (tp/fp/highlight) land in
+              // the new schema alongside the current review.
+              ["detections", "clusters"].forEach(function (bucket) {
+                var src = migrateBucket(incoming[bucket] || {});
+                Object.keys(src).forEach(function (k) {
+                  annotations[bucket][k] = src[k];
+                });
+              });
+              var fns = incoming.falseNegatives || {};
+              Object.keys(fns).forEach(function (k) {
+                annotations.falseNegatives[k] = fns[k];
+              });
+            } else {
+              annotations = {
+                detections: migrateBucket(incoming.detections),
+                clusters: migrateBucket(incoming.clusters),
+                falseNegatives: incoming.falseNegatives || {}
+              };
+            }
+            saveAnnotations();
+            redrawCurrentViews();
+          } catch (e) {
+            window.alert("Import failed: " + e.message);
+          } finally {
+            annotImportFile.value = "";
+          }
+        };
+        reader.readAsText(f);
+      });
+
+      annotClearBtn.addEventListener("click", function () {
+        if (!window.confirm("Clear ALL annotations for this run? This cannot be undone.")) return;
+        annotations = emptyAnnotations();
+        saveAnnotations();
+        redrawCurrentViews();
+      });
+
+      renderAnnotCounts();
+      refreshMetrics();
+    })();
+  </script>
+</body>
+</html>

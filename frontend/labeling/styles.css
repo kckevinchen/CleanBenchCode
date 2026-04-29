@@ -1,0 +1,680 @@
+/* Palette lifted from report_template.html so the two surfaces feel like
+   one product. */
+:root {
+  --bg: #0f172a;
+  --panel: #111c32;
+  --panel-2: #18243f;
+  --border: #233559;
+  --text: #e5eaf2;
+  --muted: #8ea0bf;
+  --accent: #60a5fa;
+  --sev-high: #ef4444;
+  --sev-medium: #f59e0b;
+  --sev-low: #10b981;
+  --sev-unknown: #94a3b8;
+  --tp: #10b981;
+  --fp: #f87171;
+  --partial: #f59e0b;
+  --unsure: #a78bfa;
+  --skip: #ec4899;
+}
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  padding: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+  height: 100vh;
+  overflow: hidden;
+}
+body {
+  display: grid;
+  grid-template-columns: 320px 1fr 380px;
+  grid-template-rows: 56px 1fr 32px;
+  grid-template-areas:
+    "header header header"
+    "sidebar center detail"
+    "footer footer footer";
+}
+kbd {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* -------- header -------- */
+header {
+  grid-area: header;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, #0f172a, #0b1120);
+}
+header h1 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: 0.2px; }
+header .meta { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+header .title { display: flex; flex-direction: column; }
+header .progress { flex: 1; display: flex; gap: 8px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
+header .progress .pill {
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+}
+header .progress .pill strong { color: var(--text); margin-right: 4px; font-weight: 600; }
+header .actions { display: flex; gap: 10px; font-size: 12.5px; }
+header .actions a {
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+}
+
+/* -------- sidebar -------- */
+.sidebar {
+  grid-area: sidebar;
+  border-right: 1px solid var(--border);
+  background: var(--panel);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.filters {
+  padding: 10px 12px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.filters label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--muted); }
+.filters select {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 12px;
+}
+.queue { flex: 1; overflow-y: auto; }
+.queue .group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  cursor: pointer;
+  user-select: none;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  font-size: 11.5px;
+  position: sticky;
+  z-index: 1;
+}
+.queue .group-header.wb {
+  top: 0;
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  font-size: 10.5px;
+}
+.queue .group-header.src {
+  top: 22px;
+  color: var(--muted);
+}
+.queue .wb-body .group-header.src { padding-left: 22px; }
+.queue .group-header:hover { background: var(--panel-2); }
+.queue .group-header .caret {
+  width: 12px;
+  font-size: 9px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.queue .group-header .label {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.queue .group-header .count {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+}
+.queue .src-body .row { padding-left: 28px; }
+.queue .wb-body .src-body .row { padding-left: 36px; }
+.queue .row {
+  display: grid;
+  grid-template-columns: 16px 1fr auto;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+.queue .row:hover { background: var(--panel-2); }
+.queue .row.active { background: var(--panel-2); border-left: 3px solid var(--accent); padding-left: 9px; }
+.queue .row .dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--sev-unknown); margin-top: 5px;
+}
+.queue .row .dot.tp { background: var(--tp); }
+.queue .row .dot.fp { background: var(--fp); }
+.queue .row .dot.partial { background: var(--partial); }
+.queue .row .dot.unsure { background: var(--unsure); }
+.queue .row .dot.skip { background: var(--skip); }
+.queue .row .main .src { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.queue .row .main .cols { font-weight: 600; font-size: 12.5px; }
+.queue .row .main .types { font-size: 11px; color: var(--muted); margin-top: 1px; }
+
+/* -------- CSV viewer -------- */
+.center {
+  grid-area: center;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.csv-head {
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+}
+.muted { color: var(--muted); }
+.csv-viewer { flex: 1; overflow: auto; }
+.csv-viewer table {
+  border-collapse: collapse;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  width: max-content;
+  min-width: 100%;
+}
+.csv-viewer th, .csv-viewer td {
+  border: 1px solid var(--border);
+  padding: 4px 8px;
+  white-space: nowrap;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: top;
+}
+.csv-viewer th {
+  position: sticky; top: 0;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-weight: 600;
+  z-index: 1;
+}
+.csv-viewer th.flagged, .csv-viewer td.flagged {
+  outline: 2px solid var(--sev-medium);
+  outline-offset: -2px;
+}
+/* Per-cell verdict states overlaid on the CSV viewer. The same cells
+   may also have ``.flagged`` from the active cluster - the verdict
+   colour wins because it's painted on top. */
+.csv-viewer td.cell-tp     { background: rgba(16, 185, 129, 0.22); }
+.csv-viewer td.cell-partial{ background: rgba(245, 158, 11, 0.22); }
+.csv-viewer td.cell-fp     { background: rgba(248, 113, 113, 0.18); }
+.csv-viewer td.cell-fn     { background: rgba(167, 139, 250, 0.30); outline: 2px dashed var(--unsure); outline-offset: -2px; }
+.csv-viewer td.cell-unsure { background: rgba(167, 139, 250, 0.15); }
+.csv-viewer td.cell-shadowed::after {
+  content: "\26A0";        /* warning sign for FN superseded by a TP cluster */
+  margin-left: 4px;
+  color: var(--sev-medium);
+  font-size: 10px;
+}
+.csv-viewer td.clickable { cursor: pointer; }
+.csv-viewer td.clickable:hover { box-shadow: inset 0 0 0 2px var(--accent); }
+
+/* Floating popover for cell-level FN labelling and quick-correct on
+   already-labelled cluster cells. Positioned by JS relative to the
+   clicked cell. */
+.cell-popover {
+  position: fixed;
+  z-index: 50;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  padding: 12px 14px;
+  min-width: 280px;
+  max-width: 360px;
+  font-size: 12.5px;
+}
+.cell-popover h3 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+}
+.cell-popover .meta { margin-bottom: 8px; color: var(--muted); font-family: ui-monospace, monospace; font-size: 11px; }
+.cell-popover .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.cell-popover .actions button {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.cell-popover .actions button.tp      { border-color: var(--tp);      color: var(--tp); }
+.cell-popover .actions button.fp      { border-color: var(--fp);      color: var(--fp); }
+.cell-popover .actions button.partial { border-color: var(--partial); color: var(--partial); }
+.cell-popover .actions button.fn      { border-color: var(--unsure);  color: var(--unsure); }
+.cell-popover .actions button.unsure  { border-color: var(--unsure);  color: var(--unsure); }
+.cell-popover .actions button.close   { color: var(--muted); margin-left: auto; }
+.cell-popover textarea, .cell-popover input[type="text"] {
+  width: 100%; box-sizing: border-box;
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text); padding: 4px 8px; font-size: 12px; font-family: inherit;
+  margin-top: 4px;
+}
+.cell-popover .hint { color: var(--muted); font-size: 11px; margin-top: 6px; }
+.cell-popover .hint.warn { color: var(--sev-medium); }
+
+/* Sibling-tables strip in the CSV header. Lets the operator jump
+   between CSVs of the same workbook without round-tripping through the
+   sidebar - critical for inter-table errors. */
+.sibling-tables {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 6px 0 4px;
+  font-size: 11.5px;
+}
+.sibling-tables .label { color: var(--muted); margin-right: 4px; }
+.sibling-tables button {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 2px 10px;
+  cursor: pointer;
+  font-size: 11px;
+}
+.sibling-tables button.active { color: var(--accent); border-color: var(--accent); }
+.sibling-tables button:hover { color: var(--text); }
+
+/* Original-xlsx access buttons in the CSV header. Mirrors the
+   sibling-tables pill style so the header strip stays visually
+   coherent. Hidden when the run config doesn't expose an xlsx
+   source dir. */
+.xlsx-actions {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: 8px;
+  font-size: 11.5px;
+  vertical-align: middle;
+}
+.xlsx-actions .xlsx-btn {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 11px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.xlsx-actions .xlsx-btn:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+.csv-viewer tr.row-idx td:first-child { color: var(--muted); background: var(--panel); position: sticky; left: 0; }
+.csv-viewer tr.target { background: rgba(96,165,250,0.08); }
+.csv-viewer tr.target td.flagged {
+  background: rgba(239,68,68,0.22);
+}
+
+/* -------- detail pane -------- */
+.detail {
+  grid-area: detail;
+  border-left: 1px solid var(--border);
+  background: var(--panel);
+  overflow-y: auto;
+  padding: 14px 16px;
+}
+.detail h2 { margin: 0 0 8px; font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.6px; color: var(--muted); }
+.detail .block { margin-bottom: 14px; }
+.detail .cols { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.detail .sev-chip {
+  display: inline-block; padding: 2px 8px; border-radius: 999px;
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.5px;
+  text-transform: uppercase;
+  background: var(--panel-2); color: var(--muted); margin-right: 6px;
+}
+.detail .det-row {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  background: var(--panel-2);
+}
+.detail .det-row .et { font-weight: 600; font-size: 12px; }
+.detail .det-row .obs { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; color: var(--muted); margin: 4px 0; word-break: break-word; }
+.detail .det-row .fix { font-size: 11.5px; color: var(--text); }
+.detail .placeholder { color: var(--muted); padding: 20px; text-align: center; }
+
+/* -------- Web verification block --------
+   Shown only when ``bundle.web_verification`` is non-null (the
+   verifier has run on this cluster). Compact: a verdict chip + the
+   canonical alternative + clickable evidence URLs + an Accept button
+   that pre-populates the Corrected-value field. */
+.detail .block.web-verify h2 {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px;
+}
+.detail .block.web-verify .verdict-chip {
+  display: inline-block; padding: 2px 8px; border-radius: 999px;
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.5px;
+  text-transform: uppercase;
+  border: 1px solid var(--muted); color: var(--muted);
+  background: var(--panel-2);
+}
+.detail .block.web-verify .canon {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--panel-2); padding: 1px 6px; border-radius: 4px;
+}
+.detail .block.web-verify .reasoning {
+  font-size: 12px; color: var(--text); margin: 6px 0 8px;
+}
+.detail .block.web-verify ul.evidence {
+  list-style: none; padding: 0; margin: 6px 0; font-size: 12px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.detail .block.web-verify ul.evidence a {
+  color: var(--accent); word-break: break-all;
+}
+.detail .block.web-verify ul.evidence .ev-quote {
+  font-style: italic; color: var(--muted); font-size: 11.5px;
+  margin-top: 2px;
+}
+.detail .block.web-verify .web-meta {
+  font-size: 11px; margin-top: 6px;
+}
+.detail .block.web-verify .web-meta code {
+  font-size: 10.5px; padding: 0 4px; border-radius: 3px;
+  background: var(--panel-2); color: var(--text);
+}
+.detail .block.web-verify button.web-accept {
+  font: inherit; font-size: 12px; font-weight: 600;
+  padding: 6px 10px; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--accent); background: var(--panel-2);
+  color: var(--accent);
+}
+.detail .block.web-verify button.web-accept:hover {
+  background: var(--accent); color: #0b1120;
+}
+
+/* On-demand "Verify on web" CTA shown when no verification exists. */
+.detail .block.web-verify-cta {
+  border: 1px dashed var(--border);
+  background: transparent;
+}
+.detail .block.web-verify button.web-verify-btn {
+  font: inherit; font-size: 12px; font-weight: 600;
+  padding: 8px 14px; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--accent); background: var(--panel-2);
+  color: var(--accent);
+}
+.detail .block.web-verify button.web-verify-btn:hover {
+  background: var(--accent); color: #0b1120;
+}
+.detail .block.web-verify button.web-verify-btn:disabled,
+.detail .block.web-verify button.web-verify-btn.loading {
+  cursor: progress; opacity: 0.7;
+  border-color: var(--muted); color: var(--muted);
+}
+
+.buttons { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin-top: 6px; }
+.buttons button {
+  font: inherit; font-size: 12px; font-weight: 600;
+  padding: 8px 0; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--border); background: var(--panel-2); color: var(--text);
+}
+.buttons button:hover { filter: brightness(1.15); }
+.buttons button.tp { border-color: var(--tp); color: var(--tp); }
+.buttons button.fp { border-color: var(--fp); color: var(--fp); }
+.buttons button.partial { border-color: var(--partial); color: var(--partial); }
+.buttons button.unsure { border-color: var(--unsure); color: var(--unsure); }
+.buttons button.skip { border-color: var(--skip); color: var(--skip); }
+.buttons button.active { background: currentColor; }
+.buttons button.active.tp, .buttons button.active.fp,
+.buttons button.active.partial, .buttons button.active.unsure,
+.buttons button.active.skip { color: #0b1120; }
+
+.field { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; font-size: 12px; }
+.field > span { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+.field input, .field textarea {
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; font: inherit;
+}
+.field textarea { min-height: 60px; resize: vertical; }
+
+/* -------- footer -------- */
+footer.shortcuts {
+  grid-area: footer;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+  display: flex;
+  gap: 16px;
+  padding: 0 16px;
+  align-items: center;
+  font-size: 11px;
+  color: var(--muted);
+  overflow-x: auto;
+}
+
+.toast {
+  position: fixed;
+  right: 16px; bottom: 46px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 12px;
+  z-index: 10;
+}
+
+/* -------- labelling-effort projection panel --------
+   Surfaces the per-(source, column) Good-Turing / Chao1 estimates
+   from `good_turing/per_arm_estimates.json`. Lives below the CSV
+   viewer in the centre column so it shares the operator's main
+   focus area without competing with the queue / detail panes. */
+.effort-panel {
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+  padding: 8px 12px 12px 12px;
+  font-size: 12px;
+  max-height: 40vh;
+  overflow: auto;
+}
+.effort-panel > summary {
+  cursor: pointer;
+  padding: 4px 0;
+  font-weight: 600;
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+}
+.effort-panel > summary .effort-summary-text { flex: 0 0 auto; }
+.effort-panel > summary #effort-headline {
+  font-weight: 400;
+  font-size: 11px;
+}
+.effort-panel .effort-help {
+  margin: 6px 0 8px 0;
+  font-size: 11px;
+}
+.effort-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.effort-table th, .effort-table td {
+  text-align: left;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.effort-table th {
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  z-index: 1;
+  font-weight: 600;
+}
+.effort-table td.src, .effort-table td.col {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.effort-table tbody tr {
+  cursor: pointer;
+}
+.effort-table tbody tr:hover {
+  background: var(--panel-2);
+}
+.effort-table tr.effort-high td:nth-child(5) {
+  color: #ff8a80;
+  font-weight: 600;
+}
+.effort-table tr.effort-mid td:nth-child(5) {
+  color: #ffd180;
+}
+.effort-table tr.effort-low td:nth-child(5) {
+  color: var(--muted);
+}
+
+/* Per-(column, error_type) labelling-effort chips painted next to
+   the cell value inside annotated cells in the CSV viewer. Sources
+   the Chao1 projected-missed estimate from /labeling-effort. Kept
+   small + muted so they don't compete with the cell value or the
+   verdict-coloured background. */
+.cell-effort-chips {
+  display: inline-flex;
+  gap: 3px;
+  margin-left: 6px;
+  vertical-align: middle;
+  pointer-events: auto;
+}
+.cell-effort {
+  display: inline-block;
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 10px;
+  line-height: 14px;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.10);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: var(--text);
+  white-space: nowrap;
+}
+.cell-effort-active {
+  background: rgba(255, 209, 128, 0.18);
+  border-color: rgba(255, 209, 128, 0.40);
+  color: #ffd180;
+}
+.cell-effort-insufficient {
+  background: rgba(176, 190, 197, 0.15);
+  border-color: rgba(176, 190, 197, 0.30);
+  color: #b0bec5;
+}
+.cell-effort-saturated, .cell-effort-exhausted {
+  background: rgba(165, 214, 167, 0.12);
+  border-color: rgba(165, 214, 167, 0.28);
+  color: #a5d6a7;
+}
+
+/* Good-Turing / Chao1 stats block inside the cell-click popover.
+   Surfaces the per-(column, error_type) labelling-effort estimates
+   the moment the operator selects any cell, so they have the
+   coverage context inline before deciding TP/FP/FN. */
+.cell-popover .gt-stats {
+  margin: 8px 0 4px 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel-2);
+  font-size: 11px;
+}
+.cell-popover .gt-stats .gt-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 4px;
+}
+.cell-popover .gt-stats .gt-head .muted { font-size: 10px; }
+.cell-popover .gt-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.cell-popover .gt-table th, .cell-popover .gt-table td {
+  padding: 2px 6px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+.cell-popover .gt-table th {
+  font-weight: 600;
+  color: var(--muted);
+}
+.cell-popover .gt-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.cell-popover .gt-table td.et {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cell-popover .gt-table tr.gt-status-active td.status { color: #ffd180; }
+.cell-popover .gt-table tr.gt-status-saturated td.status,
+.cell-popover .gt-table tr.gt-status-exhausted td.status { color: #a5d6a7; }
+.cell-popover .gt-table tr.gt-status-insufficient td.status { color: #b0bec5; }
+.cell-popover .gt-table tr.gt-status-not_applicable td.status { color: var(--muted); }
+.cell-popover .gt-more { margin-top: 4px; font-size: 10px; }
+.cell-popover .gt-table tr.gt-row-match {
+  background: rgba(255, 209, 128, 0.10);
+}
+.cell-popover .gt-table tr.gt-row-match td.et { font-weight: 600; }
+
+/* "Inferred" markers for clusters whose row only appears in another
+   detection's affected_rows list. Surfaced so the operator can label
+   every cell the LLM claimed (FN-aware benchmark building) while
+   visually distinguishing them from primary detections. */
+.queue .row.row-inferred .dot { opacity: 0.55; }
+.queue .row.row-inferred .main { opacity: 0.85; }
+.inferred-badge {
+  display: inline-block;
+  padding: 0 5px;
+  margin-left: 6px;
+  border: 1px solid var(--muted);
+  border-radius: 3px;
+  font-size: 9px;
+  line-height: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  background: transparent;
+  vertical-align: middle;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.sev-chip.inferred-chip {
+  color: var(--muted);
+  border-color: var(--muted);
+  font-style: italic;
+}

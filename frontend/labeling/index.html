@@ -1,0 +1,598 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Defense-in-depth: block inline-script regressions and third-party loads. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'" />
+  <title>Data cleaning - workbench</title>
+  <link rel="stylesheet" href="./styles.css" />
+  <link rel="stylesheet" href="./runs.css" />
+  <link rel="stylesheet" href="./compare.css" />
+</head>
+<body class="runs-page">
+  <header>
+    <div class="title">
+      <h1>Data-cleaning workbench</h1>
+      <div class="meta" id="ws-meta">loading…</div>
+    </div>
+    <div class="actions">
+      <a href="/api/docs" target="_blank" rel="noopener">API</a>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="runs">Runs</button>
+    <button class="tab" data-tab="launch">Launch new run</button>
+    <button class="tab" data-tab="compare">Compare runs</button>
+    <button class="tab" data-tab="dataprep">Data prep</button>
+    <button class="tab" data-tab="jobs">Jobs <span id="jobs-badge" class="badge" hidden>0</span></button>
+    <button class="tab" data-tab="pipeline">Pipeline</button>
+  </nav>
+
+  <main class="runs-main">
+    <!-- ========== Runs tab ========== -->
+    <section class="panel" data-panel="runs">
+      <div class="panel-head">
+        <h2>Runs <span class="muted" id="runs-count"></span></h2>
+        <button id="refresh-runs">Refresh</button>
+      </div>
+      <div class="runs-list" id="runs-list">loading…</div>
+    </section>
+
+    <!-- ========== Launch tab ========== -->
+    <section class="panel hidden" data-panel="launch">
+      <div class="panel-head">
+        <h2>Launch new detection run</h2>
+        <div class="muted" style="font-size: 11.5px;">Values loaded from <code>config/experiment.yaml</code> — edit any field to override</div>
+      </div>
+
+      <form id="launch-form" class="launch-form">
+        <!-- Data -->
+        <fieldset>
+          <legend>Data</legend>
+          <label>
+            <span>Dataset (directory or CSV)</span>
+            <select id="csv-dir"><option value="">(use config default)</option></select>
+          </label>
+          <label>
+            <span>CSV glob <span class="muted">(directory mode)</span></span>
+            <input id="csv-glob" type="text" placeholder="*.csv" />
+          </label>
+          <label>
+            <span>Chunk size</span>
+            <input id="chunk-size" type="number" min="1" placeholder="100" />
+          </label>
+          <label>
+            <span>Max chunks <span class="muted">(-1 = all)</span></span>
+            <input id="max-chunks" type="number" placeholder="(all)" />
+          </label>
+          <label>
+            <span>Column mode</span>
+            <select id="column-mode">
+              <option value="">(default)</option>
+              <option value="single">single</option>
+              <option value="all">all</option>
+            </select>
+          </label>
+          <label>
+            <span>Columns <span class="muted">(comma-separated)</span></span>
+            <input id="columns" type="text" placeholder="(all)" />
+          </label>
+        </fieldset>
+
+        <!-- LLM -->
+        <fieldset>
+          <legend>LLM</legend>
+          <label>
+            <span>Model</span>
+            <input id="model" type="text" placeholder="gpt-5.2" />
+          </label>
+          <label>
+            <span>Reasoning effort</span>
+            <select id="reasoning-effort">
+              <option value="">(default)</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+            </select>
+          </label>
+          <label>
+            <span>Concurrency</span>
+            <input id="concurrency" type="number" min="1" placeholder="(auto)" />
+          </label>
+          <label class="checkbox">
+            <input id="no-synthesis" type="checkbox" />
+            <span>Disable Phase-B synthesis</span>
+          </label>
+          <label>
+            <span>Synthesis effort</span>
+            <select id="synthesis-effort">
+              <option value="">(default)</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+            </select>
+          </label>
+        </fieldset>
+
+        <!-- Input normalization -->
+        <fieldset>
+          <legend>Input normalization <span class="muted" style="font-weight: normal; font-size: 11px;">(ablation: pre-clean cells before sending to LLM)</span></legend>
+          <label class="checkbox">
+            <input id="normalize-input" type="checkbox" />
+            <span>Normalize input <span class="muted">(NFKC + strip + collapse spaces + fold NBSP/ZWSP/tab/newline)</span></span>
+          </label>
+          <label class="checkbox">
+            <input id="normalize-fold-punctuation" type="checkbox" />
+            <span>Also fold smart quotes / dashes / ellipsis to ASCII</span>
+          </label>
+          <label class="checkbox">
+            <input id="normalize-lowercase" type="checkbox" />
+            <span>Also lowercase every cell <span class="muted">(destructive — casing-ablation only)</span></span>
+          </label>
+        </fieldset>
+
+        <!-- Taxonomy -->
+        <fieldset>
+          <legend>Error types</legend>
+          <label>
+            <span>Pick the error types to detect (leave empty = all). Scope is inferred automatically from the selected types.</span>
+            <div id="error-types"></div>
+          </label>
+        </fieldset>
+
+        <!-- Experiment mode (single vs adaptive) -->
+        <fieldset>
+          <legend>Experiment mode</legend>
+          <label>
+            <span>Mode</span>
+            <select id="mode">
+              <option value="">(default)</option>
+              <option value="single">single&nbsp;&mdash; one pass per (chunk, error_type)</option>
+              <option value="adaptive">adaptive&nbsp;&mdash; multi-pass Good-Turing loop</option>
+            </select>
+          </label>
+          <label>
+            <span>GT loop strategy <span class="muted">(adaptive only)</span></span>
+            <select id="gt-mode">
+              <option value="">(default)</option>
+              <option value="adaptive">adaptive&nbsp;&mdash; early-stop on per-arm saturation</option>
+              <option value="fixed">fixed&nbsp;&mdash; always run num_runs passes</option>
+            </select>
+          </label>
+        </fieldset>
+
+        <!-- Stopping rule -->
+        <fieldset id="gt-block" class="gt-block">
+          <legend>Stopping rule <span class="muted" style="font-weight: normal;">(adaptive only)</span></legend>
+          <p class="muted" style="grid-column: 1 / -1; margin: 0 0 4px 0; font-size: 12px;">
+            The loop treats each
+            <code>(stop_scope, error_type)</code> as an independent
+            arm. Per arm, it requires <strong>num runs</strong> as a
+            ceiling, <strong>min runs</strong> as a floor, and stops
+            when the Good-Turing missing mass falls at or below
+            <strong>target missing mass</strong>. The whole run halts
+            once every error_type's arms have all saturated.
+          </p>
+          <label>
+            <span>Num runs <span class="muted">(per-arm k_max)</span></span>
+            <input id="gt-num-runs" type="number" min="1" placeholder="8" />
+          </label>
+          <label>
+            <span>Min runs <span class="muted">(per-arm k_min)</span></span>
+            <input id="gt-min-runs" type="number" min="1" placeholder="3" />
+          </label>
+          <label>
+            <span>Target missing mass <span class="muted">(per-arm &epsilon;)</span></span>
+            <input id="gt-target-missing-mass" type="number" step="0.01" min="0" max="1" placeholder="0.05" />
+          </label>
+          <label>
+            <span>Stop scope <span class="muted">(what's an arm?)</span></span>
+            <select id="gt-stop-scope">
+              <option value="">(default: column)</option>
+              <option value="column">column&nbsp;&mdash; per (source, column, type)</option>
+              <option value="dataset">dataset&nbsp;&mdash; one arm per type</option>
+              <option value="csv">csv&nbsp;&mdash; per (source, type)</option>
+              <option value="column_pair">column_pair</option>
+              <option value="row">row</option>
+              <option value="workbook">workbook</option>
+              <option value="cross_csv">cross_csv</option>
+              <option value="multi_table">multi_table</option>
+            </select>
+          </label>
+          <details class="gt-advanced" style="grid-column: 1 / -1; margin-top: 4px;">
+            <summary class="muted" style="cursor: pointer; font-size: 12px;">Advanced per-arm overrides</summary>
+            <p class="muted" style="margin: 6px 0 8px 0; font-size: 12px;">
+              Tunes the per-arm stop predicate beyond the K and
+              &epsilon; controls above. Leave blank to defer to
+              <code>good_turing.per_arm.defaults</code> in
+              <code>config/experiment.yaml</code>.
+            </p>
+            <div class="gt-advanced-grid">
+              <label>
+                <span>Require two consecutive</span>
+                <select id="gt-per-arm-two-consecutive">
+                  <option value="">(default)</option>
+                  <option value="true">require</option>
+                  <option value="false">allow single pass</option>
+                </select>
+              </label>
+            </div>
+          </details>
+        </fieldset>
+
+        <!-- Perturbations -->
+        <fieldset id="gt-perturb-fieldset" class="gt-block">
+          <legend>Perturbations <span class="muted" style="font-weight: normal;">(adaptive only)</span></legend>
+          <p class="muted" style="grid-column: 1 / -1; margin: 0 0 4px 0; font-size: 12px;">
+            What changes between passes so the detector sees a slightly
+            different view of the world. Prompt-ensemble injects the
+            most signal for cell-local error types; row/column shuffles
+            are mostly useful when <code>column_mode = all</code>.
+          </p>
+          <label class="checkbox">
+            <input id="gt-prompt-ensemble" type="checkbox" />
+            <span>Prompt ensemble <span class="muted">(rewrite each type's prompt per pass)</span></span>
+          </label>
+          <label>
+            <span>Variant effort</span>
+            <select id="gt-variant-effort">
+              <option value="">(default)</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+            </select>
+          </label>
+          <label class="checkbox">
+            <input id="gt-shuffle-rows" type="checkbox" />
+            <span>Shuffle rows</span>
+          </label>
+          <label class="checkbox">
+            <input id="gt-shuffle-columns" type="checkbox" />
+            <span>Shuffle columns <span class="muted">(needs column_mode = all)</span></span>
+          </label>
+          <label class="checkbox">
+            <input id="gt-skip-identity-run" type="checkbox" />
+            <span>Skip identity baseline <span class="muted">(perturb run 0 too)</span></span>
+          </label>
+          <label>
+            <span>Base seed</span>
+            <input id="gt-base-seed" type="number" placeholder="42" />
+          </label>
+        </fieldset>
+
+        <!-- Dry-run preview + submit -->
+        <div class="form-actions">
+          <button type="button" id="show-cmd">Preview command</button>
+          <button type="submit" id="submit-launch">Launch run</button>
+        </div>
+        <pre id="cmd-preview" class="cmd-preview" hidden></pre>
+      </form>
+    </section>
+
+    <!-- ========== Compare runs tab ========== -->
+    <section class="panel hidden" data-panel="compare">
+      <div class="panel-head">
+        <h2>Compare two runs</h2>
+        <div class="muted" style="font-size: 11.5px;">Cell-level bucket diff. Focus is on cells where exactly one run flagged.</div>
+      </div>
+
+      <div class="compare-pickers">
+        <label>
+          <span>Run A</span>
+          <select id="cmp-run-a"><option value="">(pick a run)</option></select>
+        </label>
+        <button type="button" id="cmp-swap" title="Swap A and B">⇄</button>
+        <label>
+          <span>Run B</span>
+          <select id="cmp-run-b"><option value="">(pick a run)</option></select>
+        </label>
+        <button type="button" id="cmp-load" disabled>Compare</button>
+      </div>
+      <div id="cmp-meta" class="compare-meta muted"></div>
+      <div id="cmp-warn" class="compare-warn" hidden></div>
+
+      <div id="cmp-results" hidden>
+        <h3 class="compare-section-h">Per-bucket overlap <span class="muted" style="font-weight: normal; font-size: 11px;">(click any count to filter the diff list)</span></h3>
+        <div class="compare-table-wrap">
+          <table id="cmp-bucket-table" class="compare-table">
+            <thead>
+              <tr>
+                <th>Bucket</th>
+                <th class="num">A</th>
+                <th class="num">B</th>
+                <th class="num">A ∩ B</th>
+                <th class="num a-only">A only</th>
+                <th class="num b-only">B only</th>
+                <th class="num">Jaccard</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <h3 class="compare-section-h">Diff cells <span id="cmp-diff-count" class="muted" style="font-weight: normal; font-size: 11px;"></span></h3>
+        <div class="compare-filters">
+          <label>
+            <span>Side</span>
+            <select id="cmp-filter-side">
+              <option value="">(all disagreements)</option>
+              <option value="a_only">A only</option>
+              <option value="b_only">B only</option>
+            </select>
+          </label>
+          <label>
+            <span>Bucket</span>
+            <select id="cmp-filter-bucket"><option value="">(all)</option></select>
+          </label>
+          <label>
+            <span>Source</span>
+            <input id="cmp-filter-source" type="text" placeholder="(any source)" />
+          </label>
+          <button type="button" id="cmp-apply-filters">Apply</button>
+        </div>
+        <div class="compare-cells-wrap">
+          <table id="cmp-cells-table" class="compare-table">
+            <thead>
+              <tr>
+                <th>Side</th>
+                <th>Bucket</th>
+                <th>Source</th>
+                <th class="num">Row</th>
+                <th>Column</th>
+                <th>A says</th>
+                <th>B says</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="compare-pager">
+          <button type="button" id="cmp-prev">‹ Prev</button>
+          <span id="cmp-page-info"></span>
+          <button type="button" id="cmp-next">Next ›</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ========== Cell-detail drawer ========== -->
+    <aside id="cmp-drawer" class="cmp-drawer" hidden>
+      <div class="cmp-drawer-head">
+        <h3 id="cmp-drawer-title">Cell detail</h3>
+        <button type="button" id="cmp-drawer-close" aria-label="Close">×</button>
+      </div>
+      <div id="cmp-drawer-body" class="cmp-drawer-body"></div>
+    </aside>
+
+    <!-- ========== Data prep tab ========== -->
+    <section class="panel hidden" data-panel="dataprep">
+      <div class="panel-head">
+        <h2>Generate curated data</h2>
+        <div class="muted" style="font-size: 11.5px;">Produces English-only, human-auditable CSVs under <code>data/&lt;output-dir&gt;/</code></div>
+      </div>
+
+      <div class="muted" style="font-size: 11.5px; margin: 6px 0 12px;">
+        The corpus layout (single-table-per-CSV vs grouped multi-table workbooks)
+        is auto-detected from the source dir. If <code>--source-dir</code> contains
+        subdirectories, each subdirectory is treated as one workbook; otherwise
+        every CSV is a standalone target. Pre-grouping is the job of an
+        upstream step like <code>bing21_group_by_workbook</code>.
+      </div>
+
+      <form id="dp-form-curate" class="launch-form dp-form">
+        <fieldset>
+          <legend>Source &amp; output</legend>
+          <label>
+            <span>Source dir <span class="muted">(under <code>data/</code>)</span></span>
+            <select id="cu-source-dir" data-default="data/Excel50KTables"></select>
+          </label>
+          <label>
+            <span>Output dir</span>
+            <input id="cu-output-dir" type="text" placeholder="data/curated" />
+          </label>
+          <label class="checkbox">
+            <input id="cu-overwrite" type="checkbox" />
+            <span>Overwrite existing files</span>
+          </label>
+          <label class="checkbox">
+            <input id="cu-dedupe-schema-within-group" type="checkbox" checked />
+            <span>Deduplicate same-schema CSVs within a workbook <span class="muted">(grouped only)</span></span>
+          </label>
+        </fieldset>
+
+        <fieldset>
+          <legend>Selection</legend>
+          <label><span>Number of targets <span class="muted">(tables or workbooks)</span></span><input id="cu-num-targets" type="number" min="1" placeholder="5" /></label>
+          <label><span>Min columns</span><input id="cu-min-columns" type="number" min="1" placeholder="2" /></label>
+          <label><span>Max columns</span><input id="cu-max-columns" type="number" min="1" placeholder="10" /></label>
+          <label><span>Min rows</span><input id="cu-min-rows" type="number" min="1" placeholder="10" /></label>
+          <label><span>Max rows</span><input id="cu-max-rows" type="number" min="1" placeholder="100" /></label>
+          <label><span>Min tables / workbook <span class="muted">(grouped only)</span></span><input id="cu-min-tables" type="number" min="1" placeholder="1" /></label>
+          <label><span>Max tables / workbook <span class="muted">(grouped only)</span></span><input id="cu-max-tables" type="number" min="1" placeholder="6" /></label>
+          <label>
+            <span>Oversize policy</span>
+            <select id="cu-oversize">
+              <option value="">(default: subsample)</option>
+              <option value="subsample">subsample (downsample to max-rows)</option>
+              <option value="reject">reject (drop the table)</option>
+            </select>
+          </label>
+          <label><span>Seed</span><input id="cu-seed" type="number" placeholder="42" /></label>
+          <label><span>Max units scanned</span><input id="cu-max-scan" type="number" min="1" placeholder="(no cap)" /></label>
+        </fieldset>
+
+        <fieldset>
+          <legend>Quality gates</legend>
+          <label>
+            <span>Language check</span>
+            <select id="cu-language-check">
+              <option value="">(default: langdetect)</option>
+              <option value="off">off</option>
+              <option value="script">script</option>
+              <option value="langdetect">langdetect</option>
+              <option value="llm">llm</option>
+            </select>
+          </label>
+          <label><span>Min English probability</span><input id="cu-language-min-english-prob" type="number" min="0" max="1" step="0.05" placeholder="0.5" /></label>
+          <label><span>Max non-Latin chars</span><input id="cu-max-non-latin-chars" type="number" min="0" placeholder="0" /></label>
+          <label><span>Max empty-cell ratio</span><input id="cu-max-empty-ratio" type="number" min="0" max="1" step="0.05" placeholder="0.1" /></label>
+          <label><span>Max cell chars <span class="muted">(0 = off)</span></span><input id="cu-max-cell-chars" type="number" min="0" placeholder="200" /></label>
+          <label><span>Max cell words <span class="muted">(0 = off)</span></span><input id="cu-max-cell-words" type="number" min="0" placeholder="40" /></label>
+          <label><span>Max oversized-row ratio</span><input id="cu-max-oversized-row-ratio" type="number" min="0" max="1" step="0.05" placeholder="0.1" /></label>
+          <p class="muted" style="font-size: 11.5px; margin: 4px 0 0;">Each kept table is written empty-free: all-empty columns are dropped, then any row containing an empty cell (incl. <code>-</code>, <code>*</code>, <code>N/A</code> sentinels) or an oversized cell is dropped. Tables whose <em>cleaned</em> shape falls outside the rows/columns windows, or that lose more than the oversized-row ratio to the cell-size gate, are rejected (and in grouped mode the whole workbook with them).</p>
+        </fieldset>
+
+        <div class="form-actions">
+          <button type="button" data-dp-preview="curate">Preview command</button>
+          <button type="submit">Run curate</button>
+        </div>
+        <pre class="cmd-preview" data-dp-cmd="curate" hidden></pre>
+      </form>
+    </section>
+
+    <!-- ========== Jobs tab ========== -->
+    <section class="panel hidden" data-panel="jobs">
+      <div class="panel-head">
+        <h2>Jobs</h2>
+        <button id="refresh-jobs">Refresh</button>
+      </div>
+      <div class="jobs-list" id="jobs-list">(no jobs)</div>
+      <div class="job-detail" id="job-detail" hidden>
+        <div class="panel-head">
+          <h2 id="job-detail-title">Job</h2>
+          <div>
+            <button id="job-cancel">Cancel</button>
+            <button id="job-close">Close</button>
+          </div>
+        </div>
+        <div id="job-detail-meta" class="muted"></div>
+        <pre id="job-log" class="job-log"></pre>
+      </div>
+    </section>
+
+    <!-- ========== Pipeline tab ========== -->
+    <section class="panel hidden" data-panel="pipeline">
+      <div class="panel-head">
+        <h2>How the pipeline works</h2>
+        <a class="btn" href="/api/docs" target="_blank" rel="noopener">API docs →</a>
+      </div>
+
+      <div class="pipeline-doc">
+        <div class="flow">
+          <div class="flow-step">
+            <div class="flow-num">1</div>
+            <div class="flow-body">
+              <h3>Chunk the CSV</h3>
+              <p>Split each table into row-chunks. <code>chunk_size</code> = rows per call. With <code>column_mode=single</code> one call also scopes to one column at a time.</p>
+              <div class="flow-eq">calls = chunks × (1 if <code>all</code> else <code>#columns</code>) × <code>#error_types</code></div>
+            </div>
+          </div>
+
+          <div class="flow-arrow">↓</div>
+
+          <div class="flow-step">
+            <div class="flow-num">2</div>
+            <div class="flow-body">
+              <h3>Phase A · per-type detection</h3>
+              <p>One LLM call per <em>(chunk, error_type)</em>. Each of the <strong>20 error types</strong> has its own targeted prompt. Calls run concurrently against the endpoint pool.</p>
+              <div class="flow-tags">
+                <span class="tag">Single-Column (8)</span>
+                <span class="tag">Multi-Column (6)</span>
+                <span class="tag">Multi-Row (3)</span>
+                <span class="tag">Multi-Table (3)</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="flow-arrow">↓</div>
+
+          <div class="flow-step">
+            <div class="flow-num">3</div>
+            <div class="flow-body">
+              <h3>Phase A · deterministic clustering</h3>
+              <p>Detections sharing the same row + overlapping columns merge into one <code>cluster</code>. Keeps <code>evidence_count</code>, union of columns, and the set of error types.</p>
+            </div>
+          </div>
+
+          <div class="flow-arrow">↓</div>
+
+          <div class="flow-step">
+            <div class="flow-num">4</div>
+            <div class="flow-body">
+              <h3>Phase B · LLM synthesis <span class="muted">(optional)</span></h3>
+              <p>For every multi-type cluster, one extra LLM call picks a <code>primary_error_type</code>, classifies the rest as <code>supporting</code>, emits canonical explanation + fix + confidence, and flags <code>is_likely_false_positive</code>.</p>
+              <p class="muted">Skip via <code>--no-synthesis</code> (checkbox in the launcher).</p>
+            </div>
+          </div>
+
+          <div class="flow-arrow">↓</div>
+
+          <div class="flow-step">
+            <div class="flow-num">5</div>
+            <div class="flow-body">
+              <h3>Outputs</h3>
+              <p>Written under <code>outputs/&lt;run_id&gt;/</code>:</p>
+              <ul class="flow-list">
+                <li><code>detections.jsonl</code> — raw per-type verdicts</li>
+                <li><code>clusters.json</code> — merged + synthesised clusters</li>
+                <li><code>summary.json</code> — run config + counts</li>
+                <li><code>report.html</code> — interactive dashboard (<em>Build report</em>)</li>
+                <li><code>labels.jsonl</code> + <code>benchmark.jsonl</code> — annotator output</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+
+        <div class="concept-grid">
+          <article class="concept-card">
+            <h4>GPT model</h4>
+            <p>Azure-hosted GPT-5 family (configurable via <code>model</code>). Calls go through a pool with built-in concurrency and retries; <code>reasoning_effort</code> controls the thinking budget (low/medium/high).</p>
+          </article>
+
+          <article class="concept-card">
+            <h4><code>column_mode</code></h4>
+            <p><code>single</code>: one call per (chunk, column, error_type). Cheap; required by the 8 single-column types.<br /><code>all</code>: one call sees every column; required for multi-column / multi-row / multi-table types.</p>
+          </article>
+
+          <article class="concept-card">
+            <h4>Scopes</h4>
+            <p>Pick which subset of the 20 error types to run. The four scopes — <em>single-column</em>, <em>multi-column</em>, <em>multi-row</em>, <em>multi-table</em> — correspond to the groups you see in the <strong>Error types</strong> fieldset.</p>
+          </article>
+
+          <article class="concept-card">
+            <h4>Experiment mode</h4>
+            <p><code>single</code>: one pass per (chunk, error_type). Fast.<br /><code>adaptive</code>: Good-Turing / Chao1 multi-pass loop. Each <code>(stop_scope, error_type)</code> arm is tracked independently; the loop halts once every error_type's arms have all saturated under <code>gt_target_missing_mass</code> (or <code>num_runs</code> is reached). Use <em>Stop scope</em> to choose granularity (<code>column</code> = per-(source, column, error_type), <code>dataset</code> = one arm per error_type, etc.).</p>
+          </article>
+
+          <article class="concept-card">
+            <h4>Prompt ensemble</h4>
+            <p>Adaptive mode only. On non-identity passes, an LLM rewriter generates a fresh variant of each per-type prompt. Adds prompt-level diversity to the coverage estimator.</p>
+          </article>
+
+          <article class="concept-card">
+            <h4>Perturbations</h4>
+            <p>Adaptive mode only. Row / column <em>shuffles</em> inject presentation noise across passes so the coverage estimator sees genuinely different detection pools.</p>
+          </article>
+
+          <article class="concept-card">
+            <h4>Labelling + benchmark</h4>
+            <p>From <strong>Runs</strong>, click <em>Label</em> on any run to open the per-cluster annotation UI. <em>Benchmark</em> exports a per-cell <code>benchmark.jsonl</code> ready for downstream eval.</p>
+          </article>
+
+          <article class="concept-card">
+            <h4>SSH-safe jobs</h4>
+            <p>Every job runs in its own session (<code>setsid</code>) and persists state to <code>logs/jobs/*.json</code>. Server restart or SSH drop won't kill a running detection; the <strong>Jobs</strong> tab marks recovered jobs and still lets you cancel them.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div class="toast" id="toast" hidden></div>
+
+  <script type="module" src="./runs.js"></script>
+  <script type="module" src="./compare.js"></script>
+</body>
+</html>

@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Defense-in-depth: block inline-script regressions and third-party loads. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'" />
+  <title>Data cleaning - labelling</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <header>
+    <div class="title">
+      <h1><a href="./" style="color:inherit;">Data-cleaning workbench</a> <span class="muted">· label</span></h1>
+      <div class="meta" id="run-meta">loading…</div>
+    </div>
+    <div class="progress" id="progress"></div>
+    <div class="actions">
+      <a href="./">← Runs</a>
+      <a id="export-link" href="#" download>Export benchmark</a>
+      <a href="/api/docs" target="_blank" rel="noopener">API</a>
+    </div>
+  </header>
+
+  <aside class="sidebar" id="sidebar">
+    <div class="filters">
+      <label>
+        <span>Source</span>
+        <select id="filter-source"><option value="">(all)</option></select>
+        <span id="filter-source-xlsx" class="xlsx-actions" hidden></span>
+      </label>
+      <label>
+        <span>Status</span>
+        <select id="filter-status">
+          <option value="">(any)</option>
+          <option value="unlabeled">unlabeled</option>
+          <option value="tp">tp</option>
+          <option value="fp">fp</option>
+          <option value="partial">partial</option>
+          <option value="unsure">unsure</option>
+          <option value="skip">skip</option>
+        </select>
+      </label>
+      <label>
+        <span>Error type</span>
+        <select id="filter-error-type"><option value="">(any)</option></select>
+      </label>
+    </div>
+    <div class="queue" id="queue"></div>
+  </aside>
+
+  <main class="center" id="center">
+    <div class="csv-head" id="csv-head">
+      <span id="csv-source" class="muted">(no source)</span>
+      <span id="csv-pos" class="muted"></span>
+    </div>
+    <div class="csv-viewer" id="csv-viewer"></div>
+    <!-- Per-(source, column) labelling-effort projection. Driven by the
+         per-arm Good-Turing artifact written by adaptive runs. Hidden
+         when the run has no per-arm estimates (single-pass / fixed-K).
+         Toggle with the disclosure caret in the header. -->
+    <details class="effort-panel" id="effort-panel" hidden>
+      <summary>
+        <span class="effort-summary-text">Labelling effort projection</span>
+        <span id="effort-headline" class="muted"></span>
+      </summary>
+      <div class="effort-body">
+        <p class="muted effort-help">
+          Per <strong>(source, column)</strong> projection of how many
+          distinct defect species the operator should expect to see if
+          they exhaust the cell, derived from the per-arm Chao1 / Good-
+          Turing estimator. Sorted by <em>missed</em> (Chao1's projected
+          unseen species) so high-impact cells surface first. Click a
+          row to filter the queue to that source.
+        </p>
+        <table class="effort-table" id="effort-table">
+          <thead>
+            <tr>
+              <th title="CSV the column belongs to">Source</th>
+              <th title="Column name">Column</th>
+              <th title="Distinct defect species observed across all error types and runs.">Seen</th>
+              <th title="Chao1 projected total distinct species (observed + unseen).">Total est.</th>
+              <th title="Chao1's projected unseen distinct species. The operator should plan to encounter ~this many more.">Missed est.</th>
+              <th title="Good-Turing missing mass: probability the next perturbed run surfaces a never-before-seen species. Higher = more uncertainty about coverage.">GT mass</th>
+              <th title="Cluster verdicts logged in the labelling store for this cell.">Labelled</th>
+              <th title="Saturated arms / total arms (one arm per error_type at this cell). Saturated = stop predicate met.">Arms sat.</th>
+            </tr>
+          </thead>
+          <tbody id="effort-body"></tbody>
+        </table>
+      </div>
+    </details>
+  </main>
+
+  <section class="detail" id="detail">
+    <div class="placeholder">Select a cluster in the queue (or press <kbd>j</kbd>).</div>
+  </section>
+
+  <footer class="shortcuts">
+    <span><kbd>j</kbd>/<kbd>k</kbd> next/prev</span>
+    <span><kbd>1</kbd> tp</span>
+    <span><kbd>2</kbd> fp</span>
+    <span><kbd>3</kbd> partial</span>
+    <span><kbd>4</kbd> unsure</span>
+    <span><kbd>5</kbd> skip</span>
+    <span><kbd>c</kbd> corrected value</span>
+    <span><kbd>n</kbd> note</span>
+    <span><kbd>Enter</kbd> save + next</span>
+    <span class="muted">click any cell to mark FN / re-label</span>
+  </footer>
+
+  <div class="toast" id="toast" hidden></div>
+
+  <script type="module" src="./label.js"></script>
+</body>
+</html>
+

@@ -1,0 +1,362 @@
+# Experiment configuration.
+# Override individual values from the CLI with --key value flags.
+
+experiment:
+  # Overall experiment strategy, consumed by
+  # `python -m experiments.run_cleaning_detection`.
+  #   single   -> one detection pass over each CSV (classic Phase A +
+  #               Phase B pipeline). No perturbation, no Good-Turing.
+  #   adaptive -> run up to `good_turing.num_runs` perturbed passes,
+  #               recompute the Good-Turing / Chao1 false-negative
+  #               estimate after each pass, and stop according to the
+  #               `good_turing.mode` rule (adaptive early-stop or
+  #               fixed K). The final Phase-A clusters / Phase-B
+  #               synthesis / HTML dashboard are built from the UNION
+  #               of detections across all passes; the estimator
+  #               artifacts land under `good_turing/` inside the run
+  #               output directory.
+  #
+  # CLI override: `--mode single|adaptive`.
+  mode: adaptive
+  name: data_cleaning_error_detection
+  description: >
+    Per-type data-cleaning error detection: for each CSV chunk, ask a
+    GPT-5 family model one question per error type in the taxonomy.
+    The taxonomy is the 20 fine-grained error types from
+    error_type.csv, defined in prompts/error_types.yaml. Keys,
+    grouped by Scope:
+      Single-Column:
+        - typo
+        - text_inconsistency
+        - casing_inconsistency
+        - pattern_inconsistency
+        - punctuation_inconsistency
+        - number_format_inconsistency
+        - semantic_incompatible
+        - numeric_outlier
+      Multi-Column (intra-row):
+        - missing_value
+        - embedded_value_error
+        - cross_column_inconsistency
+        - fd_violation
+        - row_calculation_inconsistency
+        - business_rule_violation
+      Multi-Row (intra-table cross-row):
+        - column_aggregation_inconsistency
+        - row_duplication
+        - cross_record_inconsistency
+      Multi-Table (cross-source):
+        - cross_table_error
+        - cross_source_naming_conflict
+        - value_representation_conflict
+    Use prompts.error_types (or the CLI flag --error-types) to run
+    only a subset; the default subset below enables the 8 single-
+    column-friendly types. Per-chunk, per-type results are merged,
+    clustered (Phase A), optionally synthesised (Phase B), and written
+    to outputs/ as JSONL, Markdown, and an interactive HTML dashboard.
+
+data:
+  # Relative to the project root (GPT-5/).
+  # Default is the 100-row seeded subsample (reproducible; see
+  # `python -m src.subsample --help`). Point at the full CSV
+  # (data/0a0a2ebffde940e2a232f26ba3ceb327.csv) via --csv for the final run.
+  csv_path: null
+  # Multi-CSV mode: if csv_dir is set (or --csv points at a directory, or
+  # --csv-dir is passed), every file matching csv_glob inside it is loaded
+  # and processed in a single run. Findings are tagged with their source
+  # filename and clusters never cross CSV boundaries. Leave null to use
+  # csv_path. Example:
+  #   csv_dir: data/curated
+  #   csv_glob: "*.csv"
+  csv_dir: data/curated_pbi
+  csv_glob: "*.csv"
+  # 0 means "start at the first data row".
+  start_row: 0
+  # Number of CSV rows fed to the model per LLM call (a.k.a. "row chunk
+  # size"). With column_mode=single this is the only knob you typically
+  # need - keep it large so the model sees the entire column distribution
+  # in one call. Default 100 = the entire sample_100 in one row chunk.
+  chunk_size: 100
+  # 'all'   = each LLM call sees every CSV column for the row slice.
+  #           REQUIRED for the cross-column / cross-row types:
+  #             cross_column_inconsistency, fd_violation,
+  #             row_calculation_inconsistency, business_rule_violation,
+  #             row_duplication, cross_record_inconsistency,
+  #             and the Multi-Table types
+  #             (cross_table_error, cross_source_naming_conflict,
+  #              value_representation_conflict).
+  # 'single'= each LLM call sees one column at a time. Use this ONLY when
+  #           every selected error type is single-column-friendly, i.e.
+  #           a subset of:
+  #             typo, text_inconsistency, casing_inconsistency,
+  #             pattern_inconsistency, punctuation_inconsistency,
+  #             number_format_inconsistency, semantic_incompatible,
+  #             numeric_outlier, missing_value, embedded_value_error,
+  #             column_aggregation_inconsistency.
+  # Total detection LLM calls = chunks_per_row * (1 if all else len(columns))
+  #                              * len(error_types).
+  column_mode: single
+  # Optional explicit subset of CSV column names to analyse. null/empty
+  # => every column. Useful with column_mode=single to focus on a few
+  # columns of interest, e.g. ["Place name", "Status", "Unit"].
+  columns: null
+  # Cap on the number of chunks analysed (counts (row-slice, column)
+  # pairs in single-column mode). Use null for "all chunks". With the
+  # 100-row sample (33 columns), chunk_size=100, column_mode=single and
+  # the default 8 single-column error types, null => 1 * 33 * 8 = 264
+  # detection calls (plus any Phase-B synthesis).
+  max_chunks: null
+
+llm:
+  model: gpt-5.2
+  reasoning_effort: medium
+  reasoning_summary: detailed
+  # Max in-flight LLM calls for per-type detection. null => min(8,
+  # #endpoints in llm_client.py).
+  concurrency: null
+
+  # ---- Phase-B cluster synthesis ----
+  # After per-type detection, overlapping detections on the same row are
+  # merged into clusters (Phase A, deterministic). For every multi-type
+  # cluster we then fire one extra LLM call that picks a primary error
+  # type, emits a canonical explanation + fix, a confidence score, and an
+  # "is_likely_false_positive" flag. Disable for a free, deterministic-only
+  # run (clusters still materialise, just without canonical fields).
+  enable_synthesis: true
+  # Max in-flight synthesis calls. null => min(8, #endpoints).
+  synthesis_concurrency: null
+  # Reasoning effort for the synthesis call. Defaults to `reasoning_effort`.
+  synthesis_effort: medium
+
+prompts:
+  # Taxonomy definition. The 20 fine-grained error types from
+  # error_type.csv live in prompts/error_types.yaml. There is only one
+  # taxonomy file in the repo; override the path on the CLI with
+  # --error-types-file if you want to experiment with a fork.
+  error_types_file: prompts/error_types.yaml
+  # Phase-B synthesis prompt (shared system + user template).
+  synthesis_prompt_file: prompts/synthesise_cluster.yaml
+  # Scope filter: keep only error types whose `category` starts with one
+  # of these scope prefixes. Recognised scopes (drawn from the categories
+  # in prompts/error_types.yaml):
+  #   - single-column   (typo, text/casing/pattern/punctuation/
+  #                      number-format inconsistency, semantic_incompatible,
+  #                      numeric_outlier)
+  #   - multi-column    (missing_value, embedded_value_error,
+  #                      cross_column_inconsistency, fd_violation,
+  #                      row_calculation_inconsistency,
+  #                      business_rule_violation)
+  #   - multi-row       (column_aggregation_inconsistency, row_duplication,
+  #                      cross_record_inconsistency)
+  #   - multi-table     (cross_table_error, cross_source_naming_conflict,
+  #                      value_representation_conflict)
+  # Combine freely: `[single-column, multi-column]`. Use `null`, an empty
+  # list, or `[all]` to disable filtering. Applied AFTER `error_types`
+  # subset selection. CLI override: `--scopes single-column,multi-column`.
+  #
+  # NOTE: every scope other than `single-column` requires
+  # `data.column_mode: all` so the LLM sees enough context.
+  scopes: [single-column]
+  # Optional subset of error_type keys to run. null / empty => run all
+  # types in the loaded taxonomy.
+  #
+  # Available keys, grouped by Scope:
+  #   Single-Column-friendly (work in column_mode=single):
+  #     - typo
+  #     - text_inconsistency
+  #     - casing_inconsistency
+  #     - pattern_inconsistency
+  #     - punctuation_inconsistency
+  #     - number_format_inconsistency
+  #     - semantic_incompatible
+  #     - numeric_outlier
+  #     - missing_value
+  #     - embedded_value_error
+  #     - column_aggregation_inconsistency
+  #   Require column_mode=all:
+  #     - cross_column_inconsistency
+  #     - fd_violation
+  #     - row_calculation_inconsistency
+  #     - business_rule_violation
+  #     - row_duplication
+  #     - cross_record_inconsistency
+  #   Multi-Table (rare findings; require column_mode=all):
+  #     - cross_table_error
+  #     - cross_source_naming_conflict
+  #     - value_representation_conflict
+  #
+  # Examples:
+  #   error_types: [typo, text_inconsistency, pattern_inconsistency]
+  #   error_types: [semantic_incompatible, numeric_outlier]
+  # Same thing from the CLI (comma-separated, no spaces):
+  #   --error-types typo,text_inconsistency,pattern_inconsistency
+  # Also: `python -m experiments.run_cleaning_detection --list-error-types`
+  # prints every key in the currently-selected taxonomy.
+  #
+  # Default null = all 20 keys; combine with `single_column_only: true`
+  # above to get exactly the 8 Single-Column types.
+  error_types: null
+
+good_turing:
+  # Settings consumed when `experiment.mode=adaptive` (or `--mode adaptive`
+  # on the CLI). Ignored entirely in single mode.
+  #
+  # Up to K passes over the same data, each with a small perturbation so
+  # the detector sees a slightly different view of the world. Detections
+  # are canonicalised into (source, column, row) cell species and
+  # across runs; Good-Turing and Chao1 then estimate how many more
+  # species a hypothetical (K+1)-th run would surface. The final
+  # Phase-A clusters / Phase-B synthesis / HTML dashboard are built from
+  # the UNION of detections across all completed passes.
+  #
+  # Perturbation source (pick one or combine):
+  #   * prompt_ensemble=true  -> on each pass past the identity baseline,
+  #                              an LLM rewrites every selected error
+  #                              type's description+notes+example into
+  #                              a semantically equivalent but
+  #                              linguistically different definition.
+  #                              Recommended default: it injects real
+  #                              variance into what the detector looks
+  #                              for, which makes the GT singletons
+  #                              meaningful for cell-local error types.
+  #   * shuffle_rows=true     -> permute row order (cheap, but barely
+  #                              moves the detector for single-column
+  #                              types).
+  #   * shuffle_columns=true  -> permute column order (only observable
+  #                              in column_mode=all).
+  #
+  # Every key below is overridable on the CLI via `--gt-...`
+  # (e.g. `--gt-mode`, `--gt-num-runs`, `--gt-prompt-ensemble`,
+  # `--no-gt-prompt-ensemble`, `--gt-shuffle-rows`, ...).
+
+  # Stopping strategy.
+  #   fixed    -> always run exactly `num_runs` passes.
+  #   adaptive -> run at least `min_runs`, then stop as soon as the
+  #               Good-Turing missing mass estimate drops to or below
+  #               `target_missing_mass`. `num_runs` acts as a hard
+  #               ceiling so cost is bounded regardless.
+  mode: adaptive
+  # Maximum number of passes (also the exact count when mode=fixed).
+  # Cost scales ~linearly; CIs tighten as runs grow. Typical range 3-10.
+  num_runs: 8
+  # Adaptive-only: minimum number of runs before we even consider
+  # stopping. Prevents stopping on early-sample noise (e.g. run 1
+  # trivially has missing mass 0 if every detection is unique).
+  min_runs: 3
+  # Adaptive-only: stop once the Good-Turing missing mass (the
+  # estimated probability that the next run surfaces a never-seen
+  # defect) falls to this value or below. 0.05 means "<= 5% new
+  # defects expected on the next pass".
+  target_missing_mass: 0.05
+  # Adaptive-only: granularity at which the stop predicate is
+  # evaluated. Each arm = (scope, error_type) is treated as an
+  # independent experiment; the loop stops once every error_type's
+  # arms have all saturated.
+  #   dataset     -> one arm per error_type (pooled across columns and
+  #                  sources). Equivalent to the old
+  #                  `target_policy: per_type`.
+  #   column      -> one arm per (source, column, error_type). Best
+  #                  for cell-local types (typo, formatting, ...).
+  #   csv         -> one arm per (source, error_type). Pools columns
+  #                  but separates files.
+  #   column_pair / row / workbook / cross_csv / multi_table -> see
+  #     src/adaptive/scoped_gt.py for the full menu.
+  stop_scope: column
+  # Seed derivation root. (base_seed, num_runs) -> deterministic
+  # perturbation seeds (independent of LLM non-determinism).
+  base_seed: 42
+
+  # ---- Prompt-ensemble perturbation ----
+  # Ask an LLM to REWRITE each selected error type's description+notes+
+  # example on every non-identity pass. The rewriter is told (strongly)
+  # to preserve semantic scope (what to flag / what not to flag) and to
+  # pick a different rhetorical angle + different illustrative examples.
+  # One generator call per (pass, error_type) on top of the detection
+  # calls - small relative to detection cost, and cheaper if you set
+  # `variant_generation_effort: low`.
+  prompt_ensemble: true
+  # Rewriter prompt template. Relative paths resolve against project root.
+  prompt_variant_template: prompts/generate_prompt_variant.yaml
+  # Reasoning effort for the rewriter (independent of the detection
+  # effort). `low` is usually fine - the rewrite is a short, structured
+  # task.
+  variant_generation_effort: low
+
+  # ---- Frame perturbation (row/column order) ----
+  # Orthogonal to prompt_ensemble; either, both, or neither can be on.
+  # For cell-local types (typo, formatting, etc.) row shuffling barely
+  # moves the detector, so prompt_ensemble is the primary perturbation
+  # source - row shuffle is off by default.
+  shuffle_rows: true
+  # Also permute column order per run. Only observable when
+  # data.column_mode=all. No-op in column_mode=single.
+  shuffle_columns: false
+  # If true, every run (including run 0) is perturbed - both the frame
+  # (row/col shuffle) and the prompts (variant rewrite). Default (false)
+  # keeps run 0 as the un-perturbed baseline so one of the K passes
+  # matches what `mode=single` would have produced.
+  skip_identity_run: false
+
+  # ---- Scope-aware per-arm Chao1 / Good-Turing ----
+  # Each (scope, error_type) pair is an independent experiment; the
+  # adaptive loop stops once every active error_type's arms have all
+  # saturated at the configured `stop_scope` above. Per-arm artifacts
+  # are written to:
+  #   good_turing/per_arm_estimates.json
+  #   good_turing/per_arm_report.md
+  # plus an extra panel inside report.html.
+  #
+  # The loop-level knobs above feed the per-arm defaults:
+  #   * `target_missing_mass` -> default `defaults.epsilon`
+  #   * `min_runs`            -> default `defaults.k_min`
+  #   * `num_runs`            -> default `defaults.k_max`
+  # Setting these explicitly under `per_arm.defaults` overrides the
+  # fallbacks for the global default; per-error-type overrides below
+  # take final precedence. (There is no `s_min` floor: data-cleaning
+  # runs need to allow legitimately rare error types to saturate at
+  # very low S_obs.)
+  per_arm:
+    # Defaults applied to every arm unless overridden in
+    # per_error_type. Any field can be omitted to fall through to the
+    # corresponding loop-level knob (epsilon / min_runs / num_runs)
+    # and finally to ArmConfig.default().
+    defaults:
+      require_two_consecutive: true  # require two passes meeting the threshold
+    # Per-error-type overrides (only set the fields you want to change):
+    # per_error_type:
+    #   typo: {epsilon: 0.02}
+    #   numeric_outlier: {k_min: 4, k_max: 20}
+    # Whitelist: which error_types are applicable to each scope_kind.
+    # Omit to mark every arm applicable.
+    # applicability:
+    #   column: [typo, casing_inconsistency, pattern_inconsistency,
+    #            punctuation_inconsistency, number_format_inconsistency,
+    #            text_inconsistency, semantic_incompatible, numeric_outlier,
+    #            missing_value, embedded_value_error]
+
+output:
+  directory: outputs
+  # Each run produces a timestamped subdirectory under `output.directory`
+  # containing:
+  #   chunk_reports.json(l)   - per (chunk, error_type) results
+  #                             (slim; no raw LLM text)
+  #   issues.json(l)          - raw detections (one per per-type verdict),
+  #                             tagged with error_type and enriched with
+  #                             source-row values
+  #   clusters.json(l)        - Phase-A clusters (+ optional Phase-B
+  #                             synthesis). One record per underlying
+  #                             defect; this is the default dashboard view.
+  #   summary.json            - aggregate counts by error_type,
+  #                             taxonomy category, top columns / rows, plus
+  #                             cluster-level metrics (multi-type counts,
+  #                             primary error type, confidence, likely FPs)
+  #   report.md               - human-readable Markdown summary
+  #   report.html             - self-contained interactive dashboard with
+  #                             a clusters-first dual view ("Clusters" /
+  #                             "Raw detections" toggle)
+  #   raw_responses/          - raw LLM text + reasoning per call, one file
+  #                             per (chunk, error_type) named
+  #                             NNNN__<error_type>.txt
+
+logging:
+  level: INFO

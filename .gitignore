@@ -1,0 +1,42 @@
+# ===== Project-specific large folders =====
+data/
+datasets/
+outputs/
+checkpoints/
+logs/
+runs/
+wandb/
+mlruns/
+*.parquet
+*.jsonl
+*.arrow
+*.feather
+*.h5
+*.hdf5
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Secrets - NEVER commit
+.env
+.env.local
+*.key
+*secret*
+
+# Run outputs
+outputs/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
