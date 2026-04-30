@@ -313,7 +313,8 @@ body.runs-page header .actions a:hover {
 .chip > span { white-space: normal; word-break: break-word; }
 
 /* -------- Error-type groups -------- */
-#error-types {
+#error-types,
+#rel-error-types {
   grid-column: 1 / -1;
   display: flex; flex-direction: column; gap: 8px;
 }
@@ -367,11 +368,74 @@ body.runs-page header .actions a:hover {
 /* GT block: fieldset that highlights it's the adaptive stopping
    rule (visually distinct from generic fieldsets). */
 #gt-block,
-#gt-perturb-fieldset {
+#gt-perturb-fieldset,
+#rel-adaptive-block {
   background: linear-gradient(
     180deg, rgba(96,165,250,0.06), rgba(96,165,250,0.02)
   );
   border-style: dashed;
+}
+
+/* Discover-relations form: violet accent so this tab feels distinct
+   from the (blue) detection launcher without diverging from the
+   shared launch-form layout. */
+.launch-form.discover fieldset::before {
+  background: linear-gradient(180deg, #a78bfa, #f472b6);
+  opacity: 0.85;
+}
+.launch-form.discover legend {
+  color: #c4b5fd;
+}
+.launch-form.discover #rel-adaptive-block {
+  background: linear-gradient(
+    180deg, rgba(167,139,250,0.07), rgba(167,139,250,0.02)
+  );
+}
+.launch-form.discover #rel-adaptive-block.is-on {
+  background: linear-gradient(
+    180deg, rgba(167,139,250,0.14), rgba(167,139,250,0.04)
+  );
+  border-style: solid;
+  border-color: rgba(167,139,250,0.45);
+}
+.launch-form.discover #rel-adaptive-block .field-disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+.launch-form.discover input:focus,
+.launch-form.discover select:focus {
+  border-color: #a78bfa;
+  box-shadow: 0 0 0 3px rgba(167,139,250,0.18);
+}
+.launch-form.discover .chip:hover {
+  border-color: rgba(167,139,250,0.6);
+  background: rgba(167,139,250,0.06);
+}
+.launch-form.discover .chip.active {
+  background: rgba(167,139,250,0.18);
+  color: #c4b5fd;
+  border-color: #a78bfa;
+}
+.launch-form.discover .chip.active:hover {
+  background: rgba(167,139,250,0.24);
+}
+.launch-form.discover .et-group:has(.chip.active) {
+  border-color: rgba(167,139,250,0.45);
+}
+.launch-form.discover .et-group-count.has-selected {
+  color: #c4b5fd;
+  border-color: rgba(167,139,250,0.45);
+  background: rgba(167,139,250,0.10);
+}
+.launch-form.discover .et-group-all:hover {
+  color: #c4b5fd; border-color: #a78bfa;
+}
+.launch-form.discover button[type="submit"] {
+  background: linear-gradient(135deg, #a78bfa, #8b5cf6);
+  border-color: transparent;
+}
+.launch-form.discover button[type="submit"]:hover {
+  background: linear-gradient(135deg, #b5a0fb, #9b6df6);
 }
 #gt-block.disabled,
 #gt-perturb-fieldset.disabled { opacity: 0.4; pointer-events: none; }

@@ -1750,7 +1750,35 @@ def create_app(
         path = outputs_dir / run_id / "report.html"
         if not path.exists():
             raise HTTPException(404, "report.html not generated for this run")
-        return FileResponse(path, media_type="text/html")
+        # The schema-discovery dashboard is a self-contained,
+        # generated HTML artifact with inline <script>/<style> blocks
+        # (no third-party origins, no remote loads). The workbench's
+        # default strict CSP would block its inline JS, so we relax
+        # to "self + inline" just for this endpoint. The frame-ancestors
+        # directive remains 'none' so the report still can't be
+        # iframed by a third party.
+        report_csp = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; "
+            "connect-src 'self'; "
+            "base-uri 'none'; "
+            "form-action 'self'; "
+            "frame-ancestors 'none'"
+        )
+        return FileResponse(
+            path,
+            media_type="text/html",
+            headers={
+                "Content-Security-Policy": report_csp,
+                # Reports are regenerated in place when the user clicks
+                # "Build report"; without this the browser will keep
+                # showing the previous (potentially CSP-broken) copy
+                # forever even after a regenerate.
+                "Cache-Control": "no-store",
+            },
+        )
 
     # ---------------------------------------------------------------
     # Original-xlsx access (download + HTML preview).
@@ -1883,10 +1911,26 @@ def create_app(
     @app.get("/api/launcher/config")
     def launcher_config() -> Dict[str, Any]:
         defaults = load_config_defaults(project_root)
+        # Schema-discovery prompt: surface the subset of error types
+        # for which we have a discovery template, so the UI can filter
+        # the chip list down to multi-column / multi-row / multi-table
+        # types only.
+        relations_types: List[str] = []
+        try:
+            import yaml
+            disc_path = project_root / "prompts" / "discover_relations.yaml"
+            if disc_path.is_file():
+                raw = yaml.safe_load(disc_path.read_text(encoding="utf-8")) or {}
+                types_node = raw.get("types") or {}
+                if isinstance(types_node, dict):
+                    relations_types = sorted(types_node.keys())
+        except Exception:  # noqa: BLE001
+            relations_types = []
         return {
             "project_root": str(project_root),
             "defaults": defaults,
             "error_types": load_taxonomy_keys(project_root),
+            "relations_error_types": relations_types,
             "datasets": list_datasets(project_root / "data"),
             "scopes": ["single-column", "multi-column", "multi-row", "multi-table"],
             "column_modes": ["single", "all"],
@@ -1918,6 +1962,16 @@ def create_app(
                 # Unified curate launcher; legacy kind aliases preserved
                 # so old UI builds and any saved client requests still work.
                 job = jobs.launch_curate(params)
+            elif kind == "relations":
+                job = jobs.launch_relations(params)
+            elif kind == "relation_report":
+                run_id = payload.get("run_id")
+                if not run_id:
+                    raise HTTPException(400, "run_id is required for kind=relation_report")
+                try:
+                    job = jobs.launch_relation_report(run_id)
+                except FileNotFoundError as exc:
+                    raise HTTPException(404, str(exc)) from exc
             else:
                 raise HTTPException(400, f"unknown kind: {kind}")
         except (FileNotFoundError, ValueError) as exc:

@@ -27,7 +27,7 @@ tqdm>=4.65
 # Latin-script non-English tables (French, Spanish, German, ...).
 langdetect>=1.0.9
 
-# Labeling web app (experiments.label_server). FastAPI serves both the
+# Workbench web app (experiments.workbench). FastAPI serves both the
 # JSON API and the static frontend; uvicorn is the ASGI runner. Kept
 # optional-feeling here because the detection pipeline itself does not
 # need them - you can skip installing these on pure batch-runner hosts.

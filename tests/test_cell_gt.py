@@ -72,9 +72,16 @@ def test_dedup_within_a_single_run() -> None:
     ]
     species = list(aggregate_runs(runs).values())
     est = estimate(species, num_runs=2)
-    # Same cell, two error_types in run 0: still ONE species, frequency 1.
+    # One cell is still ONE species (the species table is keyed by
+    # cell), but Good-Turing now operates on RAW emission counts:
+    # the same cell flagged twice within a single pass contributes
+    # ``R_x = 2``, so it lands in n_2, not n_1.
     assert est.n_observed == 1
-    assert est.frequency_counts == {1: 1, 2: 0}
+    assert species[0].raw_hits == 2
+    assert est.frequency_counts.get(1, 0) == 0
+    assert est.frequency_counts.get(2, 0) == 1
+    # Per-pass dedup is preserved on ``runs_found_in`` for diagnostics.
+    assert species[0].runs_found_in == [0]
 
 
 def test_per_error_type_breakdown() -> None:

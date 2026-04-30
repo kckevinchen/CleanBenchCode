@@ -203,18 +203,20 @@ locally.
 
 ---
 
-## Labeling workbench
+## Workbench
 
-`experiments.label_server` spins up a FastAPI workbench that does three
-things from one port: **launch detection runs** via a form, **browse
-every run** under `outputs/`, and **label clusters** to materialise a
-per-cell ground-truth benchmark (`benchmark.jsonl`).
+`experiments.workbench` spins up a FastAPI web app that does everything
+from one port: **launch experiments** via forms (cleaning detection,
+schema/relation discovery, dataset curation, report builds), **browse
+every run** under `outputs/`, **view embedded HTML reports**, and
+**label clusters** to materialise a per-cell ground-truth benchmark
+(`benchmark.jsonl`).
 
 ```bash
 ./scripts/run_server.sh start --port 8000     # detached; survives SSH drops
 ./scripts/run_server.sh status
 ./scripts/run_server.sh stop
-tail -f logs/label_server.log
+tail -f logs/workbench.log
 ```
 
 Job state is persisted to `logs/jobs/<job_id>.json`; running detector

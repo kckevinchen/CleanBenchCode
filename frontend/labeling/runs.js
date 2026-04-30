@@ -73,6 +73,7 @@ async function bootstrap() {
   $("#mode").addEventListener("change", onModeChange);
 
   initDataPrep();
+  initRelationsForm();
 
   // Poll jobs list every 3s (cheap - one small JSON).
   setInterval(refreshJobs, 3000);
@@ -101,6 +102,9 @@ function renderRuns(runs) {
     return;
   }
   box.innerHTML = runs.map((r) => {
+    if (r.kind === "relations") {
+      return renderRelationsRunRow(r);
+    }
     const labelLink = r.has_clusters
       ? `<a class="primary" href="./label.html?run=${encodeURIComponent(r.run_id)}">Label</a>`
       : `<span class="muted">(no clusters)</span>`;
@@ -147,6 +151,23 @@ function renderRuns(runs) {
           body: JSON.stringify({ kind: "report", run_id: b.dataset.run }),
         });
         toast(`build_report started: ${job.job_id}`);
+        showTab("jobs");
+        openJob(job.job_id);
+        refreshJobs();
+      } catch (e) {
+        toast(`error: ${e.message}`, 3500);
+      }
+    });
+  });
+
+  box.querySelectorAll('[data-action="build-relation-report"]').forEach((b) => {
+    b.addEventListener("click", async () => {
+      try {
+        const job = await api("/api/launcher/jobs", {
+          method: "POST",
+          body: JSON.stringify({ kind: "relation_report", run_id: b.dataset.run }),
+        });
+        toast(`relation report build started: ${job.job_id}`);
         showTab("jobs");
         openJob(job.job_id);
         refreshJobs();
@@ -361,6 +382,13 @@ function applyConfigDefaults(defaults) {
   } else {
     markDefaultOption("gt-per-arm-two-consecutive", "true");
   }
+  // stop_when: defaults to "gt" via ArmConfig.default() when absent.
+  markDefaultOption("gt-per-arm-stop-when", perArm.stop_when || "gt");
+  // epsilon_chao1: defaults to 0.05 via ArmConfig.default() when absent.
+  setPlaceholder(
+    "gt-per-arm-epsilon-chao1",
+    perArm.epsilon_chao1 != null ? perArm.epsilon_chao1 : 0.05,
+  );
 
   // ----- Chip pre-selection (error_types) -----
   preselectChips("error-types", prompts.error_types, state.selectedErrorTypes);
@@ -485,6 +513,8 @@ function collectParams() {
         if (v === "false") return false;
         return null;
       })(),
+      gt_per_arm_stop_when: val("gt-per-arm-stop-when"),
+      gt_per_arm_epsilon_chao1: num("gt-per-arm-epsilon-chao1"),
     });
   }
 
@@ -507,6 +537,8 @@ function previewCommand() {
     gt_min_runs: "--gt-min-runs", gt_target_missing_mass: "--gt-target-missing-mass",
     gt_stop_scope: "--gt-stop-scope",
     gt_base_seed: "--gt-base-seed", gt_variant_effort: "--gt-variant-effort",
+    gt_per_arm_stop_when: "--gt-per-arm-stop-when",
+    gt_per_arm_epsilon_chao1: "--gt-per-arm-epsilon-chao1",
   };
   const boolMap = {
     no_synthesis: ["--no-synthesis", null],
@@ -840,3 +872,248 @@ async function onDpSubmit() {
 bootstrap().catch((e) => {
   document.body.innerHTML = `<pre style="padding:20px;color:#f87171;">bootstrap failed: ${escape(e.stack || e.message)}</pre>`;
 });
+
+// =============================================================
+// Schema discovery (multi-column relations)
+// =============================================================
+
+function renderRelationsRunRow(r) {
+  const created = r.created
+    ? escape(r.created.slice(0, 19).replace("T", " ")) + " UTC"
+    : "";
+  const reportLink = r.has_report
+    ? `<a class="primary" href="/api/runs/${encodeURIComponent(r.run_id)}/report" target="_blank" rel="noopener">View relations</a>`
+    : `<button data-action="build-relation-report" data-run="${escape(r.run_id)}">Build report</button>`;
+  const tag = (cls, value, title) => value
+    ? `<span class="tag ${cls}"${title ? ` title="${escape(title)}"` : ""}>${escape(String(value))}</span>`
+    : "";
+  const tags = [
+    `<span class="tag" style="background:rgba(167,139,250,0.14);color:#c4b5fd;border-color:rgba(167,139,250,0.45);">relations</span>`,
+    tag("model", r.model),
+    r.mode ? tag("mode", r.mode) : "",
+    r.n_passes != null
+      ? tag("", `passes ${r.n_passes}`, "adaptive passes")
+      : "",
+    r.n_arms != null && r.n_saturated_arms != null
+      ? tag("", `${r.n_saturated_arms}/${r.n_arms} sat`, "saturated arms / total arms")
+      : "",
+  ].filter(Boolean).join("");
+  // Third stat slot: passes count when adaptive, otherwise show the
+  // adaptive flag is off so the row stays the same width as detection rows.
+  const thirdStat = r.n_passes != null
+    ? `<div class="num"><span class="label">passes</span>${escape(String(r.n_passes))}</div>`
+    : `<div class="num"><span class="label">mode</span>single</div>`;
+  return `
+    <div class="row">
+      <div>
+        <div class="id">${escape(r.run_id)}</div>
+        <div class="sub">${tags}${created ? `<span>${created}</span>` : ""}</div>
+      </div>
+      <div class="num"><span class="label">relations</span>${escape(String(r.n_relations ?? 0))}</div>
+      <div class="num"><span class="label">sources</span>${escape(String(r.n_sources ?? 0))}</div>
+      ${thirdStat}
+      <div class="actions">
+        ${reportLink}
+        <button class="danger" data-action="delete-run" data-run="${escape(r.run_id)}" title="Delete this run">Delete</button>
+      </div>
+    </div>
+  `;
+}
+
+function initRelationsForm() {
+  const cfg = state.launcherConfig || {};
+
+  // Dataset picker (same shape as detection launcher).
+  const sel = $("#rel-csv-dir");
+  if (sel) {
+    sel.innerHTML = `<option value="">(use config default)</option>`;
+    for (const ds of cfg.datasets || []) {
+      const o = document.createElement("option");
+      o.value = ds.path;
+      o.dataset.type = ds.type;
+      o.textContent = ds.type === "dir"
+        ? `${ds.name}/  (${ds.csv_count} CSVs)`
+        : `${ds.name}  (1 file)`;
+      sel.appendChild(o);
+    }
+  }
+
+  // Multi-column relation types only. The backend exposes the
+  // whitelist on /api/launcher/config.relations_error_types — we
+  // reuse the existing chip / et-group machinery from the
+  // detection launcher so the styling is identical.
+  state.relationsErrorTypes = state.relationsErrorTypes || new Set();
+  const allowed = new Set(cfg.relations_error_types || []);
+  const etBox = $("#rel-error-types");
+  if (etBox) {
+    etBox.innerHTML = "";
+    const matched = (cfg.error_types || []).filter((et) =>
+      !allowed.size || allowed.has(et.key)
+    );
+    if (!matched.length) {
+      etBox.innerHTML = `<div class="muted" style="font-size: 12px; padding: 8px 2px;">No discovery templates configured. Add types under <code>prompts/discover_relations.yaml</code>.</div>`;
+    } else {
+      const groups = new Map(); // primary-category -> [et, ...]
+      for (const et of matched) {
+        const cat = ((et.category || "Other").split("/")[0] || "Other").trim();
+        if (!groups.has(cat)) groups.set(cat, []);
+        groups.get(cat).push(et);
+      }
+      for (const [cat, items] of groups) {
+        const group = document.createElement("div");
+        group.className = "et-group";
+        const head = document.createElement("div");
+        head.className = "et-group-head";
+        head.innerHTML = `
+          <span class="et-group-title">${escape(cat)}</span>
+          <span class="et-group-count" data-count>0 / ${items.length}</span>
+          <button type="button" class="et-group-all" data-act="toggle">Select all</button>
+        `;
+        const body = document.createElement("div");
+        body.className = "et-group-body";
+        const chips = [];
+        for (const et of items) {
+          const chip = makeChip(et.key, state.relationsErrorTypes, et.name || et.key);
+          chip.title = et.key + (et.name && et.name !== et.key ? ` \u00b7 ${et.name}` : "");
+          body.appendChild(chip);
+          chips.push(chip);
+        }
+        const countEl = head.querySelector("[data-count]");
+        const toggleBtn = head.querySelector('[data-act="toggle"]');
+        const refreshGroup = () => {
+          const n = chips.filter((c) => c.querySelector("input").checked).length;
+          countEl.textContent = `${n} / ${items.length}`;
+          countEl.classList.toggle("has-selected", n > 0);
+          toggleBtn.textContent = n === items.length ? "Clear all" : "Select all";
+        };
+        toggleBtn.addEventListener("click", () => {
+          const allOn = chips.every((c) => c.querySelector("input").checked);
+          chips.forEach((c) => {
+            const input = c.querySelector("input");
+            const want = !allOn;
+            if (input.checked !== want) {
+              input.checked = want;
+              input.dispatchEvent(new Event("change"));
+            }
+          });
+          refreshGroup();
+        });
+        chips.forEach((c) => {
+          c.querySelector("input").addEventListener("change", refreshGroup);
+        });
+        refreshGroup();
+        group.appendChild(head);
+        group.appendChild(body);
+        etBox.appendChild(group);
+      }
+    }
+  }
+
+  // Placeholders from config.yaml defaults.
+  const defaults = cfg.defaults || {};
+  setPlaceholder("rel-model", defaults.llm?.model);
+  setPlaceholder("rel-csv-glob", defaults.data?.csv_glob);
+  setPlaceholder("rel-reasoning-effort", defaults.llm?.reasoning_effort);
+
+  $("#relations-form")?.addEventListener("submit", onRelSubmit);
+  $("#rel-show-cmd")?.addEventListener("click", previewRelCommand);
+
+  // Adaptive checkbox: highlight the block when on, dim the
+  // per-arm controls when off (the same fields are still tracked
+  // in collectRelParams, which only emits them when adaptive=true).
+  const adapt = $("#rel-adaptive");
+  const block = $("#rel-adaptive-block");
+  const adaptiveFields = ["rel-max-passes", "rel-min-passes", "rel-gt-threshold", "rel-base-seed"];
+  function syncAdaptive() {
+    const on = !!adapt?.checked;
+    block?.classList.toggle("is-on", on);
+    for (const id of adaptiveFields) {
+      const el = document.getElementById(id);
+      if (!el) continue;
+      el.disabled = !on;
+      const wrap = el.closest("label");
+      if (wrap) wrap.classList.toggle("field-disabled", !on);
+    }
+  }
+  adapt?.addEventListener("change", syncAdaptive);
+  syncAdaptive();
+}
+
+function collectRelParams() {
+  const val = (id) => document.getElementById(id)?.value.trim() || null;
+  const num = (id) => {
+    const v = document.getElementById(id)?.value.trim();
+    return v == null || v === "" ? null : Number(v);
+  };
+  const check = (id) => !!document.getElementById(id)?.checked;
+
+  const csvDir = $("#rel-csv-dir");
+  const selected = csvDir?.selectedOptions[0];
+  let csv = null, csv_dir = null;
+  if (selected && selected.value) {
+    if (selected.dataset.type === "file") csv = selected.value;
+    else csv_dir = selected.value;
+  }
+
+  const errorTypes = [...(state.relationsErrorTypes || [])].join(",") || null;
+  const adaptive = check("rel-adaptive");
+  const params = {
+    csv,
+    csv_dir,
+    csv_glob: val("rel-csv-glob"),
+    model: val("rel-model"),
+    reasoning_effort: val("rel-reasoning-effort"),
+    concurrency: num("rel-concurrency"),
+    n_row_samples: num("rel-n-row-samples"),
+    error_types: errorTypes,
+    include_raw: check("rel-include-raw") || null,
+    adaptive: adaptive || null,
+    max_passes: adaptive ? num("rel-max-passes") : null,
+    min_passes: adaptive ? num("rel-min-passes") : null,
+    gt_threshold: adaptive ? num("rel-gt-threshold") : null,
+    base_seed: adaptive ? num("rel-base-seed") : null,
+  };
+  return Object.fromEntries(
+    Object.entries(params).filter(([, v]) => v !== null && v !== "")
+  );
+}
+
+function previewRelCommand() {
+  const p = collectRelParams();
+  const map = {
+    csv: "--csv", csv_dir: "--csv-dir", csv_glob: "--csv-glob",
+    model: "--model", reasoning_effort: "--reasoning-effort",
+    concurrency: "--concurrency", n_row_samples: "--n-row-samples",
+    error_types: "--error-types",
+    max_passes: "--max-passes", min_passes: "--min-passes",
+    gt_threshold: "--gt-threshold", base_seed: "--base-seed",
+  };
+  const flags = [];
+  for (const [k, v] of Object.entries(p)) {
+    if (k === "adaptive" && v) flags.push("--adaptive");
+    else if (k === "include_raw" && v) flags.push("--include-raw");
+    else if (k in map) flags.push(`${map[k]} ${JSON.stringify(v)}`);
+  }
+  const el = $("#rel-cmd-preview");
+  if (!el) return;
+  el.hidden = false;
+  el.textContent = "python -m experiments.run_relation_discovery \\\n    "
+    + flags.join(" \\\n    ");
+}
+
+async function onRelSubmit(e) {
+  e.preventDefault();
+  const params = collectRelParams();
+  try {
+    const job = await api("/api/launcher/jobs", {
+      method: "POST",
+      body: JSON.stringify({ kind: "relations", params }),
+    });
+    toast(`schema discovery launched: ${job.job_id}`);
+    showTab("jobs");
+    openJob(job.job_id);
+    refreshJobs();
+  } catch (err) {
+    toast(`launch failed: ${err.message}`, 4000);
+  }
+}

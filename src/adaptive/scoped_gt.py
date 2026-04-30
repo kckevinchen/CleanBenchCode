@@ -107,6 +107,23 @@ ArmKey = Tuple[ScopeKey, str]
 Locator = Tuple[Any, ...]
 
 
+StopWhen = Literal["gt", "chao1", "both"]
+"""Which estimator(s) gate the per-arm saturation predicate.
+
+* ``"gt"`` (default, back-compat) - stop when the Good-Turing point
+  estimate of next-emission missing mass ``p_0 = n_1 / N`` falls
+  below ``epsilon``. Bounds the *probability mass* on undetected
+  species.
+* ``"chao1"`` - stop when the Chao1 *upper* 95% CI on the missing
+  count, normalised by ``S_obs``, falls below ``epsilon_chao1``.
+  Bounds the *count* of undetected species (using the conservative
+  upper end of the CI because Chao1 itself is a lower bound on S).
+* ``"both"`` - require both criteria simultaneously. Strictly
+  stronger than either alone; the recommended setting when a real
+  FN guarantee on the dataset is needed.
+"""
+
+
 ArmStatus = Literal[
     "active",
     "saturated",
@@ -457,6 +474,11 @@ class SpeciesRecord:
     scope: ScopeKey
     locator: Locator
     runs_found_in: List[int] = field(default_factory=list)
+    # Total raw emissions for this species across all runs, with NO
+    # within-run de-duplication. See the matching field on
+    # ``cell_gt.SpeciesRecord`` for the rationale: it lets the GT
+    # denominator track raw detection volume instead of K * arms.
+    raw_hits: int = 0
 
     @property
     def frequency(self) -> int:
@@ -469,6 +491,7 @@ class SpeciesRecord:
             "locator": list(self.locator),
             "runs_found_in": sorted(self.runs_found_in),
             "frequency": self.frequency,
+            "raw_hits": self.raw_hits,
         }
 
 
@@ -493,14 +516,19 @@ def aggregate_runs_by_scope(
             ):
                 arm: ArmKey = (scope_key, etype)
                 key = (arm, locator)
-                if key in seen_this_run:
-                    continue
-                seen_this_run.add(key)
                 arm_table = table.setdefault(arm, {})
                 rec = arm_table.get(locator)
                 if rec is None:
                     rec = SpeciesRecord(scope=scope_key, locator=locator)
                     arm_table[locator] = rec
+                # Raw-emission counter (no dedup) feeds the
+                # textbook GT denominator (R_x); the
+                # ``runs_found_in`` list remains deduped per
+                # (arm, locator, run) for diagnostic display only.
+                rec.raw_hits += 1
+                if key in seen_this_run:
+                    continue
+                seen_this_run.add(key)
                 rec.runs_found_in.append(run_id)
     return table
 
@@ -616,8 +644,10 @@ def estimate_arm(
     frequency-of-frequencies vector is correctly bounded for arms that
     were probed in fewer passes than the global K.
     """
+    species_list = list(species)
     core = _compute_core(
-        (rec.frequency for rec in species), num_runs=num_runs
+        (int(getattr(rec, "raw_hits", 0)) for rec in species_list),
+        num_runs=num_runs,
     )
     if core.n_observed == 0:
         return _empty_estimate(arm, num_runs)
@@ -684,6 +714,8 @@ class ArmConfig:
     """
 
     epsilon: Optional[float] = None
+    epsilon_chao1: Optional[float] = None
+    stop_when: Optional[StopWhen] = None
     k_min: Optional[int] = None
     k_max: Optional[int] = None
     require_two_consecutive: Optional[bool] = None
@@ -692,6 +724,8 @@ class ArmConfig:
     def default() -> "ArmConfig":
         return ArmConfig(
             epsilon=0.05,
+            epsilon_chao1=0.05,
+            stop_when="gt",
             k_min=3,
             k_max=10,
             require_two_consecutive=True,
@@ -705,6 +739,16 @@ class ArmConfig:
         """
         return ArmConfig(
             epsilon=self.epsilon if self.epsilon is not None else other.epsilon,
+            epsilon_chao1=(
+                self.epsilon_chao1
+                if self.epsilon_chao1 is not None
+                else other.epsilon_chao1
+            ),
+            stop_when=(
+                self.stop_when
+                if self.stop_when is not None
+                else other.stop_when
+            ),
             k_min=self.k_min if self.k_min is not None else other.k_min,
             k_max=self.k_max if self.k_max is not None else other.k_max,
             require_two_consecutive=(
@@ -788,9 +832,16 @@ def evaluate_stop(
     * ``saturated`` is sticky (already-saturated arms stay saturated).
     * ``exhausted`` (K >= K_max) is sticky.
     * ``not_applicable`` is sticky (set externally).
-    * Otherwise: arm is ``saturated`` once
-      ``p_miss <= epsilon`` AND ``K >= k_min`` have both held for
-      ``require_two_consecutive`` ? 2 : 1 consecutive passes;
+    * Otherwise: arm is ``saturated`` once the configured criterion
+      (``cfg.stop_when``) AND ``K >= k_min`` have both held for
+      ``require_two_consecutive`` ? 2 : 1 consecutive passes.
+      Available criteria:
+
+      * ``"gt"``    -- ``p_0 <= epsilon`` (GT missing-mass point est.)
+      * ``"chao1"`` -- ``(chao1_ci_95_high - S_obs) / S_obs <= epsilon_chao1``
+        (upper-95 CI on missing-count fraction)
+      * ``"both"``  -- both of the above hold simultaneously.
+
       ``exhausted`` if ``K >= k_max`` without saturation; else
       ``active``.
 
@@ -805,11 +856,14 @@ def evaluate_stop(
     # belt-and-suspenders so a malformed external config blows up here
     # rather than silently producing wrong answers downstream.
     epsilon = cfg.epsilon
+    epsilon_chao1 = cfg.epsilon_chao1
+    stop_when: StopWhen = cfg.stop_when or "gt"
     k_min = cfg.k_min
     k_max = cfg.k_max
     two = bool(cfg.require_two_consecutive)
     if (
         epsilon is None
+        or epsilon_chao1 is None
         or k_min is None
         or k_max is None
     ):
@@ -818,10 +872,39 @@ def evaluate_stop(
             "ensure global_default is fully populated."
         )
 
-    sat_now = (
-        estimate.good_turing_missing_mass <= epsilon
-        and estimate.num_runs >= k_min
-    )
+    # Good-Turing criterion: point estimate of next-emission missing
+    # mass below ``epsilon``. GT is upward-biased for the true missing
+    # mass so the point estimate is already conservative; no CI wrap.
+    gt_ok = estimate.good_turing_missing_mass <= epsilon
+    # Chao1 criterion: upper 95% CI on missing count, normalised by
+    # S_obs, below ``epsilon_chao1``. Chao1 is a *lower* bound on S, so
+    # ``chao1_ci_95_high - n_observed`` is the conservative upper end
+    # of the missing count.
+    if estimate.n_observed > 0:
+        f0_upper = max(
+            0.0, estimate.chao1_ci_95_high - estimate.n_observed
+        )
+        chao1_ratio = f0_upper / estimate.n_observed
+    else:
+        # No species observed yet: estimator is degenerate. Treat as
+        # "satisfied" only if pure-GT mode is in use (which itself
+        # returns p_miss=0 in this regime); otherwise fail safe.
+        chao1_ratio = float("inf")
+    chao1_ok = chao1_ratio <= epsilon_chao1
+
+    if stop_when == "gt":
+        criterion_ok = gt_ok
+    elif stop_when == "chao1":
+        criterion_ok = chao1_ok
+    elif stop_when == "both":
+        criterion_ok = gt_ok and chao1_ok
+    else:
+        raise ValueError(
+            f"ArmConfig.stop_when has unknown value {stop_when!r}; "
+            "expected one of 'gt', 'chao1', 'both'."
+        )
+
+    sat_now = criterion_ok and estimate.num_runs >= k_min
     new_streak = previous_streak + 1 if sat_now else 0
     threshold = 2 if two else 1
     if new_streak >= threshold:

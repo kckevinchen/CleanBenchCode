@@ -23,8 +23,16 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 import yaml
 
 from .data_loader import CsvChunk
+from .table_digest import TableDigest
 
 logger = logging.getLogger(__name__)
+
+
+# Placeholder rendered into the user prompt when the caller did not
+# supply a :class:`TableDigest` (e.g. legacy single-column runs that
+# don't need cross-row context). Kept short so it does not balloon
+# token counts in the common case.
+_NO_DIGEST_PLACEHOLDER = "(table overview unavailable for this run)"
 
 
 # ---------------------------------------------------------------------------
@@ -96,8 +104,24 @@ class ErrorTaxonomy:
     # Prompt rendering
     # ------------------------------------------------------------------
 
-    def render_user_prompt(self, error_type: ErrorType, chunk: CsvChunk) -> str:
-        """Render the per-type user prompt for a specific CSV chunk."""
+    def render_user_prompt(
+        self,
+        error_type: ErrorType,
+        chunk: CsvChunk,
+        *,
+        digest: Optional[TableDigest] = None,
+    ) -> str:
+        """Render the per-type user prompt for a specific CSV chunk.
+
+        ``digest`` is the optional whole-table summary built by
+        :func:`src.core.table_digest.build_table_digest`. When the
+        ``base.user_template`` carries a ``{table_overview}``
+        placeholder, the digest is rendered into that slot; the
+        chunk row table itself is unchanged. Templates that do not
+        reference ``{table_overview}`` ignore the argument
+        (``str.format`` silently drops unused kwargs), keeping the
+        single-column path backward-compatible.
+        """
         try:
             return self.user_template.format(
                 type_key=error_type.key,
@@ -110,6 +134,10 @@ class ErrorTaxonomy:
                 rows=chunk.to_markdown(),
                 start_row=chunk.start_row,
                 end_row=chunk.end_row,
+                table_overview=(
+                    digest.to_prompt_block() if digest is not None
+                    else _NO_DIGEST_PLACEHOLDER
+                ),
             )
         except KeyError as exc:
             raise KeyError(

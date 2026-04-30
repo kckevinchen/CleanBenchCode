@@ -73,6 +73,7 @@ from src.core.aggregator import (  # noqa: E402
 )
 from src.core.data_loader import (  # noqa: E402
     COLUMN_MODE_ALL,
+    COLUMN_MODE_SINGLE,
     VALID_COLUMN_MODES,
     CsvChunk,
     iter_chunks,
@@ -80,6 +81,7 @@ from src.core.data_loader import (  # noqa: E402
 )
 from src.core.detector import PerTypeCleaningDetector  # noqa: E402
 from src.core.error_taxonomy import load_taxonomy  # noqa: E402
+from src.core.table_digest import TableDigest, build_table_digest  # noqa: E402
 from src.adaptive.cell_gt import (  # noqa: E402
     aggregate_runs,
     estimate,
@@ -349,6 +351,19 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--no-table-digest",
+        action="store_true",
+        help=(
+            "Disable the TABLE OVERVIEW block prepended to every "
+            "per-type detection prompt. Overrides "
+            "data.include_table_digest in the YAML config. The "
+            "digest carries per-column stats, candidate FDs, and "
+            "total-row hints used by the multi-column / multi-row "
+            "error types; turn off for ablations or when running an "
+            "exclusively single-column subset on very wide tables."
+        ),
+    )
+    parser.add_argument(
         "--list-error-types",
         action="store_true",
         help="Print the loaded error-type taxonomy and exit.",
@@ -547,6 +562,36 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help=(
             "Allow saturation after a single passing run "
             "(overrides the config)."
+        ),
+    )
+    parser.add_argument(
+        "--gt-per-arm-stop-when",
+        dest="gt_per_arm_stop_when",
+        choices=["gt", "chao1", "both"],
+        default=None,
+        help=(
+            "Which estimator(s) gate per-arm saturation. "
+            "'gt' (default) -> Good-Turing point estimate p_0 <= "
+            "epsilon (bounds probability mass on undetected "
+            "species). 'chao1' -> Chao1 upper-95 missing-count "
+            "fraction (chao1_ci_95_high - S_obs) / S_obs <= "
+            "epsilon_chao1 (bounds count of undetected species). "
+            "'both' -> require both criteria simultaneously "
+            "(strongest end-to-end FN guarantee). Overrides "
+            "good_turing.per_arm.defaults.stop_when."
+        ),
+    )
+    parser.add_argument(
+        "--gt-per-arm-epsilon-chao1",
+        dest="gt_per_arm_epsilon_chao1",
+        type=float,
+        default=None,
+        help=(
+            "Threshold for the Chao1 stop criterion (only consulted "
+            "when --gt-per-arm-stop-when is 'chao1' or 'both'). "
+            "Default 0.05 = 'estimated missing count is at most 5%% "
+            "of what we've already observed'. Overrides "
+            "good_turing.per_arm.defaults.epsilon_chao1."
         ),
     )
 
@@ -881,6 +926,10 @@ def _resolve_per_arm_config(
             "require_two_consecutive": getattr(
                 args, "gt_per_arm_two_consecutive", None
             ),
+            "stop_when": getattr(args, "gt_per_arm_stop_when", None),
+            "epsilon_chao1": getattr(
+                args, "gt_per_arm_epsilon_chao1", None
+            ),
         }
         for k, v in cli_overrides.items():
             if v is not None:
@@ -937,6 +986,7 @@ def _run_adaptive_loop(
     settings: Dict[str, Any],
     variant_generator: Optional[PromptVariantGenerator],
     run_dir: Path,
+    digests: Optional[Dict[str, TableDigest]] = None,
 ) -> Tuple[List[Any], List[Dict[str, Any]], Dict[str, Any]]:
     """Run the adaptive (multi-pass + Good-Turing) detection loop.
 
@@ -1150,6 +1200,7 @@ def _run_adaptive_loop(
             reasoning_effort=reasoning_effort,
             reasoning_summary=reasoning_summary,
             concurrency=concurrency,
+            digests=digests,
         )
 
         # Per-arm pruning predicate. Skips (chunk, type) pairs whose
@@ -1385,6 +1436,52 @@ def _run_adaptive_loop(
                     entry["status"],
                     entry["k"],
                 )
+            # Active-arms-only Good-Turing summary. The pooled
+            # ``cum_est.good_turing_missing_mass`` logged above
+            # treats every species as if its arm would still be
+            # probed in the next pass, but saturated arms are frozen
+            # - their singletons keep inflating the global numerator
+            # while their hits stop accumulating. The honest
+            # "probability the next emission belongs to a never-yet-
+            # seen species" is ``sum(n1) / sum(N)`` over arms still
+            # ``active`` (and thus actually scheduled for the next
+            # pass), where ``N = sum_x R_x`` is the textbook GT
+            # denominator: total raw detection emissions across the
+            # arm with no within-pass de-duplication.
+            active_n1 = 0
+            active_n_total = 0
+            active_n_observed = 0
+            active_arm_count = 0
+            for arm, est in stop_arm_ests.items():
+                if est.status != "active":
+                    continue
+                active_arm_count += 1
+                active_n1 += int(est.frequency_counts.get(1, 0))
+                active_n_total += int(est.total_hits)
+                active_n_observed += int(est.n_observed)
+            active_gt_missing_mass = (
+                (active_n1 / active_n_total) if active_n_total > 0 else 0.0
+            )
+            logger.info(
+                "  [stop_scope=%s] active-arm GT missing mass=%.2f%% "
+                "(S_obs=%d across %d active arm(s); excludes %d "
+                "saturated/exhausted arm(s))",
+                stop_scope,
+                100.0 * active_gt_missing_mass,
+                active_n_observed,
+                active_arm_count,
+                len(stop_arm_ests) - active_arm_count,
+            )
+            # Annotate this pass's progression entry so downstream
+            # reports / compare-runs tooling can plot the active-arm
+            # mass over time. The legacy pooled fields stay untouched
+            # for back-compat.
+            progression[-1]["active_arm_gt_missing_mass"] = active_gt_missing_mass
+            progression[-1]["active_arm_n_observed"] = active_n_observed
+            progression[-1]["active_arm_count"] = active_arm_count
+            progression[-1]["saturated_arm_count"] = (
+                len(stop_arm_ests) - active_arm_count
+            )
             if newly_saturated_arms:
                 # Estimate next-pass savings so the user can predict
                 # how much smaller the upcoming progress bar will be.
@@ -1936,6 +2033,49 @@ def main(argv: Optional[list[str]] = None) -> int:
             len(df_i.columns),
         )
 
+    # Whole-table digests (TABLE OVERVIEW block prepended to every
+    # per-type prompt). Built once per CSV; the cost is O(columns)
+    # tokens per call, so this stays affordable on tall tables. Off
+    # via `--no-table-digest` or `data.include_table_digest: false`.
+    #
+    # In ``column_mode=single`` each prompt only sees one column, so
+    # the whole-table overview is largely wasted tokens for the
+    # single-column / cell-local error types this mode targets. We
+    # therefore default the digest OFF in single-column mode unless
+    # the user has explicitly opted in via ``data.include_table_digest:
+    # true`` in the YAML config. ``--no-table-digest`` still forces it
+    # off in either mode.
+    cfg_digest = data_cfg.get("include_table_digest", None)
+    if args.no_table_digest:
+        include_digest = False
+    elif cfg_digest is not None:
+        include_digest = bool(cfg_digest)
+    else:
+        include_digest = column_mode != COLUMN_MODE_SINGLE
+    digests: Dict[str, TableDigest] = {}
+    if include_digest:
+        for name, df_i in source_frames.items():
+            try:
+                digests[name] = build_table_digest(df_i, source=name)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "Table digest build failed for %s: %s; "
+                    "continuing without digest for this source",
+                    name, exc,
+                )
+        logger.info(
+            "Built table digests for %d/%d source(s) [include_table_digest=on]",
+            len(digests), len(source_frames),
+        )
+    else:
+        if column_mode == COLUMN_MODE_SINGLE and cfg_digest is None and not args.no_table_digest:
+            logger.info(
+                "Table digest disabled (column_mode=single default; "
+                "set data.include_table_digest=true to force on)"
+            )
+        else:
+            logger.info("Table digest disabled (include_table_digest=off)")
+
     # Chunks are shared across the detector regardless of mode - in
     # adaptive mode we rebuild chunks inside the loop against each
     # perturbed view, but the counts (per_source_chunks, expected_calls)
@@ -2005,6 +2145,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             reasoning_effort=reasoning_effort,
             reasoning_summary=reasoning_summary,
             concurrency=concurrency,
+            digests=digests,
         )
         reports = detector.run(chunks)
         flat_issues = flatten_issues(
@@ -2066,6 +2207,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             settings=adaptive_settings,
             variant_generator=variant_generator,
             run_dir=run_dir,
+            digests=digests,
         )
         logger.info(
             "Adaptive loop finished: %d pass(es) done, %d unified raw detections",
@@ -2138,6 +2280,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         ),
         "synthesis": synthesis_meta,
         "normalize_input": dict(norm_opts.describe()),
+        "include_table_digest": include_digest,
     }
     if mode == "adaptive":
         config_snapshot["good_turing"] = {

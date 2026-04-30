@@ -62,6 +62,16 @@ class RunInfo:
     dataset: Optional[str] = None       # short human label for the corpus
     n_sources: int = 0                  # number of CSV files the run targeted
     normalize_input: bool = False       # ablation flag (text_normalize)
+    # Run kind: "detection" (cleaning pipeline) | "relations" (schema
+    # discovery). Inferred from artifacts on disk - run dirs predate
+    # the "kind" concept so we don't rely on metadata.
+    kind: str = "detection"
+    # Schema-discovery runs only.
+    has_relations: bool = False
+    n_relations: int = 0
+    n_passes: Optional[int] = None
+    n_arms: Optional[int] = None
+    n_saturated_arms: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -79,12 +89,20 @@ class RunInfo:
             "dataset": self.dataset,
             "n_sources": self.n_sources,
             "normalize_input": self.normalize_input,
+            "kind": self.kind,
+            "has_relations": self.has_relations,
+            "n_relations": self.n_relations,
+            "n_passes": self.n_passes,
+            "n_arms": self.n_arms,
+            "n_saturated_arms": self.n_saturated_arms,
         }
 
 
 def _parse_run_dir(path: Path) -> RunInfo:
     summary_path = path / "summary.json"
     clusters_path = path / "clusters.json"
+    relations_path = path / "relations.jsonl"
+    is_relations = relations_path.exists() or (path / "discovery_reports.json").exists()
     model: Optional[str] = None
     mode: Optional[str] = None
     clusters = 0
@@ -92,13 +110,25 @@ def _parse_run_dir(path: Path) -> RunInfo:
     dataset: Optional[str] = None
     n_sources = 0
     normalize_input = False
+    n_relations = 0
+    n_passes: Optional[int] = None
+    n_arms: Optional[int] = None
+    n_saturated_arms: Optional[int] = None
     if summary_path.exists():
         try:
             data = json.loads(summary_path.read_text(encoding="utf-8"))
             cfg = data.get("config") or {}
-            model = cfg.get("model")
-            mode = cfg.get("mode")
+            model = data.get("model") or cfg.get("model")
+            mode = data.get("mode") or cfg.get("mode")
             issues = int(data.get("total_issues") or 0)
+            # Discovery summaries store top-level mode/model (single_pass /
+            # adaptive) and per-pass / per-arm aggregates.
+            if is_relations:
+                n_relations = int(data.get("n_relations") or 0)
+                n_sources = int(data.get("n_sources") or 0)
+                n_passes = data.get("n_passes")
+                n_arms = data.get("n_arms")
+                n_saturated_arms = data.get("n_saturated_arms")
             # Derive a short dataset label from the run config. Prefer the
             # parent directory of the CSV path(s) since that's the corpus
             # name (e.g. "curated_bing21_grouped"); fall back to the basename.
@@ -114,7 +144,8 @@ def _parse_run_dir(path: Path) -> RunInfo:
                     dataset = Path(cfg.get("csv_path") or p.parent).name
                 else:
                     dataset = p.name
-            n_sources = int(cfg.get("source_count") or len(paths) or 0)
+            if not is_relations:
+                n_sources = int(cfg.get("source_count") or len(paths) or 0)
             ni = cfg.get("normalize_input")
             if isinstance(ni, dict):
                 normalize_input = bool(ni.get("enabled"))
@@ -128,6 +159,13 @@ def _parse_run_dir(path: Path) -> RunInfo:
             raw = json.loads(clusters_path.read_text(encoding="utf-8"))
             clusters = len(raw) if isinstance(raw, list) else 0
         except Exception:  # noqa: BLE001
+            pass
+    if is_relations and not n_relations and relations_path.exists():
+        # Fallback: count lines in relations.jsonl when summary is absent.
+        try:
+            with relations_path.open("r", encoding="utf-8") as fh:
+                n_relations = sum(1 for line in fh if line.strip())
+        except OSError:
             pass
     try:
         mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
@@ -150,6 +188,12 @@ def _parse_run_dir(path: Path) -> RunInfo:
         dataset=dataset,
         n_sources=n_sources,
         normalize_input=normalize_input,
+        kind="relations" if is_relations else "detection",
+        has_relations=is_relations,
+        n_relations=n_relations,
+        n_passes=n_passes,
+        n_arms=n_arms,
+        n_saturated_arms=n_saturated_arms,
     )
 
 
@@ -166,8 +210,13 @@ class RunRegistry:
         for child in sorted(self.outputs_dir.iterdir(), reverse=True):
             if not child.is_dir():
                 continue
-            # Heuristic: real runs have at least summary.json OR clusters.json.
-            if not (child / "summary.json").exists() and not (child / "clusters.json").exists():
+            # Heuristic: real runs have at least summary.json OR
+            # clusters.json OR (for schema-discovery runs) relations.jsonl.
+            if (
+                not (child / "summary.json").exists()
+                and not (child / "clusters.json").exists()
+                and not (child / "relations.jsonl").exists()
+            ):
                 # Still include it if a job is currently writing - surface
                 # the dir but mark artifacts absent.
                 pass
@@ -351,14 +400,27 @@ def build_detection_argv(payload: Dict[str, Any]) -> List[str]:
     _append_bool(argv, payload.get("gt_skip_identity_run"), "--gt-skip-identity-run", "--no-gt-skip-identity-run")
     _append_if(argv, "--gt-variant-effort", payload.get("gt_variant_effort"))
 
-    # Scope-aware per-arm overrides. Only require_two_consecutive is
-    # exposed as a separate knob; epsilon / k_min / k_max are unified
-    # with the loop-level target_missing_mass / min_runs / num_runs.
+    # Scope-aware per-arm overrides. Loop-level target_missing_mass /
+    # min_runs / num_runs feed the per-arm epsilon / k_min / k_max so
+    # those are not duplicated here. The remaining per-arm knobs --
+    # require_two_consecutive, stop_when, epsilon_chao1 -- are exposed
+    # individually so the launcher form can experiment with them
+    # without editing the YAML.
     _append_bool(
         argv,
         payload.get("gt_per_arm_two_consecutive"),
         "--gt-per-arm-two-consecutive",
         "--no-gt-per-arm-two-consecutive",
+    )
+    _append_if(
+        argv,
+        "--gt-per-arm-stop-when",
+        payload.get("gt_per_arm_stop_when"),
+    )
+    _append_if(
+        argv,
+        "--gt-per-arm-epsilon-chao1",
+        payload.get("gt_per_arm_epsilon_chao1"),
     )
 
     return argv
@@ -366,6 +428,45 @@ def build_detection_argv(payload: Dict[str, Any]) -> List[str]:
 
 def build_report_argv(run_dir: Path) -> List[str]:
     return ["-m", "experiments.build_report", str(run_dir)]
+
+
+# ---- Schema discovery (multi-column relations) -----------------------------
+
+# Path/glob keys forwarded from the launcher form to
+# ``run_relation_discovery``.  Validated for project-root containment
+# in ``launch_relations`` before the subprocess is spawned.
+_RELATIONS_PATH_KEYS = ("config", "csv", "csv_dir", "output_dir",
+                        "discovery_prompt")
+_RELATIONS_GLOB_KEYS = ("csv_glob",)
+
+
+def build_relations_argv(payload: Dict[str, Any]) -> List[str]:
+    """Translate a UI form payload into a ``run_relation_discovery`` argv."""
+    argv: List[str] = ["-m", "experiments.run_relation_discovery"]
+    _append_if(argv, "--config", payload.get("config"))
+    _append_if(argv, "--csv", payload.get("csv"))
+    _append_if(argv, "--csv-dir", payload.get("csv_dir"))
+    _append_if(argv, "--csv-glob", payload.get("csv_glob"))
+    _append_if(argv, "--model", payload.get("model"))
+    _append_if(argv, "--reasoning-effort", payload.get("reasoning_effort"))
+    _append_if(argv, "--concurrency", payload.get("concurrency"))
+    _append_if(argv, "--error-types", payload.get("error_types"))
+    _append_if(argv, "--n-row-samples", payload.get("n_row_samples"))
+    _append_if(argv, "--output-dir", payload.get("output_dir"))
+    _append_if(argv, "--discovery-prompt", payload.get("discovery_prompt"))
+    if payload.get("include_raw"):
+        argv.append("--include-raw")
+    if payload.get("adaptive"):
+        argv.append("--adaptive")
+        _append_if(argv, "--max-passes", payload.get("max_passes"))
+        _append_if(argv, "--min-passes", payload.get("min_passes"))
+        _append_if(argv, "--gt-threshold", payload.get("gt_threshold"))
+        _append_if(argv, "--base-seed", payload.get("base_seed"))
+    return argv
+
+
+def build_relation_report_argv(run_dir: Path) -> List[str]:
+    return ["-m", "experiments.build_relation_report", str(run_dir)]
 
 
 # ---- Data-prep (unified curate) -------------------------------------------
@@ -541,6 +642,28 @@ class JobManager:
         except ValueError as exc:
             raise ValueError(f"invalid run_id: {exc}") from exc
         return self._launch("report", build_report_argv(run_dir))
+
+    def launch_relations(self, payload: Dict[str, Any]) -> Job:
+        payload = dict(payload)
+        _validate_payload_paths(
+            payload,
+            project_root=self.project_root,
+            path_keys=_RELATIONS_PATH_KEYS,
+            glob_keys=_RELATIONS_GLOB_KEYS,
+        )
+        return self._launch("relations", build_relations_argv(payload))
+
+    def launch_relation_report(self, run_id: str) -> Job:
+        run_dir = self.project_root / "outputs" / run_id
+        if not run_dir.is_dir():
+            raise FileNotFoundError(f"run not found: {run_id}")
+        try:
+            _path_within(str(run_dir), self.project_root)
+        except ValueError as exc:
+            raise ValueError(f"invalid run_id: {exc}") from exc
+        return self._launch(
+            "relation_report", build_relation_report_argv(run_dir),
+        )
 
     def launch_curate(self, payload: Dict[str, Any]) -> Job:
         payload = dict(payload)

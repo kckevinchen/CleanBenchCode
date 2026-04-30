@@ -1,0 +1,1743 @@
+<!--
+  Self-contained schema-discovery report.
+
+  Rendered by experiments.build_relation_report. The placeholder
+  /*__RELATION_DATA_JSON__*/ is replaced at build time with a JSON
+  payload of the form:
+    { run_metadata, summary, relations, sources, gt_summary?,
+      discovery_reports? }
+  No network calls are made at runtime; open the generated report.html
+  directly in a browser.
+
+  Three views share the page:
+    * "Overview"  - headline cards + breakdowns by type / kind / confidence
+    * "Relations" - source-tabbed browser of every discovered relation
+    * "Adaptive"  - per-arm Good-Turing / Chao1 estimates (only present
+                    when the run was launched with --adaptive)
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'" />
+  <title>Schema Discovery Report</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #111c32;
+      --panel-2: #18243f;
+      --border: #233559;
+      --text: #e5eaf2;
+      --muted: #8ea0bf;
+      --accent: #60a5fa;
+      --accent-2: #a78bfa;
+      --ok: #10b981;
+      --warn: #f59e0b;
+      --bad: #ef4444;
+      --kind-fd: #60a5fa;
+      --kind-comp: #a78bfa;
+      --kind-calc: #34d399;
+      --kind-other: #f472b6;
+      --conf-high: #10b981;
+      --conf-medium: #f59e0b;
+      --conf-low: #94a3b8;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background: var(--bg); color: var(--text);
+      font-size: 14px; line-height: 1.45;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    code, pre, kbd {
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    }
+    header {
+      padding: 20px 28px; border-bottom: 1px solid var(--border);
+      background: linear-gradient(180deg, #0f172a 0%, #0b1120 100%);
+    }
+    header h1 { margin: 0 0 6px 0; font-size: 20px; font-weight: 600; letter-spacing: 0.2px; }
+    header h1 .accent { color: var(--accent); }
+    header .meta {
+      color: var(--muted); font-size: 12.5px;
+      display: flex; gap: 18px; flex-wrap: wrap;
+    }
+    header .meta code {
+      background: var(--panel-2); padding: 2px 6px; border-radius: 4px;
+      font-size: 12px; color: var(--text);
+    }
+    main { padding: 20px 28px 60px; }
+
+    /* View toggle (mirrors the cleaning dashboard). */
+    .view-toggle {
+      display: inline-flex; background: var(--panel); border: 1px solid var(--border);
+      border-radius: 8px; padding: 3px; margin-bottom: 18px;
+    }
+    .view-toggle button {
+      background: transparent; color: var(--muted); border: none;
+      padding: 6px 14px; font-size: 13px; font-weight: 600;
+      border-radius: 6px; cursor: pointer; letter-spacing: 0.3px;
+      font-family: inherit;
+    }
+    .view-toggle button.active { background: var(--accent); color: #0b1120; }
+    .view { display: none; }
+    .view.active { display: block; }
+
+    /* Cards */
+    .grid { display: grid; gap: 16px; }
+    .grid.cards { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+    .grid.charts { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); margin-top: 16px; }
+    .card {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 10px; padding: 14px 16px;
+    }
+    .card .label {
+      color: var(--muted); font-size: 11.5px;
+      text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 4px;
+    }
+    .card .value { font-size: 22px; font-weight: 600; }
+    .card .sub { color: var(--muted); font-size: 11.5px; margin-top: 4px; }
+    .card.bad   .value { color: var(--bad); }
+    .card.warn  .value { color: var(--warn); }
+    .card.ok    .value { color: var(--ok); }
+
+    .panel-block {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 10px; padding: 16px 18px;
+    }
+    .panel-block h2 {
+      margin: 0 0 10px 0; font-size: 14px; font-weight: 600; color: var(--text);
+      letter-spacing: 0.3px;
+    }
+
+    /* Horizontal bar chart (no SVG dep). */
+    .bars { display: flex; flex-direction: column; gap: 6px; }
+    .bar-row { display: grid; grid-template-columns: 160px 1fr 60px; align-items: center; gap: 8px; }
+    .bar-row .bar-label { color: var(--text); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .bar-row .bar-track {
+      height: 14px; background: var(--panel-2); border-radius: 4px;
+      position: relative; overflow: hidden;
+    }
+    .bar-row .bar-fill {
+      position: absolute; left: 0; top: 0; bottom: 0;
+      background: linear-gradient(90deg, var(--accent) 0%, var(--accent-2) 100%);
+      border-radius: 4px;
+    }
+    .bar-row .bar-value { color: var(--muted); font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
+
+    /* Source tabs (copied from cleaning dashboard for visual parity). */
+    .source-tabs {
+      display: flex; flex-wrap: wrap; gap: 2px;
+      border-bottom: 1px solid var(--border);
+      margin: 4px 0 18px; padding-bottom: 0;
+    }
+    .source-tabs button {
+      background: transparent; color: var(--muted);
+      border: 1px solid transparent; border-bottom: none;
+      padding: 7px 14px; font-size: 12.5px; font-weight: 600;
+      font-family: inherit; border-radius: 6px 6px 0 0;
+      cursor: pointer; margin-bottom: -1px; letter-spacing: 0.2px;
+      max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .source-tabs button:hover { color: var(--text); }
+    .source-tabs button.active {
+      background: var(--panel); border-color: var(--border); color: var(--accent);
+    }
+    .source-tabs .tab-count {
+      color: var(--muted); font-weight: 500; margin-left: 6px; font-size: 11.5px;
+    }
+    .source-tabs button.active .tab-count { color: var(--text); }
+    .source-tabs button.empty { opacity: 0.55; }
+    .source-tabs-search { flex: 0 0 100%; margin: 4px 0 6px; }
+    .source-tabs-search input {
+      width: 260px; max-width: 100%; padding: 5px 9px;
+      font-family: inherit; font-size: 12px;
+      background: var(--panel); color: var(--text);
+      border: 1px solid var(--border); border-radius: 6px;
+    }
+    .source-tabs-search input::placeholder { color: var(--muted); }
+
+    /* Relation cards */
+    .relations-toolbar {
+      display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+      margin-bottom: 12px;
+    }
+    .relations-toolbar input[type="search"] {
+      flex: 1 1 280px; padding: 7px 10px;
+      font-family: inherit; font-size: 13px;
+      background: var(--panel); color: var(--text);
+      border: 1px solid var(--border); border-radius: 6px;
+    }
+    .relations-toolbar select {
+      padding: 6px 8px; background: var(--panel); color: var(--text);
+      border: 1px solid var(--border); border-radius: 6px; font-family: inherit; font-size: 13px;
+    }
+    .relations-list { display: flex; flex-direction: column; gap: 12px; }
+
+    /* Two-column layout: per-source context strip pinned to the left,
+       relations list (toolbar + cards) on the right. Collapses to a
+       single column on narrow viewports. */
+    .relations-layout {
+      display: grid;
+      grid-template-columns: minmax(280px, 360px) 1fr;
+      gap: 20px;
+      align-items: start;
+    }
+    .relations-layout > .rel-context-col {
+      position: sticky; top: 12px;
+      max-height: calc(100vh - 24px);
+      overflow: auto;
+    }
+    .relations-layout > .rel-context-col.empty { display: none; }
+    .relations-layout > .rel-main-col { min-width: 0; }
+    @media (max-width: 980px) {
+      .relations-layout { grid-template-columns: 1fr; }
+      .relations-layout > .rel-context-col {
+        position: static; max-height: none;
+      }
+    }
+
+    /* Error-type grouping inside the relations list. */
+    .rel-group-header {
+      display: flex; align-items: center; gap: 8px;
+      margin: 14px 0 4px 0;
+      padding: 6px 10px;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--accent);
+      border-radius: 6px;
+      font-size: 13px; font-weight: 600; color: var(--text);
+    }
+    .rel-group-header:first-child { margin-top: 0; }
+    .rel-group-header .count {
+      color: var(--muted); font-weight: 500; font-size: 12px;
+    }
+    .relation-card {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 10px; padding: 14px 16px;
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    .relation-card .head { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+    .relation-card .predicate {
+      font-size: 14.5px; color: var(--text); line-height: 1.5;
+    }
+    .relation-card .columns-line {
+      font-size: 12.5px; color: var(--muted); display: flex; flex-wrap: wrap;
+      gap: 6px; align-items: center;
+    }
+    .relation-card .arrow { color: var(--muted); padding: 0 2px; }
+    .relation-card .executable {
+      background: var(--panel-2); padding: 8px 10px; border-radius: 6px;
+      font-size: 12.5px; color: var(--text); overflow-x: auto;
+      border: 1px solid var(--border);
+    }
+    .relation-card .rationale { color: var(--muted); font-size: 12.5px; font-style: italic; }
+    .relation-card .footer { display: flex; gap: 12px; flex-wrap: wrap; color: var(--muted); font-size: 11.5px; }
+    .pill {
+      display: inline-block; padding: 2px 8px; border-radius: 999px;
+      font-size: 11px; font-weight: 600; letter-spacing: 0.3px;
+      border: 1px solid var(--border); background: var(--panel-2);
+      color: var(--text); white-space: nowrap;
+    }
+    .pill.kind-fd       { color: var(--kind-fd);    border-color: rgba(96,165,250,0.45);  background: rgba(96,165,250,0.10); }
+    .pill.kind-composite_fd { color: var(--kind-comp); border-color: rgba(167,139,250,0.45); background: rgba(167,139,250,0.10); }
+    .pill.kind-product, .pill.kind-sum, .pill.kind-difference,
+    .pill.kind-ratio, .pill.kind-percentage,
+    .pill.kind-aggregate {
+      color: var(--kind-calc); border-color: rgba(52,211,153,0.45); background: rgba(52,211,153,0.10);
+    }
+    .pill.kind-other    { color: var(--kind-other); border-color: rgba(244,114,182,0.45); background: rgba(244,114,182,0.10); }
+    .pill.conf-high     { color: var(--conf-high);  border-color: rgba(16,185,129,0.45); background: rgba(16,185,129,0.10); }
+    .pill.conf-medium   { color: var(--conf-medium);border-color: rgba(245,158,11,0.45); background: rgba(245,158,11,0.10); }
+    .pill.conf-low      { color: var(--conf-low);   }
+    .pill.type-pill     { color: var(--accent); border-color: rgba(96,165,250,0.45); background: rgba(96,165,250,0.10); }
+    .pill.passes        { color: var(--muted); }
+    .col-chip {
+      display: inline-block; padding: 1px 7px; border-radius: 4px;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 12px; background: var(--panel-2); color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .col-chip.lhs { border-color: rgba(96,165,250,0.45); }
+    .col-chip.rhs { border-color: rgba(167,139,250,0.45); }
+
+    /* Empty / placeholder states */
+    .empty-state {
+      padding: 32px; text-align: center; color: var(--muted);
+      background: var(--panel); border: 1px dashed var(--border);
+      border-radius: 10px;
+    }
+
+    /* Per-source context strip (Relations view): shows shape,
+       headers, candidate FDs, identity columns for the active CSV
+       so users have grounding for the relations listed below. */
+    .source-context {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 10px; padding: 14px 16px; margin-bottom: 14px;
+    }
+    .source-context.compact { padding: 10px 14px; }
+    .source-context .ctx-head {
+      display: flex; flex-wrap: wrap; align-items: baseline;
+      gap: 10px 14px; margin-bottom: 10px;
+    }
+    .source-context .ctx-head h3 {
+      margin: 0; font-size: 14px; font-weight: 600;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      color: var(--text);
+    }
+    .source-context .ctx-stats {
+      color: var(--muted); font-size: 12px;
+      display: flex; flex-wrap: wrap; gap: 4px 12px;
+    }
+    .source-context .ctx-stats b {
+      color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums;
+    }
+    .source-context .ctx-section {
+      margin-top: 8px; font-size: 12.5px;
+    }
+    .source-context .ctx-section .ctx-label {
+      color: var(--muted); font-size: 11.5px; text-transform: uppercase;
+      letter-spacing: 0.5px; margin-bottom: 4px;
+    }
+    .source-context .ctx-cols {
+      display: flex; flex-wrap: wrap; gap: 4px;
+    }
+    .source-context .ctx-cols .col-chip { font-size: 11.5px; padding: 1px 7px; }
+    .source-context .ctx-cols .col-chip.id-like {
+      border-color: rgba(245,158,11,0.55); color: var(--warn);
+    }
+    .source-context .ctx-cols .col-chip.numeric {
+      border-color: rgba(52,211,153,0.45);
+    }
+    .source-context details.ctx-fold > summary {
+      cursor: pointer; color: var(--muted); font-size: 12px;
+      list-style: none; user-select: none;
+      padding: 4px 0;
+    }
+    .source-context details.ctx-fold > summary::-webkit-details-marker { display: none; }
+    .source-context details.ctx-fold > summary::before {
+      content: "\25B8 "; color: var(--muted); margin-right: 4px;
+      transition: transform 120ms ease; display: inline-block;
+    }
+    .source-context details.ctx-fold[open] > summary::before {
+      content: "\25BE ";
+    }
+    .source-context .ctx-fds {
+      display: flex; flex-direction: column; gap: 3px;
+      margin-top: 6px;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 12px;
+    }
+    .source-context .ctx-fds .fd-row { color: var(--text); }
+    .source-context .ctx-fds .fd-row .support {
+      color: var(--muted); font-family: inherit; margin-left: 8px;
+      font-size: 11.5px;
+    }
+
+    /* Per-column detail: grid of mini-cards, one per column.
+       Each card shows the column name + dtype badge, counts,
+       optional numeric range, a top-values mini-table, and a
+       sample-values chip row. Designed for at-a-glance auditing
+       of "what does this column actually contain". */
+    .col-detail-grid {
+      display: grid; gap: 10px; margin-top: 6px;
+      grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    }
+    .col-detail-card {
+      background: var(--panel-2); border: 1px solid var(--border);
+      border-radius: 8px; padding: 10px 12px;
+      display: flex; flex-direction: column; gap: 6px;
+      font-size: 12px;
+    }
+    .col-detail-card.numeric { border-left: 3px solid var(--kind-calc); }
+    .col-detail-card.text    { border-left: 3px solid var(--kind-fd); }
+    .col-detail-card.id-like { border-left: 3px solid var(--warn); }
+    .col-detail-card .cd-head {
+      display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    }
+    .col-detail-card .cd-name {
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-weight: 600; color: var(--text); font-size: 12.5px;
+      word-break: break-word; flex: 1 1 auto; min-width: 0;
+    }
+    .col-detail-card .cd-badge {
+      font-size: 10px; padding: 1px 6px; border-radius: 4px;
+      text-transform: uppercase; letter-spacing: 0.4px; font-weight: 600;
+      border: 1px solid var(--border);
+    }
+    .col-detail-card .cd-badge.numeric {
+      color: var(--kind-calc); border-color: rgba(52,211,153,0.45);
+      background: rgba(52,211,153,0.10);
+    }
+    .col-detail-card .cd-badge.text {
+      color: var(--kind-fd); border-color: rgba(96,165,250,0.45);
+      background: rgba(96,165,250,0.10);
+    }
+    .col-detail-card .cd-badge.empty {
+      color: var(--muted);
+    }
+    .col-detail-card .cd-stats {
+      color: var(--muted); font-size: 11.5px;
+      display: flex; flex-wrap: wrap; gap: 2px 10px;
+    }
+    .col-detail-card .cd-stats b {
+      color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums;
+    }
+    .col-detail-card .cd-numeric-range {
+      color: var(--muted); font-size: 11.5px;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    }
+    .col-detail-card .cd-numeric-range b {
+      color: var(--text); font-weight: 600;
+    }
+    .col-detail-card .cd-section-label {
+      color: var(--muted); font-size: 10.5px; text-transform: uppercase;
+      letter-spacing: 0.5px; margin-top: 2px;
+    }
+    .col-detail-card .cd-top {
+      display: flex; flex-direction: column; gap: 2px;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 11.5px;
+    }
+    .col-detail-card .cd-top-row {
+      display: flex; gap: 6px; align-items: baseline;
+      color: var(--text);
+    }
+    .col-detail-card .cd-top-row .cd-val {
+      flex: 1 1 auto; min-width: 0;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .col-detail-card .cd-top-row .cd-count {
+      color: var(--muted); flex: 0 0 auto;
+      font-variant-numeric: tabular-nums;
+    }
+    .col-detail-card .cd-top-row .cd-bar {
+      flex: 0 0 32px; height: 4px; border-radius: 2px;
+      background: linear-gradient(to right, rgba(96,165,250,0.55) var(--pct, 0%), var(--border) 0);
+      align-self: center;
+    }
+    .col-detail-card .cd-samples {
+      display: flex; flex-wrap: wrap; gap: 3px;
+    }
+    .col-detail-card .cd-samples .sample-chip {
+      display: inline-block; padding: 1px 6px; border-radius: 4px;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 11px; background: var(--panel); color: var(--text);
+      border: 1px solid var(--border);
+      max-width: 100%;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+
+    /* Near-duplicate variant block on a relation card. */
+    .rel-collapse-toggle {
+      display: inline-flex; align-items: center; gap: 6px;
+      color: var(--muted); font-size: 12px; cursor: pointer;
+      user-select: none;
+    }
+    .rel-collapse-toggle input { margin: 0; cursor: pointer; }
+    .relation-card .variants-summary {
+      color: var(--muted); font-size: 11.5px;
+      cursor: pointer; user-select: none; padding: 2px 0;
+      list-style: none;
+    }
+    .relation-card .variants-summary::-webkit-details-marker { display: none; }
+    .relation-card .variants-summary::before {
+      content: "\25B8 "; color: var(--muted); margin-right: 4px;
+      display: inline-block;
+    }
+    .relation-card details.variants[open] > .variants-summary::before {
+      content: "\25BE ";
+    }
+    .relation-card .variants-list {
+      margin-top: 4px; display: flex; flex-direction: column; gap: 4px;
+      padding-left: 12px; border-left: 2px solid var(--border);
+    }
+    .relation-card .variant-row {
+      display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap;
+      font-size: 12px; color: var(--text);
+    }
+    .relation-card .variant-row .pill { font-size: 10.5px; padding: 1px 6px; }
+    .relation-card .variant-row .v-pred {
+      flex: 1 1 auto; min-width: 0; color: var(--muted); font-style: italic;
+    }
+
+    /* Data-preview tables (used both in the per-source context strip
+       and inside relation cards as a "show me the rows" affordance). */
+    .data-preview-wrap {
+      max-height: 320px; overflow: auto; margin-top: 6px;
+      border: 1px solid var(--border); border-radius: 6px;
+      background: var(--panel-2);
+    }
+    table.data-preview {
+      width: 100%; border-collapse: collapse;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 11.5px; color: var(--text);
+    }
+    table.data-preview thead th {
+      position: sticky; top: 0;
+      background: var(--panel); color: var(--muted);
+      font-weight: 600; text-align: left;
+      padding: 5px 8px; border-bottom: 1px solid var(--border);
+      font-size: 11px; text-transform: none; letter-spacing: 0;
+      white-space: nowrap;
+    }
+    table.data-preview thead th.col-highlight {
+      color: var(--accent); background: rgba(96,165,250,0.08);
+    }
+    table.data-preview thead th.col-row-idx {
+      color: var(--muted); width: 40px;
+    }
+    table.data-preview tbody td {
+      padding: 4px 8px; border-bottom: 1px solid var(--border);
+      vertical-align: top; max-width: 240px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    table.data-preview tbody tr:hover td { background: rgba(96,165,250,0.04); }
+    table.data-preview tbody td.col-highlight {
+      background: rgba(96,165,250,0.06); color: var(--text);
+    }
+    table.data-preview tbody td.col-row-idx {
+      color: var(--muted); font-variant-numeric: tabular-nums; text-align: right;
+    }
+    table.data-preview tbody td.empty {
+      color: var(--muted); font-style: italic;
+    }
+    .data-preview-foot {
+      color: var(--muted); font-size: 11px;
+      padding: 4px 8px; border-top: 1px solid var(--border);
+      background: var(--panel);
+    }
+    .relation-card details.rel-data > summary {
+      cursor: pointer; user-select: none; list-style: none;
+      color: var(--muted); font-size: 11.5px; padding: 2px 0;
+    }
+    .relation-card details.rel-data > summary::-webkit-details-marker { display: none; }
+    .relation-card details.rel-data > summary::before {
+      content: "\25B8 "; color: var(--muted); margin-right: 4px;
+    }
+    .relation-card details.rel-data[open] > summary::before { content: "\25BE "; }
+
+    /* Sources overview view: card grid with one card per CSV. */
+    .source-grid {
+      display: grid; gap: 14px;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    }
+    .source-card {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 10px; padding: 14px 16px;
+      display: flex; flex-direction: column; gap: 8px;
+      cursor: pointer; transition: border-color 120ms ease, transform 60ms ease;
+    }
+    .source-card:hover { border-color: rgba(96,165,250,0.55); }
+    .source-card:active { transform: scale(0.997); }
+    .source-card .name {
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 13px; font-weight: 600; color: var(--text);
+      word-break: break-all;
+    }
+    .source-card .row {
+      display: flex; flex-wrap: wrap; gap: 4px 12px;
+      color: var(--muted); font-size: 12px;
+    }
+    .source-card .row b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+    .source-card .col-chips {
+      display: flex; flex-wrap: wrap; gap: 3px;
+      max-height: 56px; overflow: hidden; position: relative;
+    }
+    .source-card .col-chips .col-chip { font-size: 11.5px; padding: 1px 6px; }
+    .source-card .relations-count {
+      margin-top: auto; padding-top: 6px;
+      border-top: 1px solid var(--border);
+      display: flex; justify-content: space-between; align-items: center;
+      color: var(--muted); font-size: 12px;
+    }
+    .source-card .relations-count b {
+      color: var(--accent); font-weight: 600; font-variant-numeric: tabular-nums;
+    }
+    .source-card.empty .relations-count b { color: var(--muted); }
+
+    /* Adaptive (GT) view */
+    .gt-table-wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; }
+    table.gt-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+    table.gt-table th, table.gt-table td {
+      padding: 8px 10px; text-align: left;
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+    table.gt-table th {
+      color: var(--muted); font-weight: 600; text-transform: uppercase;
+      font-size: 11px; letter-spacing: 0.5px;
+      background: var(--panel-2); position: sticky; top: 0;
+    }
+    table.gt-table td.num { font-variant-numeric: tabular-nums; text-align: right; }
+    table.gt-table tr:hover td { background: rgba(96,165,250,0.04); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1><span class="accent">Schema Discovery</span> &mdash; Multi-Column Relations</h1>
+    <div class="meta" id="run-meta"></div>
+  </header>
+
+  <main>
+    <div class="view-toggle" id="view-toggle">
+      <button data-view="overview" class="active">Overview</button>
+      <button data-view="sources">Sources</button>
+      <button data-view="relations">Relations</button>
+      <button data-view="gt" id="view-toggle-gt" style="display:none">Adaptive (GT)</button>
+    </div>
+
+    <!-- ============================ OVERVIEW ============================ -->
+    <section class="view active" id="view-overview">
+      <section class="grid cards" id="overview-cards"></section>
+
+      <section class="grid charts" style="margin-top:18px">
+        <div class="panel-block">
+          <h2>Relations by error type</h2>
+          <div class="bars" id="bars-by-type"></div>
+        </div>
+        <div class="panel-block">
+          <h2>Relations by kind</h2>
+          <div class="bars" id="bars-by-kind"></div>
+        </div>
+        <div class="panel-block">
+          <h2>Relations by confidence</h2>
+          <div class="bars" id="bars-by-conf"></div>
+        </div>
+        <div class="panel-block">
+          <h2>Relations per source (top 20)</h2>
+          <div class="bars" id="bars-by-source"></div>
+        </div>
+      </section>
+    </section>
+
+    <!-- ============================ SOURCES ============================= -->
+    <section class="view" id="view-sources">
+      <div class="relations-toolbar" style="margin-bottom: 14px;">
+        <input type="search" id="src-q" placeholder="Filter sources by name or column...">
+      </div>
+      <div class="source-grid" id="src-grid"></div>
+    </section>
+
+    <!-- ============================ RELATIONS =========================== -->
+    <section class="view" id="view-relations">
+      <nav class="source-tabs" id="rel-source-tabs" aria-label="Source CSV tabs"></nav>
+      <div class="relations-layout">
+        <aside class="rel-context-col" id="rel-source-context"></aside>
+        <div class="rel-main-col">
+          <div class="relations-toolbar">
+            <input type="search" id="rel-q" placeholder="Search predicate, rationale, columns...">
+            <select id="rel-filter-type"><option value="">All error types</option></select>
+            <select id="rel-filter-kind"><option value="">All kinds</option></select>
+            <select id="rel-filter-conf">
+              <option value="">All confidences</option>
+              <option value="high">high</option>
+              <option value="medium">medium</option>
+              <option value="low">low</option>
+            </select>
+            <label class="rel-collapse-toggle" title="Collapse near-duplicate paraphrases under one card. Originals are preserved in relations.jsonl.">
+              <input type="checkbox" id="rel-collapse-dup" checked>
+              Collapse near-duplicates
+            </label>
+          </div>
+          <div class="relations-list" id="rel-list"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- =========================== ADAPTIVE GT ========================== -->
+    <section class="view" id="view-gt">
+      <section class="grid cards" id="gt-cards"></section>
+      <section class="grid charts" style="margin-top:18px">
+        <div class="panel-block">
+          <h2>Arms saturated by pass</h2>
+          <div class="bars" id="gt-bars-saturation"></div>
+        </div>
+        <div class="panel-block">
+          <h2>Per error type (passes &amp; saturation)</h2>
+          <div class="bars" id="gt-bars-by-type"></div>
+        </div>
+      </section>
+      <div class="panel-block" style="margin-top:18px">
+        <h2>Per arm (source &times; error type)</h2>
+        <div class="gt-table-wrap">
+          <table class="gt-table" id="gt-arms-table">
+            <thead>
+              <tr>
+                <th>Source</th>
+                <th>Error type</th>
+                <th class="num">Passes</th>
+                <th class="num">Species observed</th>
+                <th class="num">GT missing-mass</th>
+                <th class="num">FN-rate (point)</th>
+                <th class="num">FN-rate 95% CI</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script id="report-data" type="application/json">
+/*__RELATION_DATA_JSON__*/
+  </script>
+
+  <script>
+    (function () {
+      "use strict";
+
+      function h(tag, attrs, children) {
+        var el = document.createElement(tag);
+        if (attrs) {
+          Object.keys(attrs).forEach(function (k) {
+            if (k === "class") el.className = attrs[k];
+            else if (k === "text") el.textContent = attrs[k];
+            else if (k === "html") el.innerHTML = attrs[k];
+            else if (k.indexOf("on") === 0 && typeof attrs[k] === "function") {
+              el.addEventListener(k.slice(2), attrs[k]);
+            } else if (attrs[k] !== undefined && attrs[k] !== null) {
+              el.setAttribute(k, attrs[k]);
+            }
+          });
+        }
+        (children || []).forEach(function (c) {
+          if (c == null) return;
+          if (typeof c === "string") el.appendChild(document.createTextNode(c));
+          else el.appendChild(c);
+        });
+        return el;
+      }
+
+      function fmtPct(v) {
+        if (v == null || isNaN(v)) return "—";
+        return (100.0 * v).toFixed(2) + "%";
+      }
+      function fmtNum(v, digits) {
+        if (v == null || isNaN(v)) return "—";
+        return Number(v).toFixed(digits == null ? 2 : digits);
+      }
+      function fmtInt(v) { return v == null ? "—" : String(v); }
+
+      var DATA;
+      try {
+        DATA = JSON.parse(document.getElementById("report-data").textContent.trim());
+      } catch (e) {
+        document.body.replaceChildren(h("p",
+          { style: "padding:20px" },
+          ["Failed to parse embedded report data."]));
+        return;
+      }
+
+      var meta = DATA.run_metadata || {};
+      var summary = DATA.summary || {};
+      var relations = DATA.relations || [];
+      var sources = DATA.sources || [];
+      var gtSummary = DATA.gt_summary || null;
+      var sourcesDetail = Array.isArray(DATA.sources_detail) ? DATA.sources_detail : [];
+      // Index source detail by name for O(1) lookups when rendering
+      // the per-source context strip in the Relations view.
+      var sourceInfo = {};
+      sourcesDetail.forEach(function (s) {
+        if (s && typeof s.source === "string") sourceInfo[s.source] = s;
+      });
+
+      // ---------------------------------------------------------------
+      // Header meta line
+      // ---------------------------------------------------------------
+      var metaEl = document.getElementById("run-meta");
+      function metaItem(label, value) {
+        if (value == null || value === "") return null;
+        return h("span", null, [
+          label + ": ",
+          h("code", { text: String(value) })
+        ]);
+      }
+      [
+        metaItem("Run", meta.run_id || ""),
+        metaItem("Model", meta.model || ""),
+        metaItem("Mode", summary.mode || ""),
+        meta.generated_at ? metaItem("Generated", meta.generated_at) : null,
+        summary.n_passes != null ? metaItem("Passes", summary.n_passes) : null,
+        metaItem("Sources", summary.n_sources || sources.length),
+        metaItem("Error types", summary.n_error_types || 0),
+        metaItem("Calls", summary.n_calls || 0),
+        metaItem("Relations", summary.n_relations || relations.length)
+      ].forEach(function (n) { if (n) metaEl.appendChild(n); });
+
+      // ---------------------------------------------------------------
+      // Overview
+      // ---------------------------------------------------------------
+      function makeCard(label, value, kind, sub) {
+        var cls = "card" + (kind ? " " + kind : "");
+        return h("div", { class: cls }, [
+          h("div", { class: "label", text: label }),
+          h("div", { class: "value", text: String(value) }),
+          sub ? h("div", { class: "sub", text: sub }) : null
+        ]);
+      }
+
+      var overviewCards = document.getElementById("overview-cards");
+      overviewCards.appendChild(makeCard("Sources", summary.n_sources || sources.length));
+      overviewCards.appendChild(makeCard("Error types probed", summary.n_error_types || 0));
+      overviewCards.appendChild(makeCard("LLM calls", summary.n_calls || 0));
+      overviewCards.appendChild(makeCard(
+        "Relations discovered",
+        summary.n_relations || relations.length,
+        null,
+        summary.mode === "adaptive" ? "Union across passes" : null
+      ));
+      overviewCards.appendChild(makeCard(
+        "LLM errors", summary.n_llm_errors || 0,
+        (summary.n_llm_errors || 0) > 0 ? "bad" : "ok"
+      ));
+      overviewCards.appendChild(makeCard(
+        "Parse errors", summary.n_parse_errors || 0,
+        (summary.n_parse_errors || 0) > 0 ? "warn" : "ok"
+      ));
+      if (summary.mode === "adaptive") {
+        overviewCards.appendChild(makeCard(
+          "Saturated arms",
+          (summary.n_saturated_arms || 0) + " / " + (summary.n_arms || 0),
+          null,
+          summary.n_passes != null ? ("after " + summary.n_passes + " pass" + (summary.n_passes === 1 ? "" : "es")) : null
+        ));
+      }
+
+      // Bars
+      function renderBars(targetId, items) {
+        var target = document.getElementById(targetId);
+        target.replaceChildren();
+        if (!items.length) {
+          target.appendChild(h("div", { class: "empty-state", text: "(none)" }));
+          return;
+        }
+        var max = items.reduce(function (m, it) { return Math.max(m, it.value); }, 0) || 1;
+        items.forEach(function (it) {
+          var pct = (it.value / max) * 100;
+          target.appendChild(h("div", { class: "bar-row" }, [
+            h("div", { class: "bar-label", title: it.label, text: it.label }),
+            h("div", { class: "bar-track" }, [
+              h("div", { class: "bar-fill", style: "width:" + pct.toFixed(2) + "%" })
+            ]),
+            h("div", { class: "bar-value", text: String(it.value) })
+          ]));
+        });
+      }
+
+      function countBy(items, key) {
+        var counts = {};
+        items.forEach(function (it) {
+          var k = it[key] || "(unknown)";
+          counts[k] = (counts[k] || 0) + 1;
+        });
+        return Object.keys(counts).sort(function (a, b) {
+          return counts[b] - counts[a];
+        }).map(function (k) {
+          return { label: k, value: counts[k] };
+        });
+      }
+
+      renderBars("bars-by-type", countBy(relations, "error_type"));
+      renderBars("bars-by-kind", countBy(relations, "kind"));
+      renderBars("bars-by-conf", countBy(relations, "confidence"));
+
+      var bySource = countBy(relations, "source").slice(0, 20);
+      renderBars("bars-by-source", bySource);
+
+      // ---------------------------------------------------------------
+      // Relations browser
+      // ---------------------------------------------------------------
+      // Group relations by source.
+      var bySrc = {};
+      sources.forEach(function (s) { bySrc[s] = []; });
+      relations.forEach(function (r) {
+        if (!bySrc[r.source]) bySrc[r.source] = [];
+        bySrc[r.source].push(r);
+      });
+
+      // Populate filter dropdowns.
+      var typesSeen = {}, kindsSeen = {};
+      relations.forEach(function (r) {
+        if (r.error_type) typesSeen[r.error_type] = true;
+        if (r.kind) kindsSeen[r.kind] = true;
+      });
+      function fillSelect(id, values) {
+        var sel = document.getElementById(id);
+        Object.keys(values).sort().forEach(function (v) {
+          sel.appendChild(h("option", { value: v, text: v }));
+        });
+      }
+      fillSelect("rel-filter-type", typesSeen);
+      fillSelect("rel-filter-kind", kindsSeen);
+
+      var tabsEl = document.getElementById("rel-source-tabs");
+      var listEl = document.getElementById("rel-list");
+      var qEl    = document.getElementById("rel-q");
+      var fTypeEl = document.getElementById("rel-filter-type");
+      var fKindEl = document.getElementById("rel-filter-kind");
+      var fConfEl = document.getElementById("rel-filter-conf");
+
+      var sortedSources = Object.keys(bySrc).sort(function (a, b) {
+        return bySrc[b].length - bySrc[a].length || a.localeCompare(b);
+      });
+      var ALL = "__all__";
+      var activeSource = ALL;
+
+      function makeTab(label, key, count) {
+        var btn = h("button", {
+          type: "button",
+          "data-key": key,
+          class: count === 0 ? "empty" : "",
+          title: label,
+          onclick: function () { setActiveSource(key); }
+        }, [
+          label,
+          h("span", { class: "tab-count", text: " (" + count + ")" })
+        ]);
+        return btn;
+      }
+
+      // "All" tab + per-source tabs.
+      tabsEl.appendChild(makeTab("All sources", ALL, relations.length));
+      sortedSources.forEach(function (s) {
+        tabsEl.appendChild(makeTab(s, s, bySrc[s].length));
+      });
+      // Add inline search if many tabs.
+      if (sortedSources.length > 12) {
+        var search = h("div", { class: "source-tabs-search" }, [
+          h("input", {
+            type: "search", placeholder: "Filter source tabs...",
+            oninput: function () {
+              var q = this.value.toLowerCase();
+              Array.prototype.forEach.call(
+                tabsEl.querySelectorAll("button"),
+                function (b) {
+                  var k = b.getAttribute("data-key");
+                  if (k === ALL) { b.style.display = ""; return; }
+                  b.style.display = (k.toLowerCase().indexOf(q) >= 0) ? "" : "none";
+                }
+              );
+            }
+          })
+        ]);
+        tabsEl.appendChild(search);
+      }
+
+      function setActiveSource(key) {
+        activeSource = key;
+        Array.prototype.forEach.call(tabsEl.querySelectorAll("button"),
+          function (b) {
+            b.classList.toggle("active", b.getAttribute("data-key") === key);
+          });
+        renderSourceContext();
+        renderRelations();
+      }
+
+      // ---------------------------------------------------------------
+      // Per-source context strip (shown above the relations list).
+      // For the "All sources" tab we render a compact summary line
+      // instead of the full digest, since digests are per-source.
+      // ---------------------------------------------------------------
+      var ctxEl = document.getElementById("rel-source-context");
+
+      function renderSourceContext() {
+        ctxEl.replaceChildren();
+        ctxEl.classList.remove("empty");
+        if (activeSource === ALL) {
+          if (!sourcesDetail.length) { ctxEl.classList.add("empty"); return; }
+          var total_rows = 0, total_cols = 0;
+          sourcesDetail.forEach(function (s) {
+            total_rows += (s.n_rows || 0);
+            total_cols += (s.n_columns || 0);
+          });
+          var node = h("div", { class: "source-context compact" }, [
+            h("div", { class: "ctx-stats" }, [
+              h("span", null, ["Sources: ", h("b", { text: String(sortedSources.length) })]),
+              h("span", null, ["Rows total: ", h("b", { text: String(total_rows) })]),
+              h("span", null, ["Columns total: ", h("b", { text: String(total_cols) })]),
+              h("span", { class: "muted", text: "Pick a source tab to see its schema and candidate FDs." })
+            ])
+          ]);
+          ctxEl.appendChild(node);
+          return;
+        }
+        var info = sourceInfo[activeSource];
+        if (!info || !info.n_columns) {
+          // No digest persisted — render a minimal stub.
+          ctxEl.appendChild(h("div", { class: "source-context compact" }, [
+            h("div", { class: "ctx-stats" }, [
+              h("span", { text: "Source: " }),
+              h("b", { text: activeSource })
+            ])
+          ]));
+          return;
+        }
+
+        // Stats line: shape, identity-like cols, total rows.
+        var statsKids = [
+          h("span", null, ["Rows: ", h("b", { text: String(info.n_rows || 0) })]),
+          h("span", null, ["Columns: ", h("b", { text: String(info.n_columns || 0) })])
+        ];
+        if (Array.isArray(info.total_row_indices) && info.total_row_indices.length) {
+          var t = info.total_row_indices;
+          var label = t.length <= 5 ? t.join(", ")
+            : t.slice(0, 5).join(", ") + " (+ " + (t.length - 5) + ")";
+          statsKids.push(h("span", null, [
+            "Total rows at: ",
+            h("b", { text: label, title: t.join(", ") })
+          ]));
+        }
+        if (Array.isArray(info.candidate_identity_columns) && info.candidate_identity_columns.length) {
+          statsKids.push(h("span", null, [
+            "Identity-like: ",
+            h("b", { text: info.candidate_identity_columns.join(", ") })
+          ]));
+        }
+
+        // Column chips, ordered by header.
+        var colChips = h("div", { class: "ctx-cols" });
+        var headers = Array.isArray(info.headers) ? info.headers : [];
+        var idSet = {};
+        (info.candidate_identity_columns || []).forEach(function (c) { idSet[c] = true; });
+        headers.forEach(function (name) {
+          var col = info.columns && info.columns[name];
+          var cls = "col-chip";
+          if (idSet[name]) cls += " id-like";
+          if (col && col.dtype_kind === "numeric") cls += " numeric";
+          var title = col
+            ? (col.dtype_kind + " · " + col.n_non_empty + "/" + (info.n_rows || "?")
+               + " non-empty · " + col.n_distinct + " distinct")
+            : name;
+          colChips.appendChild(h("span", { class: cls, title: title, text: name }));
+        });
+
+        var node = h("div", { class: "source-context" }, [
+          h("div", { class: "ctx-head" }, [
+            h("h3", { text: info.source }),
+            h("div", { class: "ctx-stats" }, statsKids)
+          ]),
+          h("div", { class: "ctx-section" }, [
+            h("div", { class: "ctx-label", text: "Columns (" + headers.length + ")" }),
+            colChips
+          ])
+        ]);
+
+        // Candidate FDs (collapsed).
+        if (Array.isArray(info.candidate_fds) && info.candidate_fds.length) {
+          var fds = h("div", { class: "ctx-fds" });
+          info.candidate_fds.slice(0, 12).forEach(function (fd) {
+            var lhs = Array.isArray(fd.lhs) ? fd.lhs.join(", ")
+              : (fd.lhs == null ? "?" : String(fd.lhs));
+            var rhs = Array.isArray(fd.rhs) ? fd.rhs.join(", ")
+              : (fd.rhs == null ? "?" : String(fd.rhs));
+            var support = (fd.support != null) ? (Math.round(fd.support * 100) + "%") : "";
+            fds.appendChild(h("div", { class: "fd-row" }, [
+              lhs + "  \u2192  " + rhs,
+              h("span", { class: "support",
+                text: support
+                  ? "(support " + support + (fd.n_groups != null ? ", " + fd.n_groups + " groups" : "") + ")"
+                  : ""
+              })
+            ]));
+          });
+          var det = h("details", { class: "ctx-fold" }, [
+            h("summary", { text: "Approximate functional dependencies (" + info.candidate_fds.length + ")" }),
+            fds
+          ]);
+          node.appendChild(det);
+        }
+
+        // Per-column detail (collapsed): one mini-card per column
+        // showing dtype, counts, numeric range, top values (with
+        // count + frequency bar) and sample values. Mirrors the
+        // prompt block the LLM actually saw.
+        if (info.columns && Object.keys(info.columns).length) {
+          var detail = h("div", { class: "col-detail-grid" });
+          var nRows = info.n_rows || 0;
+          headers.forEach(function (name) {
+            var col = info.columns[name];
+            if (!col) return;
+            var dtype = col.dtype_kind || "text";
+            var cardCls = "col-detail-card " + dtype;
+            if (idSet[name]) cardCls += " id-like";
+
+            var headKids = [
+              h("div", { class: "cd-name", text: name, title: name }),
+              h("span", { class: "cd-badge " + dtype, text: dtype })
+            ];
+
+            var statBits = [
+              h("span", null, [
+                h("b", { text: String(col.n_non_empty) }),
+                "/" + (nRows || "?") + " filled"
+              ]),
+              h("span", null, [
+                h("b", { text: String(col.n_distinct) }),
+                " distinct"
+              ])
+            ];
+
+            var cardKids = [
+              h("div", { class: "cd-head" }, headKids),
+              h("div", { class: "cd-stats" }, statBits)
+            ];
+
+            if (col.numeric_summary) {
+              var ns = col.numeric_summary;
+              cardKids.push(h("div", { class: "cd-numeric-range" }, [
+                "min ", h("b", { text: String(ns.min) }),
+                " · med ", h("b", { text: String(ns.median) }),
+                " · max ", h("b", { text: String(ns.max) })
+              ]));
+            }
+
+            // Top values with frequency bars.
+            var topVals = Array.isArray(col.top_values) ? col.top_values : [];
+            if (topVals.length) {
+              cardKids.push(h("div", { class: "cd-section-label",
+                text: "Top values" }));
+              var topMax = topVals[0].count || 1;
+              var topBox = h("div", { class: "cd-top" });
+              topVals.slice(0, 5).forEach(function (tv) {
+                var pct = Math.round((tv.count / topMax) * 100);
+                var valStr = tv.value == null ? "(null)"
+                  : (tv.value === "" ? "(empty)" : String(tv.value));
+                var row = h("div", { class: "cd-top-row" }, [
+                  h("span", { class: "cd-val", text: valStr, title: valStr }),
+                  h("span", { class: "cd-bar",
+                    style: "--pct: " + pct + "%",
+                    title: tv.count + " of " + (col.n_non_empty || nRows) + " (" + pct + "%)"
+                  }),
+                  h("span", { class: "cd-count", text: String(tv.count) })
+                ]);
+                topBox.appendChild(row);
+              });
+              cardKids.push(topBox);
+            }
+
+            // Sample values: only show if distinct from top values
+            // (otherwise we'd be repeating the same content).
+            var samples = Array.isArray(col.sample_values) ? col.sample_values : [];
+            var topSet = {};
+            topVals.forEach(function (tv) { topSet[String(tv.value)] = true; });
+            var freshSamples = samples.filter(function (s) {
+              return !topSet[String(s)];
+            }).slice(0, 6);
+            if (freshSamples.length) {
+              cardKids.push(h("div", { class: "cd-section-label",
+                text: "Other samples" }));
+              var chipBox = h("div", { class: "cd-samples" });
+              freshSamples.forEach(function (s) {
+                var label = s == null ? "(null)"
+                  : (s === "" ? "(empty)" : String(s));
+                var truncated = label.length > 60
+                  ? label.slice(0, 57) + "\u2026" : label;
+                chipBox.appendChild(h("span", {
+                  class: "sample-chip", text: truncated, title: label
+                }));
+              });
+              cardKids.push(chipBox);
+            }
+
+            detail.appendChild(h("div", { class: cardCls }, cardKids));
+          });
+          node.appendChild(h("details", { class: "ctx-fold" }, [
+            h("summary", { text: "Per-column detail (" + headers.length + " columns)" }),
+            detail
+          ]));
+        }
+
+        // "View sample rows" — actual CSV rows so users can verify
+        // relations against ground truth without leaving the report.
+        if (Array.isArray(info.preview_rows) && info.preview_rows.length) {
+          var rowFold = h("details", { class: "ctx-fold" }, [
+            h("summary", {
+              text: "View sample rows ("
+                + info.preview_rows.length
+                + " of " + (info.preview_total || info.preview_rows.length) + ")"
+            })
+          ]);
+          // Lazy-render the (potentially wide) table only after the
+          // first time the <details> is opened.
+          var renderedTable = false;
+          rowFold.addEventListener("toggle", function () {
+            if (rowFold.open && !renderedTable) {
+              rowFold.appendChild(makeDataTable(info, [], 50));
+              renderedTable = true;
+            }
+          });
+          node.appendChild(rowFold);
+        }
+
+        ctxEl.appendChild(node);
+      }
+
+      function pillClassForKind(kind) {
+        var k = (kind || "").toLowerCase();
+        var known = ["fd", "composite_fd", "product", "sum", "difference",
+                     "ratio", "percentage", "aggregate"];
+        return "pill kind-" + (known.indexOf(k) >= 0 ? k : "other");
+      }
+
+      // ---------------------------------------------------------------
+      // Data-preview table: render the actual CSV rows the LLM saw,
+      // optionally projecting/highlighting just the columns mentioned
+      // by a relation. Used both in the per-source context strip
+      // ("View sample rows") and on each relation card ("Show data").
+      // ---------------------------------------------------------------
+      function makeDataTable(info, highlightCols, rowLimit) {
+        var rows = Array.isArray(info && info.preview_rows)
+          ? info.preview_rows : [];
+        var headers = Array.isArray(info && info.headers)
+          ? info.headers.slice() : [];
+        if (!rows.length || !headers.length) {
+          return h("div", { class: "data-preview-wrap",
+            style: "padding: 10px; text-align: center; color: var(--muted)" },
+            ["No row preview persisted for this source."]);
+        }
+        var hSet = {};
+        (highlightCols || []).forEach(function (c) { hSet[c] = true; });
+        var anyHighlight = Object.keys(hSet).length > 0;
+        // When highlighting, reorder columns so highlighted ones lead
+        // -- makes wide tables much easier to scan when verifying a
+        // relation that touches only 2-3 columns.
+        if (anyHighlight) {
+          headers.sort(function (a, b) {
+            var ha = hSet[a] ? 0 : 1, hb = hSet[b] ? 0 : 1;
+            return ha - hb;
+          });
+        }
+        var cap = rowLimit || rows.length;
+        var shown = rows.slice(0, cap);
+        var thead = h("thead", null, [(function () {
+          var tr = h("tr", null, [
+            h("th", { class: "col-row-idx", text: "#" })
+          ]);
+          headers.forEach(function (col) {
+            var cls = "";
+            if (hSet[col]) cls = "col-highlight";
+            tr.appendChild(h("th", { class: cls, text: col, title: col }));
+          });
+          return tr;
+        })()]);
+        var tbody = h("tbody");
+        shown.forEach(function (row, i) {
+          var tr = h("tr", null, [
+            h("td", { class: "col-row-idx", text: String(i) })
+          ]);
+          headers.forEach(function (col) {
+            var v = row[col];
+            var isEmpty = (v == null || v === "");
+            var classes = [];
+            if (hSet[col]) classes.push("col-highlight");
+            if (isEmpty) classes.push("empty");
+            tr.appendChild(h("td", {
+              class: classes.join(" "),
+              text: isEmpty ? "(empty)" : String(v),
+              title: isEmpty ? "(empty)" : String(v)
+            }));
+          });
+          tbody.appendChild(tr);
+        });
+        var total = info.preview_total != null ? info.preview_total : rows.length;
+        var foot = h("div", { class: "data-preview-foot",
+          text: "Showing " + shown.length + " of "
+            + total + " row" + (total === 1 ? "" : "s")
+            + (anyHighlight
+                ? " · highlighted: " + Object.keys(hSet).join(", ")
+                : "")
+        });
+        return h("div", { class: "data-preview-wrap" }, [
+          h("table", { class: "data-preview" }, [thead, tbody]),
+          foot
+        ]);
+      }
+
+      // ---------------------------------------------------------------
+      // Display-time near-duplicate collapsing.
+      //
+      // The backend's species_key (used for adaptive coverage) folds
+      // predicates conservatively to avoid false merges. Paraphrases
+      // like "If X then Y <= 10000" vs "When X, Y must not exceed
+      // 10000" therefore stay as separate species. For the report,
+      // we run a *looser* normalisation that drops common stopwords
+      // and operator spellings so near-duplicates collapse under
+      // one card. Originals are preserved on the card as variants
+      // and in relations.jsonl on disk -- nothing is lost.
+      // ---------------------------------------------------------------
+      var DUP_STOP = {
+        "if": 1, "then": 1, "is": 1, "be": 1, "must": 1, "the": 1,
+        "a": 1, "an": 1, "and": 1, "or": 1, "of": 1, "in": 1,
+        "with": 1, "when": 1, "has": 1, "have": 1, "will": 1,
+        "should": 1, "all": 1, "any": 1, "that": 1, "this": 1,
+        "to": 1, "for": 1, "are": 1, "than": 1,
+        // Operator-equivalents: "==" / "=" both fold to "eq" via the
+        // regex below; treating them as the same as "is" lets
+        // "X == Y" collapse with "X is Y". "ne" stays meaningful
+        // because "not" stays a real token.
+        "eq": 1
+      };
+      var CONF_RANK = { high: 3, medium: 2, low: 1 };
+
+      function dupKey(r) {
+        // Strip parenthetical asides ("(10 MW = 10000 kW)",
+        // "(since X)") since they're explanatory noise -- the
+        // comparison itself stays in the main clause.
+        var pred = (r.predicate || "")
+          .replace(/\([^)]*\)/g, " ")
+          .toLowerCase()
+          .replace(/[\u2264<]=?/g, " lte ")
+          .replace(/[\u2265>]=?/g, " gte ")
+          .replace(/!=/g, " ne ")
+          .replace(/==?/g, " eq ");
+        var tokens = pred.match(/[a-z0-9]+/g) || [];
+        var bag = tokens.filter(function (t) { return !DUP_STOP[t]; })
+                        .sort().join(" ");
+        var cols = (r.columns || []).slice().sort().join(",");
+        // error_type intentionally excluded so paraphrases tagged
+        // differently (e.g. "implication" vs "cap") still merge.
+        // The merged card shows every kind/error_type pill.
+        return [r.source, cols, bag].join("|");
+      }
+
+      function variantScore(r) {
+        // Higher = better representative. Tie-breakers favour
+        // multi-pass relations and shorter (more canonical) predicates.
+        var conf = CONF_RANK[(r.confidence || "").toLowerCase()] || 0;
+        var freq = r.pass_frequency || (r.seen_in_passes || []).length || 0;
+        var lenPenalty = -((r.predicate || "").length / 1000);
+        return conf * 100 + freq + lenPenalty;
+      }
+
+      function collapseDuplicates(rels) {
+        var byKey = {};
+        var order = [];
+        rels.forEach(function (r) {
+          var k = dupKey(r);
+          if (!byKey[k]) { byKey[k] = []; order.push(k); }
+          byKey[k].push(r);
+        });
+        return order.map(function (k) {
+          var bucket = byKey[k];
+          bucket.sort(function (a, b) { return variantScore(b) - variantScore(a); });
+          return { primary: bucket[0], variants: bucket.slice(1) };
+        });
+      }
+
+      function makeRelationCard(r, variants) {
+        // Aggregate error_type and kind labels across variants.
+        // The bucket can span error types (the same rule was tagged
+        // both "cross_column_inconsistency" and "business_rule_violation"
+        // by different LLM samples) so we surface every label.
+        var typesSeen = {};
+        if (r.error_type) typesSeen[r.error_type] = true;
+        (variants || []).forEach(function (v) {
+          if (v.error_type) typesSeen[v.error_type] = true;
+        });
+        var pills = [];
+        Object.keys(typesSeen).forEach(function (t) {
+          pills.push(h("span", { class: "pill type-pill", text: t }));
+        });
+        // Aggregate kind labels across variants so e.g.
+        // "implication" and "cap" both surface on the merged card.
+        var kindsSeen = {};
+        if (r.kind) kindsSeen[r.kind] = true;
+        (variants || []).forEach(function (v) { if (v.kind) kindsSeen[v.kind] = true; });
+        Object.keys(kindsSeen).forEach(function (k) {
+          pills.push(h("span", { class: pillClassForKind(k), text: k }));
+        });
+        // Highest-rank confidence among the bucket.
+        var allConfs = [r].concat(variants || []).map(function (x) {
+          return (x.confidence || "").toLowerCase();
+        });
+        var bestConf = allConfs.sort(function (a, b) {
+          return (CONF_RANK[b] || 0) - (CONF_RANK[a] || 0);
+        })[0];
+        if (bestConf) {
+          pills.push(h("span", { class: "pill conf-" + bestConf, text: bestConf }));
+        }
+        // Sum pass_frequency across variants when available.
+        var totalFreq = (r.pass_frequency || 0)
+          + (variants || []).reduce(function (s, v) { return s + (v.pass_frequency || 0); }, 0);
+        if (totalFreq) {
+          pills.push(h("span", { class: "pill passes",
+            title: "Total emissions across LLM passes (this row + collapsed variants)",
+            text: "freq=" + totalFreq }));
+        }
+        // Variant count badge.
+        if (variants && variants.length) {
+          pills.push(h("span", { class: "pill",
+            title: "Number of near-duplicate paraphrases collapsed into this card",
+            style: "color: var(--accent-2); border-color: rgba(167,139,250,0.45); background: rgba(167,139,250,0.10)",
+            text: "+" + variants.length + " variant" + (variants.length === 1 ? "" : "s")
+          }));
+        }
+        pills.push(h("span", { class: "pill", text: r.source }));
+
+        // Columns line: lhs -> rhs (with arrow), or just columns.
+        var colsLine = h("div", { class: "columns-line" });
+        if (Array.isArray(r.lhs) && r.lhs.length) {
+          r.lhs.forEach(function (c) {
+            colsLine.appendChild(h("span", { class: "col-chip lhs", text: c }));
+          });
+          colsLine.appendChild(h("span", { class: "arrow", text: "  \u2192  " }));
+          (r.rhs || []).forEach(function (c) {
+            colsLine.appendChild(h("span", { class: "col-chip rhs", text: c }));
+          });
+        } else if (Array.isArray(r.columns)) {
+          r.columns.forEach(function (c) {
+            colsLine.appendChild(h("span", { class: "col-chip", text: c }));
+          });
+        }
+
+        var children = [
+          h("div", { class: "head" }, pills),
+          h("div", { class: "predicate", text: r.predicate || "(no predicate)" }),
+          colsLine,
+        ];
+        if (r.executable) {
+          children.push(h("pre", { class: "executable", text: r.executable }));
+        }
+        if (r.rationale) {
+          children.push(h("div", { class: "rationale", text: r.rationale }));
+        }
+
+        // "Show sample rows" — projects the source CSV's preview to
+        // just the columns this relation touches (lhs ∪ rhs ∪ columns)
+        // and highlights them in the rendered table. Lets users
+        // verify the rule against actual data without leaving the
+        // report.
+        var relInfo = sourceInfo[r.source];
+        if (relInfo
+            && Array.isArray(relInfo.preview_rows)
+            && relInfo.preview_rows.length) {
+          var hi = {};
+          (r.columns || []).forEach(function (c) { hi[c] = true; });
+          (r.lhs || []).forEach(function (c) { hi[c] = true; });
+          (r.rhs || []).forEach(function (c) { hi[c] = true; });
+          (variants || []).forEach(function (v) {
+            (v.columns || []).forEach(function (c) { hi[c] = true; });
+            (v.lhs || []).forEach(function (c) { hi[c] = true; });
+            (v.rhs || []).forEach(function (c) { hi[c] = true; });
+          });
+          var hiCols = Object.keys(hi);
+          var dataFold = h("details", { class: "rel-data" }, [
+            h("summary", {
+              text: "Show sample rows from " + r.source
+                + (hiCols.length
+                   ? " (highlighting " + hiCols.length + " column"
+                     + (hiCols.length === 1 ? "" : "s") + ")"
+                   : "")
+            })
+          ]);
+          var rendered = false;
+          dataFold.addEventListener("toggle", function () {
+            if (dataFold.open && !rendered) {
+              dataFold.appendChild(makeDataTable(relInfo, hiCols, 25));
+              rendered = true;
+            }
+          });
+          children.push(dataFold);
+        }
+
+        // Variants block: one row per collapsed paraphrase, with kind
+        // + confidence pills and the alternative predicate text.
+        if (variants && variants.length) {
+          var rows = h("div", { class: "variants-list" });
+          variants.forEach(function (v) {
+            var rowKids = [];
+            if (v.error_type) {
+              rowKids.push(h("span", { class: "pill type-pill", text: v.error_type }));
+            }
+            if (v.kind) {
+              rowKids.push(h("span", { class: pillClassForKind(v.kind), text: v.kind }));
+            }
+            var c = (v.confidence || "").toLowerCase();
+            if (c) {
+              rowKids.push(h("span", { class: "pill conf-" + c, text: c }));
+            }
+            rowKids.push(h("span", { class: "v-pred",
+              text: v.predicate || "(no predicate)",
+              title: v.predicate || ""
+            }));
+            rows.appendChild(h("div", { class: "variant-row" }, rowKids));
+          });
+          children.push(h("details", { class: "variants" }, [
+            h("summary", { class: "variants-summary",
+              text: "Show " + variants.length + " collapsed variant" + (variants.length === 1 ? "" : "s") }),
+            rows
+          ]));
+        }
+
+        return h("div", { class: "relation-card" }, children);
+      }
+
+      function renderRelations() {
+        var pool = activeSource === ALL ? relations : (bySrc[activeSource] || []);
+        var q = (qEl.value || "").trim().toLowerCase();
+        var ftype = fTypeEl.value || "";
+        var fkind = fKindEl.value || "";
+        var fconf = fConfEl.value || "";
+        var filtered = pool.filter(function (r) {
+          if (ftype && r.error_type !== ftype) return false;
+          if (fkind && r.kind !== fkind) return false;
+          if (fconf && (r.confidence || "").toLowerCase() !== fconf) return false;
+          if (q) {
+            var hay = [
+              r.predicate, r.rationale, r.executable,
+              (r.columns || []).join(","), (r.lhs || []).join(","), (r.rhs || []).join(",")
+            ].join(" ").toLowerCase();
+            if (hay.indexOf(q) < 0) return false;
+          }
+          return true;
+        });
+
+        listEl.replaceChildren();
+        if (!filtered.length) {
+          listEl.appendChild(h("div", { class: "empty-state",
+            text: pool.length === 0
+              ? "No relations were discovered for this source."
+              : "No relations match the current filters."
+          }));
+          return;
+        }
+
+        // Pre-collapse near-duplicates across error types when the
+        // toggle is on, then group by the primary's error type.
+        // (When off, each row becomes its own bucket.)
+        var collapseOn = !!(dupToggleEl && dupToggleEl.checked);
+        var buckets = collapseOn
+          ? collapseDuplicates(filtered)
+          : filtered.map(function (r) { return { primary: r, variants: [] }; });
+
+        var groups = {};
+        var rawCounts = {};
+        buckets.forEach(function (b) {
+          var key = b.primary.error_type || "(unspecified)";
+          (groups[key] = groups[key] || []).push(b);
+          rawCounts[key] = (rawCounts[key] || 0)
+            + 1 + (b.variants ? b.variants.length : 0);
+        });
+        var groupKeys = Object.keys(groups).sort(function (a, b) {
+          return rawCounts[b] - rawCounts[a] || a.localeCompare(b);
+        });
+        groupKeys.forEach(function (key) {
+          var bs = groups[key];
+          // Sort buckets in the group by score so strongest leads.
+          bs.sort(function (a, b) {
+            return variantScore(b.primary) - variantScore(a.primary);
+          });
+          var unique = bs.length;
+          var raw = rawCounts[key];
+          var label = collapseOn && unique !== raw
+            ? unique + " unique (of " + raw + ")"
+            : raw + " relation" + (raw === 1 ? "" : "s");
+          listEl.appendChild(h("div", { class: "rel-group-header" }, [
+            h("span", { class: "pill type-pill", text: key }),
+            h("span", { class: "count", text: label })
+          ]));
+          bs.forEach(function (b) {
+            listEl.appendChild(makeRelationCard(b.primary, b.variants));
+          });
+        });
+      }
+
+      qEl.addEventListener("input", renderRelations);
+      [fTypeEl, fKindEl, fConfEl].forEach(function (el) {
+        el.addEventListener("change", renderRelations);
+      });
+      var dupToggleEl = document.getElementById("rel-collapse-dup");
+      if (dupToggleEl) {
+        dupToggleEl.addEventListener("change", renderRelations);
+      }
+
+      setActiveSource(ALL);
+
+      // ---------------------------------------------------------------
+      // Sources view: card grid showing one tile per CSV with
+      // headline shape, a few column chips, and the relations count.
+      // Clicking a card jumps to the Relations view filtered to
+      // that source.
+      // ---------------------------------------------------------------
+      var srcGridEl = document.getElementById("src-grid");
+      var srcQEl = document.getElementById("src-q");
+
+      function makeSourceCard(name) {
+        var info = sourceInfo[name] || { source: name };
+        var nRel = (bySrc[name] || []).length;
+        var idSet = {};
+        (info.candidate_identity_columns || []).forEach(function (c) { idSet[c] = true; });
+        var headers = Array.isArray(info.headers) ? info.headers : [];
+
+        var statsRow = h("div", { class: "row" }, [
+          h("span", null, ["Rows: ", h("b", { text: String(info.n_rows == null ? "?" : info.n_rows) })]),
+          h("span", null, ["Cols: ", h("b", { text: String(info.n_columns == null ? "?" : info.n_columns) })]),
+          (Array.isArray(info.candidate_fds) && info.candidate_fds.length)
+            ? h("span", null, ["FDs (heur): ", h("b", { text: String(info.candidate_fds.length) })])
+            : null,
+          (Array.isArray(info.total_row_indices) && info.total_row_indices.length)
+            ? h("span", null, ["Totals: ", h("b", { text: String(info.total_row_indices.length) })])
+            : null
+        ]);
+
+        var chips = h("div", { class: "col-chips" });
+        headers.slice(0, 30).forEach(function (cn) {
+          var col = info.columns && info.columns[cn];
+          var cls = "col-chip";
+          if (idSet[cn]) cls += " id-like";
+          if (col && col.dtype_kind === "numeric") cls += " numeric";
+          chips.appendChild(h("span", { class: cls, title: cn, text: cn }));
+        });
+        if (headers.length > 30) {
+          chips.appendChild(h("span", { class: "col-chip", text: "+ " + (headers.length - 30) + " more" }));
+        }
+
+        var card = h("div", {
+          class: "source-card" + (nRel === 0 ? " empty" : ""),
+          "data-source": name,
+          onclick: function () {
+            setActiveSource(name);
+            // Switch to Relations view.
+            Array.prototype.forEach.call(toggle.querySelectorAll("button"),
+              function (x) { x.classList.toggle("active", x.getAttribute("data-view") === "relations"); });
+            ["overview", "sources", "relations", "gt"].forEach(function (id) {
+              var el = document.getElementById("view-" + id);
+              if (el) el.classList.toggle("active", id === "relations");
+            });
+            // Scroll the now-active context strip into view.
+            window.scrollTo({ top: 0, behavior: "auto" });
+          }
+        }, [
+          h("div", { class: "name", text: name }),
+          statsRow,
+          chips,
+          h("div", { class: "relations-count" }, [
+            h("span", { text: "Relations discovered" }),
+            h("b", { text: String(nRel) })
+          ])
+        ]);
+        return card;
+      }
+
+      function renderSources() {
+        srcGridEl.replaceChildren();
+        var q = (srcQEl.value || "").trim().toLowerCase();
+        var pool = sortedSources.slice();
+        if (q) {
+          pool = pool.filter(function (name) {
+            if (name.toLowerCase().indexOf(q) >= 0) return true;
+            var info = sourceInfo[name];
+            if (info && Array.isArray(info.headers)) {
+              for (var i = 0; i < info.headers.length; i++) {
+                if (info.headers[i].toLowerCase().indexOf(q) >= 0) return true;
+              }
+            }
+            return false;
+          });
+        }
+        if (!pool.length) {
+          srcGridEl.appendChild(h("div", { class: "empty-state",
+            text: q ? "No sources match the current filter." : "No sources in this run."
+          }));
+          return;
+        }
+        pool.forEach(function (name) { srcGridEl.appendChild(makeSourceCard(name)); });
+      }
+      srcQEl.addEventListener("input", renderSources);
+      renderSources();
+
+      // ---------------------------------------------------------------
+      // View toggle wiring
+      // ---------------------------------------------------------------
+      var toggle = document.getElementById("view-toggle");
+      Array.prototype.forEach.call(toggle.querySelectorAll("button"),
+        function (b) {
+          b.addEventListener("click", function () {
+            var v = b.getAttribute("data-view");
+            Array.prototype.forEach.call(toggle.querySelectorAll("button"),
+              function (x) { x.classList.toggle("active", x === b); });
+            ["overview", "sources", "relations", "gt"].forEach(function (id) {
+              var el = document.getElementById("view-" + id);
+              if (el) el.classList.toggle("active", id === v);
+            });
+          });
+        });
+
+      // ---------------------------------------------------------------
+      // Adaptive (GT) view (only when run had --adaptive)
+      // ---------------------------------------------------------------
+      if (gtSummary) {
+        document.getElementById("view-toggle-gt").style.display = "";
+        var gtCards = document.getElementById("gt-cards");
+        var cfg = gtSummary.config || {};
+        gtCards.appendChild(makeCard("Passes run", gtSummary.n_passes || 0));
+        gtCards.appendChild(makeCard(
+          "Saturated arms",
+          (gtSummary.n_saturated_arms || 0) + " / " + (gtSummary.n_arms || 0)
+        ));
+        gtCards.appendChild(makeCard(
+          "Stop threshold (GT)",
+          fmtPct(cfg.gt_threshold)
+        ));
+        gtCards.appendChild(makeCard(
+          "Pass bounds",
+          (cfg.min_passes || 0) + " – " + (cfg.max_passes || 0)
+        ));
+        gtCards.appendChild(makeCard(
+          "Union relations",
+          gtSummary.n_union_relations || (summary.n_relations || 0)
+        ));
+
+        // Saturated arms by pass.
+        var satByPass = gtSummary.saturated_arms_by_pass || {};
+        var satItems = Object.keys(satByPass).map(function (k) {
+          return { label: "Pass " + k, value: satByPass[k] };
+        }).sort(function (a, b) { return a.label.localeCompare(b.label); });
+        renderBars("gt-bars-saturation", satItems);
+
+        // Per-error-type aggregate.
+        var byEt = gtSummary.by_error_type || {};
+        var etItems = Object.keys(byEt).map(function (k) {
+          var b = byEt[k];
+          return {
+            label: k + "  (" + (b.n_saturated || 0) + "/" + (b.n_arms || 0) + " sat)",
+            value: b.total_relations || 0
+          };
+        }).sort(function (a, b) { return b.value - a.value; });
+        renderBars("gt-bars-by-type", etItems);
+
+        // Arms table.
+        var tbody = document.querySelector("#gt-arms-table tbody");
+        (gtSummary.arms || []).slice().sort(function (a, b) {
+          // Active arms first (bigger missing-mass), then saturated.
+          if (a.saturated !== b.saturated) return a.saturated ? 1 : -1;
+          return (b.good_turing_missing_mass || 0) - (a.good_turing_missing_mass || 0);
+        }).forEach(function (arm) {
+          var fn = arm.estimated_fn_rate || {};
+          var fnCi = fn.ci_95 || [null, null];
+          var statusLabel = arm.saturated
+            ? "saturated @ pass " + (arm.saturated_at_pass != null ? arm.saturated_at_pass : "?")
+            : "active";
+          var statusClass = arm.saturated ? "conf-high" : "conf-medium";
+          tbody.appendChild(h("tr", null, [
+            h("td", { text: arm.source }),
+            h("td", null, [h("span", { class: "pill type-pill", text: arm.error_type })]),
+            h("td", { class: "num", text: fmtInt(arm.passes_run) }),
+            h("td", { class: "num", text: fmtInt(arm.n_observed) }),
+            h("td", { class: "num", text: fmtPct(arm.good_turing_missing_mass) }),
+            h("td", { class: "num", text: fmtPct(fn.point) }),
+            h("td", { class: "num",
+              text: (fnCi[0] == null) ? "—" : (fmtPct(fnCi[0]) + " – " + fmtPct(fnCi[1])) }),
+            h("td", null, [h("span", { class: "pill " + statusClass, text: statusLabel })])
+          ]));
+        });
+      }
+    })();
+  </script>
+</body>
+</html>

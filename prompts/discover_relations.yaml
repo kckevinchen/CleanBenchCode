@@ -1,0 +1,224 @@
+# Schema-discovery prompt: per multi-column error type, ask the LLM to
+# enumerate every relation / dependency / constraint that should hold
+# over the table, given a compact whole-table digest plus a small row
+# sample.
+#
+# This is "Phase D" - it runs once per (source, error_type) BEFORE the
+# per-row detection phase. Discovered relations are persisted to
+# relations.jsonl and later fed back into per-type detection prompts
+# as a "RELATIONS TO CHECK" block, so detection no longer has to
+# re-discover the rules from scratch on every row chunk.
+#
+# Output is strictly JSON - the loader in src.core.relations parses
+# `{"relations": [...]}` and canonicalizes each entry into a stable
+# species key for Good-Turing accounting in the adaptive driver.
+#
+# Placeholders consumed by base.user_template:
+#   type_key, type_name, type_category, type_description,
+#   type_example, type_notes - the per-type metadata copied from
+#       prompts/error_types.yaml so each call is reminded of
+#       exactly what defect class it is enumerating relations for.
+#   table_overview      - compact TABLE OVERVIEW block built by
+#       src.core.table_digest. Headers, dtypes, top values,
+#       identity-column candidates, approximate FDs, total-row hints.
+#   row_sample          - a small Markdown table of stratified rows
+#       (first / median / last by row index) so the LLM can ground
+#       inferred rules in concrete values without seeing the whole CSV.
+#   error_type_kinds    - allowed values for the relation `kind`
+#       field for this error type (a small closed vocabulary).
+
+base:
+  system: >
+    You are a senior data-quality auditor. Your job is to ENUMERATE
+    every relation, dependency, or constraint that SHOULD hold over a
+    tabular dataset for ONE specific error type at a time. You are
+    NOT scanning rows for violations - downstream detectors do that.
+    You only enumerate the rules.
+
+    PRECISION OVER RECALL. A spurious relation pollutes the
+    downstream detector and produces false positives. Only emit a
+    relation when the headers, dtypes, sampled values, or the
+    explicit hints in the digest make the rule clearly inferable. If
+    in doubt, omit. Returning an empty list is a valid answer.
+
+    NO HALLUCINATIONS. Every column referenced in a relation MUST
+    appear verbatim in the COLUMN HEADERS list. Never invent column
+    names. Never reference a column that is not in the digest.
+
+    BE COMPACT. One relation per logical rule. Do not duplicate the
+    same dependency in different phrasings. Do not include trivial
+    or universally-true relations.
+
+    Respond with strictly valid JSON - no prose outside the JSON
+    payload and no Markdown code fences.
+
+  user_template: |
+    You are enumerating relations for a SINGLE error type over a
+    single CSV table. Stay strictly inside this type's lane;
+    relations for sibling types are handled by separate calls.
+
+    ERROR TYPE:    {type_name}
+    TAXONOMY TAG:  {type_category}
+    TYPE KEY:      {type_key}
+
+    DEFINITION
+    {type_description}
+
+    REFERENCE EXAMPLES (for guidance only)
+    {type_example}
+
+    APPLICABILITY NOTES
+    {type_notes}
+
+    {table_overview}
+
+    SAMPLE ROWS (a small stratified preview - the first column
+    `__row__` is the 0-indexed source row number; this is NOT the
+    whole table, only enough to ground inferred rules in concrete
+    values):
+
+    {row_sample}
+
+    ALLOWED `kind` VALUES FOR THIS ERROR TYPE
+    {error_type_kinds}
+
+    TASK
+    ----
+    Enumerate every relation that SHOULD hold over the full table
+    and whose violation would belong to the "{type_name}" error
+    type. For each relation:
+
+    * Pick a `kind` from the allowed list above.
+    * List the involved `columns` (verbatim from the headers).
+    * Write a short natural-language `predicate` describing the
+      rule (e.g. "Zip determines State", "TotalPrice == UnitPrice
+      * Quantity", "StartDate <= EndDate", "EmpID is unique").
+    * For directional dependencies (FDs), set `lhs` to the
+      determinant column(s) and `rhs` to the dependent column(s).
+      Leave both null for symmetric relations.
+    * For executable relations (calculations, aggregations,
+      ordered comparisons, equalities) you MUST also fill the
+      `executable` field with a concise expression using ONLY
+      column names from the headers and the operators
+      {{+, -, *, /, ==, !=, <=, >=, <, >, sum(), in()}}. Examples:
+        - "TotalPrice == UnitPrice * Quantity"
+        - "StartDate <= EndDate"
+        - "Subsidy == 0.5 + (Loss - 0.3) * (0.2/0.7)"
+        - "sum(Sales[detail_rows]) == Sales[total_row]"
+      Leave `executable` null ONLY when the rule is genuinely
+      non-arithmetic and non-comparable (free-text business
+      rules, factual world-knowledge rules like
+      Country->Capital). If you wrote an arithmetic or
+      comparison rule in the `predicate`, the same rule MUST
+      also appear in `executable`.
+    * `confidence` is "high" when the rule is essentially
+      definitional (Zip determines State, total = sum of details),
+      "medium" when strongly suggested by headers + samples, "low"
+      when speculative. Prefer omitting low-confidence rules
+      altogether.
+    * `rationale` is at most 1 sentence and must cite the
+      specific evidence (header names, dtypes, observed value
+      pattern, digest hint) that supports the rule.
+
+    DO NOT
+    * Emit a relation that references a column not in the
+      headers list above.
+    * Emit two relations whose predicates are paraphrases of each
+      other.
+    * Emit single-column rules (typo, casing, format) - those
+      belong to single-column detectors.
+    * Speculate beyond what the headers + samples + digest hints
+      support.
+
+    OUTPUT FORMAT
+    -------------
+    Respond with a single JSON object, no markdown fences:
+
+    {{
+      "relations": [
+        {{
+          "kind":       "<one of the allowed kinds>",
+          "columns":    ["<col>", ...],
+          "lhs":        ["<col>", ...]   | null,
+          "rhs":        ["<col>", ...]   | null,
+          "predicate":  "<short natural-language rule>",
+          "executable": "<expression>"   | null,
+          "confidence": "high"|"medium"|"low",
+          "rationale":  "<1 sentence>"
+        }}
+      ]
+    }}
+
+    If no relations apply, return exactly: {{"relations": []}}
+
+# Per-error-type entries. Only multi-column / multi-row / multi-table
+# types live here - single-column types do not have inter-column
+# relations to discover.
+#
+# `kinds` is the closed vocabulary substituted into the prompt's
+# ALLOWED `kind` block. Keep them short and orthogonal so the LLM
+# can pick deterministically.
+types:
+
+  fd_violation:
+    kinds:
+      - fd                 # A determines B (with A and B sets of columns)
+      - composite_fd       # (A1, A2, ...) determines B
+
+  row_calculation_inconsistency:
+    kinds:
+      - sum                # c == a + b (+ ...)
+      - product            # c == a * b
+      - difference         # c == a - b
+      - ratio              # c == a / b
+      - percentage         # c == 100 * a / b   (or a / b == c%)
+
+  cross_column_inconsistency:
+    kinds:
+      - ordered            # a <= b   (typical: start <= end)
+      - equality           # a == b   (typical: full_name == first + " " + last)
+      - implication        # if a == X then b is non-null / b in S
+      - mutual_exclusion   # a and b cannot both be populated
+      - factual            # a real-world fact pinning two columns together
+                           # (Country = "France" => Capital = "Paris")
+
+  business_rule_violation:
+    kinds:
+      - bounded             # a <= b * k   (Discount <= UnitPrice)
+      - mandatory_when      # b is required when a in S (Status=Approved => Approver populated)
+      - equality_within     # rows agreeing on (k1, k2, ...) must agree on m
+      - cap                 # numeric cap or floor (Discount <= 100% UnitPrice)
+
+  column_aggregation_inconsistency:
+    kinds:
+      - total_row           # sum(col[detail rows]) == col[total row]
+      - percentage_sum      # group's percent column sums to 100
+      - subtotal            # subtotal row equals sum of its grouped detail rows
+
+  row_duplication:
+    kinds:
+      - identity            # tuple of columns that uniquely identifies a row;
+                            # exact duplicates on this tuple flag row_duplication
+
+  cross_record_inconsistency:
+    kinds:
+      - identity_descriptive  # rows agreeing on identity columns must agree
+                              # on the listed descriptive columns
+
+  # Multi-table types are rare in single-source slices but supported
+  # for completeness.
+  cross_table_error:
+    kinds:
+      - foreign_key         # a column carries values from a controlled set;
+                            # values outside that set are orphans
+
+  cross_source_naming_conflict:
+    kinds:
+      - synonym             # two headers refer to the same concept
+      - homonym             # one header used for two different concepts
+
+  value_representation_conflict:
+    kinds:
+      - unit                # same column carries values in different units
+      - scale               # same column carries values at different scales
+      - encoding            # same concept encoded differently (M/F vs 0/1)

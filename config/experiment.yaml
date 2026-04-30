@@ -106,6 +106,21 @@ data:
   # the default 8 single-column error types, null => 1 * 33 * 8 = 264
   # detection calls (plus any Phase-B synthesis).
   max_chunks: null
+  # When true, prepend a compact whole-table TABLE OVERVIEW block to
+  # every per-type detection prompt. The block carries per-column
+  # dtype / cardinality / top-values, candidate identity columns,
+  # candidate functional dependencies (A -> B), and detected
+  # total/summary row indices. Built once per CSV - O(columns) tokens,
+  # not O(rows) - so it stays affordable on tall tables.
+  #
+  # Mostly useful for the multi-column / multi-row error types
+  # (cross_column_inconsistency, fd_violation,
+  # row_calculation_inconsistency, business_rule_violation,
+  # column_aggregation_inconsistency, row_duplication,
+  # cross_record_inconsistency) which need global context the row
+  # chunk alone cannot provide. Single-column types ignore it.
+  # CLI override: `--no-table-digest` to disable.
+  include_table_digest: true
 
 llm:
   model: gpt-5.2
@@ -322,6 +337,20 @@ good_turing:
     # and finally to ArmConfig.default().
     defaults:
       require_two_consecutive: true  # require two passes meeting the threshold
+      # Which estimator(s) gate saturation. Choices:
+      #   gt    -> Good-Turing point estimate p_0 <= epsilon (default;
+      #            bounds the *probability mass* on undetected species).
+      #   chao1 -> Chao1 upper-95 missing-count fraction
+      #            (chao1_ci_95_high - S_obs) / S_obs <= epsilon_chao1
+      #            (bounds the *count* of undetected species, using the
+      #            conservative upper end of the CI).
+      #   both  -> require both criteria simultaneously (recommended
+      #            for an end-to-end FN guarantee on the dataset).
+      stop_when: gt
+      # Threshold for the Chao1 criterion (only consulted when
+      # `stop_when` is `chao1` or `both`). Default 0.05 = "estimated
+      # missing count is at most 5% of what we've already observed".
+      epsilon_chao1: 0.05
     # Per-error-type overrides (only set the fields you want to change):
     # per_error_type:
     #   typo: {epsilon: 0.02}

@@ -1,16 +1,17 @@
-"""CLI entry point for the labelling + experiment-launcher web app.
+"""CLI entry point for the data-quality workbench web app.
 
 Usage (from project root)::
 
-    python -m experiments.label_server [--port 8000]
+    python -m experiments.workbench [--port 8000]
 
 Binds to 127.0.0.1 by default. If you're on the VM over VS Code
 Remote-SSH the port auto-forwards - open
 ``http://localhost:8000/`` in your local browser.
 
 The server is workspace-scoped: it manages every run directory under
-``outputs/`` and can also launch new detection runs as child processes
-(``python -m experiments.run_cleaning_detection`` under the hood).
+``outputs/`` and can launch new experiments as child processes -
+cleaning detection, schema/relation discovery, dataset curation, and
+report builds. It also hosts the cell-level labelling UI.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ def _load_dotenv(path: Path) -> None:
 
     The web-verifier needs ``TAVILY_API_KEY`` (and ``LLMClient`` reads
     ``AZURE_OPENAI_*``) at request time. We load ``<repo>/.env`` here so
-    operators can run ``python -m experiments.label_server`` without
+    operators can run ``python -m experiments.workbench`` without
     having to remember ``set -a; source .env`` first. We do NOT
     overwrite values already in the environment - shell exports win,
     matching the convention of every popular dotenv library.
@@ -62,10 +63,10 @@ from src.labeling.app import create_app  # noqa: E402
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        prog="experiments.label_server",
+        prog="experiments.workbench",
         description=(
-            "Launch the data-cleaning labelling + experiment-launcher "
-            "web app for this project."
+            "Launch the data-quality workbench web app: experiment "
+            "launcher, run browser, report viewer, and labelling UI."
         ),
     )
     parser.add_argument(
@@ -101,9 +102,9 @@ def main(argv: list[str] | None = None) -> int:
     app = create_app(args.project_root, annotator=annotator)
 
     print(
-        f"[label_server] project_root={args.project_root}  annotator={annotator}\n"
-        f"[label_server] UI:  http://{args.host}:{args.port}/\n"
-        f"[label_server] API: http://{args.host}:{args.port}/api/docs",
+        f"[workbench] project_root={args.project_root}  annotator={annotator}\n"
+        f"[workbench] UI:  http://{args.host}:{args.port}/\n"
+        f"[workbench] API: http://{args.host}:{args.port}/api/docs",
         flush=True,
     )
 

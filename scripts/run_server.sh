@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ------------------------------------------------------------------
-# Run experiments.label_server detached from the current shell so it
-# survives SSH disconnects. Writes its PID to logs/label_server.pid
-# and stdout/stderr to logs/label_server.log.
+# Run experiments.workbench detached from the current shell so it
+# survives SSH disconnects. Writes its PID to logs/workbench.pid
+# and stdout/stderr to logs/workbench.log.
 #
 # Usage:
 #   ./scripts/run_server.sh [--port 8000] [--host 127.0.0.1]
@@ -16,8 +16,8 @@ HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd -- "$HERE/.." && pwd)"
 cd "$ROOT"
 
-PID_FILE="$ROOT/logs/label_server.pid"
-LOG_FILE="$ROOT/logs/label_server.log"
+PID_FILE="$ROOT/logs/workbench.pid"
+LOG_FILE="$ROOT/logs/workbench.log"
 mkdir -p "$ROOT/logs"
 
 is_running() {
@@ -69,7 +69,7 @@ case "${1:-start}" in
     shift $(( $# > 0 ? 1 : 0 ))
     ;;
   *)
-    # Anything else -> pass through to label_server as flags.
+    # Anything else -> pass through to workbench as flags.
     ;;
 esac
 
@@ -85,7 +85,7 @@ fi
 
 # setsid + nohup: survive SSH hangup, own process group so the server
 # can be killed cleanly via the pidfile.
-nohup setsid python -m experiments.label_server "$@" \
+nohup setsid python -m experiments.workbench "$@" \
   >>"$LOG_FILE" 2>&1 < /dev/null &
 PID=$!
 echo "$PID" > "$PID_FILE"

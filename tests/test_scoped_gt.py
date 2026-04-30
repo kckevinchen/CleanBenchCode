@@ -607,6 +607,119 @@ def test_stop_saturated_is_sticky() -> None:
 
 
 # ---------------------------------------------------------------------------
+# stop_when modes (gt / chao1 / both)
+# ---------------------------------------------------------------------------
+
+
+def test_stop_when_gt_only_ignores_chao1_count() -> None:
+    """`stop_when="gt"` only consults the GT mass criterion.
+
+    Scenario: GT mass is tiny (so the *next emission* is unlikely to
+    be a never-seen species) but Chao1 says many rare species are
+    still missing. Pure-GT mode stops; pure-Chao1 mode does not.
+    """
+    # n_observed=100, chao1 upper-95 = 200 -> missing fraction = 1.0
+    # (way above any reasonable epsilon_chao1).
+    est = _est(
+        4, 100, p_miss=0.01,
+        chao1_ci_95_high=200.0,
+    )
+    cfg_gt = _cfg(stop_when="gt", require_two_consecutive=False)
+    cfg_chao = _cfg(stop_when="chao1", require_two_consecutive=False)
+    cfg_both = _cfg(stop_when="both", require_two_consecutive=False)
+
+    assert evaluate_stop(est, cfg_gt)[0] == "saturated"
+    assert evaluate_stop(est, cfg_chao)[0] == "active"
+    assert evaluate_stop(est, cfg_both)[0] == "active"
+
+
+def test_stop_when_chao1_only_ignores_gt_mass() -> None:
+    """`stop_when="chao1"` only consults the Chao1 count criterion.
+
+    Scenario: Chao1 says nothing material is missing (count-wise) but
+    GT mass is high because hot singletons keep showing up. Pure-Chao1
+    mode stops; pure-GT mode does not.
+    """
+    # n_observed=100, chao1 upper-95 = 100 -> missing fraction = 0.
+    est = _est(
+        4, 100, p_miss=0.5,
+        chao1_ci_95_high=100.0,
+    )
+    cfg_gt = _cfg(stop_when="gt", require_two_consecutive=False)
+    cfg_chao = _cfg(stop_when="chao1", require_two_consecutive=False)
+    cfg_both = _cfg(stop_when="both", require_two_consecutive=False)
+
+    assert evaluate_stop(est, cfg_gt)[0] == "active"
+    assert evaluate_stop(est, cfg_chao)[0] == "saturated"
+    assert evaluate_stop(est, cfg_both)[0] == "active"
+
+
+def test_stop_when_both_requires_both_criteria() -> None:
+    """`stop_when="both"` is the conjunction of GT and Chao1."""
+    # Both criteria pass: low p_miss AND tight chao1 upper bound.
+    est_both_pass = _est(
+        4, 100, p_miss=0.01,
+        chao1_ci_95_high=102.0,  # missing fraction = 2%
+    )
+    cfg = _cfg(
+        stop_when="both",
+        epsilon=0.05,
+        epsilon_chao1=0.05,
+        require_two_consecutive=False,
+    )
+    assert evaluate_stop(est_both_pass, cfg)[0] == "saturated"
+
+    # Either alone failing keeps it active.
+    est_only_gt_pass = _est(
+        4, 100, p_miss=0.01, chao1_ci_95_high=200.0,
+    )
+    est_only_chao_pass = _est(
+        4, 100, p_miss=0.5, chao1_ci_95_high=102.0,
+    )
+    assert evaluate_stop(est_only_gt_pass, cfg)[0] == "active"
+    assert evaluate_stop(est_only_chao_pass, cfg)[0] == "active"
+
+
+def test_stop_when_chao1_uses_upper_ci_not_point() -> None:
+    """The Chao1 criterion is on the *upper-95* CI of the missing count,
+    not the point estimate; this is what makes it conservative."""
+    # Point estimate says 0 missing, but upper-95 = 110 -> 10% missing.
+    est = _est(
+        4, 100, p_miss=0.5,
+        chao1_estimated_missed=0.0,
+        chao1_ci_95_high=110.0,
+    )
+    cfg_strict = _cfg(
+        stop_when="chao1",
+        epsilon_chao1=0.05,
+        require_two_consecutive=False,
+    )
+    cfg_loose = _cfg(
+        stop_when="chao1",
+        epsilon_chao1=0.20,
+        require_two_consecutive=False,
+    )
+    assert evaluate_stop(est, cfg_strict)[0] == "active"
+    assert evaluate_stop(est, cfg_loose)[0] == "saturated"
+
+
+def test_stop_when_default_is_gt_for_back_compat() -> None:
+    """Omitting `stop_when` from configs falls through to ``"gt"``,
+    preserving pre-existing behaviour."""
+    cfg = _cfg(require_two_consecutive=False)
+    assert cfg.stop_when == "gt"
+    # Hot Chao1, low GT -> saturated under default (gt).
+    est = _est(4, 100, p_miss=0.01, chao1_ci_95_high=10_000.0)
+    assert evaluate_stop(est, cfg)[0] == "saturated"
+
+
+def test_stop_when_unknown_raises() -> None:
+    cfg = _cfg(stop_when="bogus")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="stop_when"):
+        evaluate_stop(_est(4, 10, p_miss=0.01), cfg)
+
+
+# ---------------------------------------------------------------------------
 # Applicability
 # ---------------------------------------------------------------------------
 

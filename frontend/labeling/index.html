@@ -24,6 +24,7 @@
   <nav class="tabs">
     <button class="tab active" data-tab="runs">Runs</button>
     <button class="tab" data-tab="launch">Launch new run</button>
+    <button class="tab" data-tab="relations">Discover relations</button>
     <button class="tab" data-tab="compare">Compare runs</button>
     <button class="tab" data-tab="dataprep">Data prep</button>
     <button class="tab" data-tab="jobs">Jobs <span id="jobs-badge" class="badge" hidden>0</span></button>
@@ -218,6 +219,32 @@
                   <option value="false">allow single pass</option>
                 </select>
               </label>
+              <label>
+                <span>
+                  Stop criterion
+                  <span class="muted">(which estimator gates saturation)</span>
+                </span>
+                <select id="gt-per-arm-stop-when">
+                  <option value="">(default)</option>
+                  <option value="gt">gt&nbsp;&mdash; Good-Turing mass (p&#8320; &le; &epsilon;)</option>
+                  <option value="chao1">chao1&nbsp;&mdash; Chao1 upper-95 missing count</option>
+                  <option value="both">both&nbsp;&mdash; conjunction (strongest FN guarantee)</option>
+                </select>
+              </label>
+              <label>
+                <span>
+                  &epsilon;<sub>chao1</sub>
+                  <span class="muted">(missing-count fraction)</span>
+                </span>
+                <input
+                  id="gt-per-arm-epsilon-chao1"
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  max="1"
+                  placeholder="0.05"
+                />
+              </label>
             </div>
           </details>
         </fieldset>
@@ -268,6 +295,118 @@
           <button type="submit" id="submit-launch">Launch run</button>
         </div>
         <pre id="cmd-preview" class="cmd-preview" hidden></pre>
+      </form>
+    </section>
+
+    <!-- ========== Discover relations tab ========== -->
+    <section class="panel hidden" data-panel="relations">
+      <div class="panel-head">
+        <h2>Discover relations <span class="muted">multi-column · multi-row · multi-table</span></h2>
+        <div class="muted" style="font-size: 11.5px; max-width: 760px;">
+          One LLM call per <code>(source, error_type)</code>. The model receives a
+          schema digest plus a few sampled rows and enumerates the
+          relations that govern the table — functional dependencies,
+          calculation rules, cross-column constraints, business rules, and
+          cross-table joins. Output: <code>relations.jsonl</code> + a
+          self-contained dashboard. Single-column types (typos, formatting,
+          missing values…) are out of scope here — use the detection
+          launcher for those.
+        </div>
+      </div>
+
+      <form id="relations-form" class="launch-form discover">
+        <!-- Data + Model collapsed into one row -->
+        <fieldset>
+          <legend>Data</legend>
+          <label>
+            <span>Dataset (<code>data/</code>)</span>
+            <select id="rel-csv-dir"><option value="">(use config default)</option></select>
+          </label>
+          <label>
+            <span>CSV glob <span class="muted">(directory mode)</span></span>
+            <input id="rel-csv-glob" type="text" placeholder="*.csv" />
+          </label>
+          <label>
+            <span>Row samples <span class="muted">(per source)</span></span>
+            <input id="rel-n-row-samples" type="number" min="1" placeholder="5" />
+          </label>
+        </fieldset>
+
+        <fieldset>
+          <legend>LLM</legend>
+          <label>
+            <span>Model</span>
+            <input id="rel-model" type="text" placeholder="gpt-5.2" />
+          </label>
+          <label>
+            <span>Reasoning effort</span>
+            <select id="rel-reasoning-effort">
+              <option value="">(default)</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+            </select>
+          </label>
+          <label>
+            <span>Concurrency</span>
+            <input id="rel-concurrency" type="number" min="1" placeholder="8" />
+          </label>
+        </fieldset>
+
+        <!-- Error types -->
+        <fieldset>
+          <legend>Relation types <span class="muted" style="font-weight: normal; font-size: 11px;">(multi-column only)</span></legend>
+          <label>
+            <span>Pick which kinds of relations to look for. Leave empty &rarr; every type that has a discovery template.</span>
+            <div id="rel-error-types"></div>
+          </label>
+        </fieldset>
+
+        <!-- Adaptive loop -->
+        <fieldset id="rel-adaptive-block" class="gt-block">
+          <legend>Adaptive loop <span class="muted" style="font-weight: normal; font-size: 11px;">(Good-Turing multi-pass)</span></legend>
+          <p class="muted" style="grid-column: 1 / -1; margin: 0 0 4px 0; font-size: 12px;">
+            With <strong>adaptive</strong>, each <code>(source, error_type)</code>
+            arm runs multiple passes with different row-sample seeds and
+            stops once its Good-Turing missing mass falls at or below the
+            threshold. Off &rarr; one deterministic pass per source.
+          </p>
+          <label class="checkbox" style="grid-column: 1 / -1;">
+            <input id="rel-adaptive" type="checkbox" />
+            <span>Enable adaptive multi-pass discovery</span>
+          </label>
+          <label>
+            <span>Max passes <span class="muted">(per-arm k_max)</span></span>
+            <input id="rel-max-passes" type="number" min="1" placeholder="5" />
+          </label>
+          <label>
+            <span>Min passes <span class="muted">(per-arm k_min)</span></span>
+            <input id="rel-min-passes" type="number" min="1" placeholder="2" />
+          </label>
+          <label>
+            <span>GT threshold <span class="muted">(per-arm &epsilon;)</span></span>
+            <input id="rel-gt-threshold" type="number" step="0.01" min="0" max="1" placeholder="0.05" />
+          </label>
+          <label>
+            <span>Base seed</span>
+            <input id="rel-base-seed" type="number" placeholder="1000" />
+          </label>
+        </fieldset>
+
+        <!-- Output -->
+        <fieldset>
+          <legend>Output</legend>
+          <label class="checkbox">
+            <input id="rel-include-raw" type="checkbox" />
+            <span>Include raw LLM responses in <code>discovery_reports.json</code></span>
+          </label>
+        </fieldset>
+
+        <div class="form-actions">
+          <button type="button" id="rel-show-cmd">Preview command</button>
+          <button type="submit" id="rel-submit">Discover relations</button>
+        </div>
+        <pre id="rel-cmd-preview" class="cmd-preview" hidden></pre>
       </form>
     </section>
 

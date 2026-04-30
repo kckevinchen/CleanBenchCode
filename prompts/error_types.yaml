@@ -134,6 +134,8 @@ base:
     from its siblings)
     {type_notes}
 
+    {table_overview}
+
     COLUMN HEADERS (comma separated; this is the COMPLETE set of columns
     you may reference - the slice may contain a single column or many,
     depending on the experiment configuration):

@@ -28,6 +28,7 @@ from tqdm.contrib.logging import logging_redirect_tqdm
 from .data_loader import CsvChunk
 from .error_taxonomy import ErrorTaxonomy, ErrorType
 from .llm_client import LLMClient, LLMResponse
+from .table_digest import TableDigest
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +155,7 @@ class PerTypeCleaningDetector:
         reasoning_effort: str = "medium",
         reasoning_summary: str = "detailed",
         concurrency: Optional[int] = None,
+        digests: Optional[Dict[str, TableDigest]] = None,
     ) -> None:
         self.llm = llm
         self.taxonomy = taxonomy
@@ -165,6 +167,13 @@ class PerTypeCleaningDetector:
             raise ValueError("PerTypeCleaningDetector needs at least one error type")
         self.reasoning_effort = reasoning_effort
         self.reasoning_summary = reasoning_summary
+        # Optional whole-table digests, keyed by stringified source
+        # path. Used to render a TABLE OVERVIEW block at the top of
+        # every per-chunk prompt so the LLM can reason about
+        # multi-column / multi-row error types without us having to
+        # ship the full CSV in each call. ``None`` (or a missing
+        # entry for a given source) leaves the placeholder empty.
+        self.digests: Dict[str, TableDigest] = dict(digests or {})
         default_concurrency = min(8, max(1, len(self.llm.endpoints)))
         self.concurrency = concurrency if concurrency and concurrency > 0 else default_concurrency
 
@@ -173,7 +182,10 @@ class PerTypeCleaningDetector:
     # ------------------------------------------------------------------
 
     def _analyse(self, chunk: CsvChunk, error_type: ErrorType) -> ChunkReport:
-        rendered = self.taxonomy.render_user_prompt(error_type, chunk)
+        digest = self.digests.get(str(chunk.source))
+        rendered = self.taxonomy.render_user_prompt(
+            error_type, chunk, digest=digest
+        )
         prompt_name = f"error_types.{error_type.key}"
         report = ChunkReport(
             source=str(chunk.source),

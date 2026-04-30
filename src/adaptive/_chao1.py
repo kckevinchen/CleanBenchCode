@@ -33,8 +33,12 @@ def chao1_variance_abundance(f1: float, f2: float) -> float:
     if f2 <= 0:
         return float("nan")
     r = f1 / f2
-    # Chao & Shen 2010: Var(f_0_hat) = f2 * (0.5 r^4 + r^3 + 0.5 r^2).
-    return f2 * (0.5 * r ** 4 + r ** 3 + 0.5 * r ** 2)
+    # Chao 1987 / Chao & Shen 2010, Theorem 1:
+    #   Var(f_0_hat) = f2 * ( 0.5 r^2 + r^3 + 0.25 r^4 )
+    # where r = f1/f2. The r^4 coefficient is 1/4 (NOT 1/2 - that's
+    # a recurring transcription error in some open-source copies);
+    # see SpadeR / EstimateS source for the canonical form.
+    return f2 * (0.5 * r ** 2 + r ** 3 + 0.25 * r ** 4)
 
 
 def chao1_variance_bias_corrected(f1: float, f2: float, s_obs: float) -> float:
@@ -87,22 +91,30 @@ def frequency_of_frequencies(
     *,
     num_runs: int,
 ) -> Dict[int, int]:
-    """Bucket a sequence of per-species frequencies into ``{r: n_r}``.
+    """Bucket per-species emission counts into ``{r: n_r}``.
 
-    Frequencies outside ``[1, num_runs]`` are silently dropped (they
-    cannot occur by construction; species seen in zero runs are not
-    species, and ``r > num_runs`` is impossible because each species
-    can appear at most once per run).
+    Each value in ``frequencies`` is the total number of detection
+    emissions for one species (Interpretation B: "individual" =
+    one detection emission, with NO within-pass de-duplication).
+    Counts are NOT capped at ``num_runs`` because under this
+    interpretation a species can be emitted multiple times within a
+    single pass, so ``R_x`` is unbounded above.
 
-    Both :mod:`cell_gt` and :mod:`scoped_gt` call this with the
-    ``frequency`` attribute of their respective ``SpeciesRecord``
-    types, so the input is taken as a raw iterable of ints to keep
-    this module decoupled from either dataclass.
+    The returned dict zero-fills ``r in [1, num_runs]`` for shape
+    stability on empty / sparse arms; observed counts above
+    ``num_runs`` are added on top. Frequencies ``< 1`` are silently
+    dropped (a species with zero observations is not a species).
+
+    Both :mod:`cell_gt` and :mod:`scoped_gt` call this with the raw
+    emission count of their respective ``SpeciesRecord`` types, so
+    the input is taken as a raw iterable of ints to keep this
+    module decoupled from either dataclass.
     """
-    counts: Dict[int, int] = {r: 0 for r in range(1, num_runs + 1)}
+    counts: Dict[int, int] = {r: 0 for r in range(1, max(num_runs, 1) + 1)}
     for r in frequencies:
-        if 1 <= r <= num_runs:
-            counts[r] += 1
+        if r < 1:
+            continue
+        counts[r] = counts.get(r, 0) + 1
     return counts
 
 
@@ -134,6 +146,15 @@ def compute_core(
 ) -> ChaoCore:
     """Compute Good-Turing missing mass + Chao1 from raw frequencies.
 
+    Each value in ``frequencies`` is the per-species emission count
+    ``R_x`` (Wikipedia's notation): total raw detection emissions
+    for that species across the entire experiment, with NO within-
+    pass de-duplication. The textbook GT identity
+    ``N = sum_r r * n_r = sum_x R_x`` then holds, and
+    ``p_0 = n_1 / N`` recovers the classical missing-mass
+    interpretation: probability that the next emission belongs to a
+    species not yet observed.
+
     Edge cases:
     * ``S_obs == 0`` or ``num_runs <= 0`` -> all-zeros bundle (FN rate
       reported as 0 because we have no evidence either way).
@@ -142,8 +163,9 @@ def compute_core(
     * ``n_1 == 0`` -> missed = 0, FN rate 0.
 
     The returned ``frequency_counts`` always covers
-    ``r in [1, num_runs]`` (zero-filled), to keep downstream payload
-    shapes stable for empty arms.
+    ``r in [1, num_runs]`` (zero-filled) plus any larger ``r`` values
+    actually observed; this keeps downstream payload shapes stable
+    for empty arms while still admitting raw counts above K.
     """
     freqs = list(frequencies)
     s_obs = len(freqs)

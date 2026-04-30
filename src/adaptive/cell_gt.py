@@ -159,6 +159,19 @@ class SpeciesRecord:
     row: int
     runs_found_in: List[int] = field(default_factory=list)
     runs_by_error_type: Dict[str, List[int]] = field(default_factory=dict)
+    # Total raw cell-level emissions for this species across all
+    # runs, with NO within-run de-duplication. The textbook GT
+    # denominator (sum_r r * n_r) caps each species at one hit per
+    # run, which makes the missing-mass ratio collapse to zero just
+    # by re-running the loop more times. Tracking raw emissions
+    # lets the estimator use a denominator that grows with the
+    # model's actual detection volume rather than with K alone.
+    raw_hits: int = 0
+    # Per-error-type raw-hit breakdown, used by
+    # :func:`estimate_by_group` so that the per-type GT denominator
+    # also tracks raw emissions (rather than the deduped per-(cell,
+    # type, run) count) when the estimator is sliced.
+    raw_hits_by_error_type: Dict[str, int] = field(default_factory=dict)
 
     @property
     def frequency(self) -> int:
@@ -185,6 +198,8 @@ class SpeciesRecord:
                 t: sorted(rs) for t, rs in self.runs_by_error_type.items()
             },
             "frequency": self.frequency,
+            "raw_hits": self.raw_hits,
+            "raw_hits_by_error_type": dict(self.raw_hits_by_error_type),
         }
 
 
@@ -213,6 +228,15 @@ def aggregate_runs(
                         row=cell_key[2],
                     )
                     table[cell_key] = rec
+                # Raw-emission counter: every yield from
+                # ``iter_species_keys`` counts, including repeats
+                # within the same run. This is what feeds the
+                # ``R_x`` frequency in ``compute_core`` (textbook
+                # Good-Turing under Interpretation B).
+                rec.raw_hits += 1
+                rec.raw_hits_by_error_type[etype] = (
+                    rec.raw_hits_by_error_type.get(etype, 0) + 1
+                )
                 if cell_key not in seen_cells_this_run:
                     seen_cells_this_run.add(cell_key)
                     rec.runs_found_in.append(run_id)
@@ -251,7 +275,7 @@ class Estimate:
     num_runs: int
     n_observed: int                     # S_obs: distinct species seen
     frequency_counts: Dict[int, int]    # n_r
-    total_hits: int                     # N = sum_r r * n_r
+    total_hits: int                     # N = sum_r r * n_r = sum_x R_x
     # Good-Turing
     good_turing_missing_mass: float     # n_1 / N (in [0, 1])
     # Chao1 (bias-corrected when n_2 == 0)
@@ -299,6 +323,13 @@ def estimate(
 ) -> Estimate:
     """Compute both estimators from a list of :class:`SpeciesRecord`.
 
+    Each species' ``raw_hits`` (total detection emissions, NO
+    within-pass de-duplication) is fed to ``compute_core`` as its
+    ``R_x``. The textbook GT identity ``N = sum_x R_x`` then holds,
+    and ``good_turing_missing_mass = n_1 / N`` is the canonical
+    estimate of the probability that the next emission belongs to
+    a previously unseen species.
+
     Edge cases handled:
 
     * No detections at all -> returns zeroed estimators (FN rate is
@@ -309,8 +340,9 @@ def estimate(
     * ``n_1 == 0`` -> estimated missed species is 0 (every species was
       observed at least twice); FN rate 0.
     """
+    species_list = list(species_records)
     core = _compute_core(
-        (rec.frequency for rec in species_records),
+        (int(getattr(rec, "raw_hits", 0)) for rec in species_list),
         num_runs=num_runs,
     )
     return Estimate(
@@ -370,12 +402,21 @@ def estimate_by_group(
     else:
         for rec in species:
             for etype, runs in rec.runs_by_error_type.items():
+                # Project the per-type raw-hit count so the
+                # downstream ``estimate`` denominator is the per-
+                # type raw emissions for this cell, not the cell's
+                # total raw emissions across every type.
+                per_type_raw = int(
+                    rec.raw_hits_by_error_type.get(etype, 0)
+                )
                 projected = SpeciesRecord(
                     source=rec.source,
                     column=rec.column,
                     row=rec.row,
                     runs_found_in=list(runs),
                     runs_by_error_type={etype: list(runs)},
+                    raw_hits=per_type_raw,
+                    raw_hits_by_error_type={etype: per_type_raw},
                 )
                 buckets.setdefault(etype, []).append(projected)
     overrides = num_runs_by_key or {}
