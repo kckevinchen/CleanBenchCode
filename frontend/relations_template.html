@@ -1,27 +1,31 @@
 <!--
-  Self-contained schema-discovery report.
+  Self-contained relation-discovery report.
 
   Rendered by experiments.build_relation_report. The placeholder
   /*__RELATION_DATA_JSON__*/ is replaced at build time with a JSON
   payload of the form:
     { run_metadata, summary, relations, sources, gt_summary?,
-      discovery_reports? }
+      discovery_reports?, multi_table_groups?, multi_table_violations? }
   No network calls are made at runtime; open the generated report.html
   directly in a browser.
 
-  Three views share the page:
-    * "Overview"  - headline cards + breakdowns by type / kind / confidence
-    * "Relations" - source-tabbed browser of every discovered relation
-    * "Adaptive"  - per-arm Good-Turing / Chao1 estimates (only present
-                    when the run was launched with --adaptive)
+  Four views share the page:
+    * "Overview"    - headline cards + breakdowns by type / kind / confidence
+    * "Sources"     - per-CSV grid (counts, headers, click-through to Relations)
+    * "Relations"   - source-tabbed browser of every discovered relation
+    * "Multi-table" - cross-sheet groups + violations from the
+                      inter_table_inconsistency pass (only when the
+                      run wrote multi_table_*.jsonl artifacts)
+    * "Adaptive"    - per-arm Good-Turing / Chao1 estimates (only present
+                      when the run was launched with --adaptive)
 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'" />
-  <title>Schema Discovery Report</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'; base-uri 'none'; form-action 'none'" />
+  <title>Relation Discovery Report</title>
   <style>
     :root {
       --bg: #0f172a;
@@ -176,6 +180,102 @@
     }
     .relations-list { display: flex; flex-direction: column; gap: 12px; }
 
+    /* Review actions on each relation card. The reviewer can approve,
+       reject, or clear a previously-recorded decision. State is
+       persisted via /api/runs/{run_id}/relation-reviews when the
+       report is opened through the workbench. When opened standalone
+       (file://) the review row degrades gracefully - clicks no-op
+       and the disabled note is shown once. */
+    .review-actions {
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      margin-top: 4px; padding-top: 8px;
+      border-top: 1px dashed var(--border);
+    }
+    .review-actions .review-btn {
+      padding: 4px 10px; border-radius: 999px;
+      font-family: inherit; font-size: 12px; font-weight: 600;
+      background: var(--panel-2); color: var(--text);
+      border: 1px solid var(--border); cursor: pointer;
+      letter-spacing: 0.2px;
+    }
+    .review-actions .review-btn:hover { border-color: var(--accent); }
+    .review-actions .review-btn.active.approve {
+      background: rgba(16,185,129,0.18);
+      color: var(--ok); border-color: var(--ok);
+    }
+    .review-actions .review-btn.active.reject {
+      background: rgba(239,68,68,0.18);
+      color: var(--bad); border-color: var(--bad);
+    }
+    .review-actions .review-status {
+      font-size: 11.5px; color: var(--muted); margin-left: auto;
+    }
+    .review-actions .review-status.approved { color: var(--ok); }
+    .review-actions .review-status.rejected { color: var(--bad); }
+    .review-actions .review-status.added    { color: var(--accent-2); }
+    .relation-card.reviewed-approved {
+      border-color: var(--ok);
+      box-shadow: inset 3px 0 0 var(--ok);
+    }
+    .relation-card.reviewed-rejected {
+      border-color: rgba(239,68,68,0.55);
+      opacity: 0.62;
+    }
+    .relation-card.reviewed-rejected .predicate { text-decoration: line-through; }
+    .relation-card.reviewed-added {
+      border-color: var(--accent-2);
+      box-shadow: inset 3px 0 0 var(--accent-2);
+    }
+
+    /* "Add relation" button + inline form */
+    .add-rel-btn {
+      padding: 6px 12px; border-radius: 6px; cursor: pointer;
+      font-family: inherit; font-size: 12.5px; font-weight: 600;
+      background: rgba(96,165,250,0.16); color: var(--accent);
+      border: 1px solid rgba(96,165,250,0.45);
+    }
+    .add-rel-btn:hover { background: rgba(96,165,250,0.28); }
+    .add-rel-form {
+      background: var(--panel-2); border: 1px solid var(--border);
+      border-radius: 8px; padding: 12px 14px;
+      display: grid; gap: 8px;
+      grid-template-columns: minmax(140px, 200px) 1fr;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+    .add-rel-form.hidden { display: none; }
+    .add-rel-form label { color: var(--muted); font-size: 12px; }
+    .add-rel-form input, .add-rel-form select, .add-rel-form textarea {
+      padding: 6px 8px; font-family: inherit; font-size: 12.5px;
+      background: var(--panel); color: var(--text);
+      border: 1px solid var(--border); border-radius: 6px;
+      width: 100%; resize: vertical;
+    }
+    .add-rel-form .form-actions {
+      grid-column: 1 / -1;
+      display: flex; gap: 8px; justify-content: flex-end;
+    }
+    .add-rel-form .form-actions button {
+      padding: 6px 14px; border-radius: 6px; cursor: pointer;
+      font-family: inherit; font-size: 12.5px; font-weight: 600;
+      border: 1px solid var(--border); background: var(--panel); color: var(--text);
+    }
+    .add-rel-form .form-actions button.primary {
+      background: var(--accent); color: #0b1120; border-color: var(--accent);
+    }
+    .review-toast {
+      position: fixed; bottom: 18px; right: 18px;
+      background: var(--panel); color: var(--text);
+      border: 1px solid var(--border); border-radius: 8px;
+      padding: 8px 14px; font-size: 12.5px;
+      box-shadow: 0 4px 18px rgba(0,0,0,0.4);
+      z-index: 1000; opacity: 0; pointer-events: none;
+      transition: opacity 0.18s ease;
+    }
+    .review-toast.show { opacity: 1; }
+    .review-toast.error { border-color: var(--bad); color: var(--bad); }
+    .review-toast.ok { border-color: var(--ok); color: var(--ok); }
+
     /* Two-column layout: per-source context strip pinned to the left,
        relations list (toolbar + cards) on the right. Collapses to a
        single column on narrow viewports. */
@@ -254,6 +354,62 @@
     .pill.conf-low      { color: var(--conf-low);   }
     .pill.type-pill     { color: var(--accent); border-color: rgba(96,165,250,0.45); background: rgba(96,165,250,0.10); }
     .pill.passes        { color: var(--muted); }
+
+    /* Empirical-validation pills + violation table.
+       Pass-rate is bucketed into bands so the badge is scannable:
+         >= 0.99  perfect   green
+         0.85-0.99 mostly   amber  (most likely real data quality issues)
+         < 0.85   poor       red    (rule probably wrong)
+       Refusals and sandbox errors get their own neutral states. */
+    .pill.verify-perfect { color: var(--ok); border-color: rgba(16,185,129,0.55); background: rgba(16,185,129,0.10); }
+    .pill.verify-mostly  { color: var(--warn); border-color: rgba(245,158,11,0.55); background: rgba(245,158,11,0.12); }
+    .pill.verify-poor    { color: var(--bad); border-color: rgba(239,68,68,0.55); background: rgba(239,68,68,0.12); }
+    .pill.verify-refused { color: var(--muted); border-color: var(--border); }
+    .pill.verify-error   { color: var(--bad); border-color: rgba(239,68,68,0.55); background: rgba(239,68,68,0.05); font-style: italic; }
+    .verify-fold {
+      margin-top: 2px; font-size: 12px; color: var(--muted);
+    }
+    .verify-fold > summary {
+      cursor: pointer; list-style: none;
+      padding: 4px 0; color: var(--muted);
+    }
+    .verify-fold > summary::-webkit-details-marker { display: none; }
+    .verify-fold > summary::before { content: "\25B8 "; color: var(--muted); }
+    .verify-fold[open] > summary::before { content: "\25BE "; }
+    .verify-fold pre.verify-code {
+      background: var(--panel-2); border: 1px solid var(--border);
+      border-radius: 6px; padding: 8px 10px; font-size: 11.5px;
+      color: var(--text); white-space: pre; overflow-x: auto;
+      max-height: 240px;
+    }
+    .verify-violations {
+      margin-top: 6px; border: 1px solid var(--border);
+      border-radius: 6px; overflow: hidden;
+    }
+    .verify-violations table {
+      width: 100%; border-collapse: collapse; font-size: 11.5px;
+      font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    }
+    .verify-violations th, .verify-violations td {
+      padding: 4px 8px; border-bottom: 1px solid var(--border);
+      text-align: left; vertical-align: top;
+      max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .verify-violations thead th {
+      background: var(--panel-2); color: var(--muted);
+      font-weight: 600; font-size: 10.5px; letter-spacing: 0.4px; text-transform: uppercase;
+    }
+    .verify-violations td.row-idx {
+      color: var(--muted); font-variant-numeric: tabular-nums;
+      width: 50px; text-align: right;
+    }
+    .verify-error-msg {
+      color: var(--bad); font-size: 11.5px; font-family: ui-monospace, monospace;
+      background: rgba(239,68,68,0.06); padding: 6px 8px;
+      border: 1px solid rgba(239,68,68,0.35); border-radius: 6px;
+      white-space: pre-wrap; word-break: break-word;
+    }
+    .verify-refusal-reason { color: var(--muted); font-size: 12px; }
     .col-chip {
       display: inline-block; padding: 1px 7px; border-radius: 4px;
       font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -573,11 +729,165 @@
     }
     table.gt-table td.num { font-variant-numeric: tabular-nums; text-align: right; }
     table.gt-table tr:hover td { background: rgba(96,165,250,0.04); }
+
+    /* Multi-table cross-sheet view. The page renders one card per
+       workbook; each workbook expands to its confirmed groups
+       (union/join), each group expands to its violations (header
+       synonym, dtype drift, duplicate row, attribute conflict, FK
+       orphan). All deterministic — only the group confirmation +
+       column mapping comes from the LLM. */
+    .mt-toolbar {
+      display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+      margin-bottom: 14px;
+    }
+    .mt-toolbar input[type="search"] {
+      flex: 1 1 280px; padding: 7px 10px;
+      font-family: inherit; font-size: 13px;
+      background: var(--panel); color: var(--text);
+      border: 1px solid var(--border); border-radius: 6px;
+    }
+    .mt-toolbar select {
+      padding: 6px 8px; background: var(--panel); color: var(--text);
+      border: 1px solid var(--border); border-radius: 6px;
+      font-family: inherit; font-size: 13px;
+    }
+    .mt-workbook {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 10px; padding: 14px 16px; margin-bottom: 16px;
+    }
+    .mt-workbook > .mt-wb-head {
+      display: flex; align-items: center; gap: 12px;
+      margin-bottom: 8px; flex-wrap: wrap;
+    }
+    .mt-workbook .mt-wb-name {
+      font-weight: 600; font-size: 14px; word-break: break-all;
+    }
+    .mt-workbook .mt-wb-stats {
+      color: var(--muted); font-size: 12px;
+      font-variant-numeric: tabular-nums;
+    }
+    .mt-group {
+      background: var(--panel-2); border: 1px solid var(--border);
+      border-radius: 8px; padding: 12px 14px; margin-top: 10px;
+    }
+    .mt-group.rejected { opacity: 0.55; }
+    .mt-group .mt-group-head {
+      display: flex; align-items: center; gap: 10px;
+      margin-bottom: 6px; flex-wrap: wrap;
+    }
+    .mt-group .mt-group-id {
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 11.5px; color: var(--muted);
+    }
+    .mt-group .mt-group-kind {
+      font-size: 11px; padding: 2px 8px; border-radius: 999px;
+      font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase;
+    }
+    .mt-group .mt-group-kind.union { background: rgba(96,165,250,0.18); color: var(--accent); }
+    .mt-group .mt-group-kind.join  { background: rgba(167,139,250,0.18); color: var(--accent-2); }
+    .mt-group .mt-group-confirm {
+      font-size: 11px; padding: 2px 8px; border-radius: 999px;
+      font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase;
+    }
+    .mt-group .mt-group-confirm.confirmed { background: rgba(16,185,129,0.18); color: var(--ok); }
+    .mt-group .mt-group-confirm.rejected  { background: rgba(148,163,184,0.18); color: var(--muted); }
+    .mt-group .mt-group-pk {
+      font-size: 12px; color: var(--muted);
+      font-variant-numeric: tabular-nums;
+    }
+    .mt-group .mt-group-pk code {
+      background: var(--panel); padding: 1px 6px; border-radius: 4px; color: var(--text);
+    }
+    .mt-group .mt-group-rationale {
+      font-size: 12.5px; color: var(--muted); line-height: 1.45;
+      margin-top: 4px;
+    }
+    .mt-group .mt-mapping {
+      margin-top: 10px;
+      display: grid; gap: 4px 12px;
+      grid-template-columns: minmax(180px, 320px) 1fr;
+      font-size: 12.5px;
+    }
+    .mt-group .mt-mapping .mt-canonical {
+      font-weight: 600; color: var(--text); white-space: nowrap;
+      overflow: hidden; text-overflow: ellipsis;
+    }
+    .mt-group .mt-mapping .mt-canonical.synonym { color: var(--warn); }
+    .mt-group .mt-mapping .mt-variants { color: var(--muted); }
+    .mt-group .mt-mapping .mt-variants code {
+      background: var(--panel); padding: 1px 5px; border-radius: 4px;
+      color: var(--text); margin-right: 4px; display: inline-block;
+      font-size: 11.5px;
+    }
+    .mt-violations {
+      margin-top: 12px; display: flex; flex-direction: column; gap: 6px;
+    }
+    .mt-violations .mt-vio-row {
+      display: grid;
+      grid-template-columns: 130px minmax(180px, 1fr) minmax(140px, 220px) 80px 1fr;
+      gap: 10px; align-items: start;
+      padding: 6px 8px; border-radius: 6px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      font-size: 12px;
+    }
+    .mt-violations .mt-vio-row.kind-header_synonym  { border-left: 3px solid var(--warn); }
+    .mt-violations .mt-vio-row.kind-dtype_drift     { border-left: 3px solid var(--accent-2); }
+    .mt-violations .mt-vio-row.kind-duplicate_row   { border-left: 3px solid var(--accent); }
+    .mt-violations .mt-vio-row.kind-attribute_conflict { border-left: 3px solid var(--bad); }
+    .mt-violations .mt-vio-row.kind-fk_orphan       { border-left: 3px solid var(--kind-other); }
+    .mt-violations .mt-vio-kind {
+      font-size: 10.5px; font-weight: 600; letter-spacing: 0.4px;
+      text-transform: uppercase; color: var(--muted);
+    }
+    .mt-violations .mt-vio-where {
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 11.5px; word-break: break-all;
+    }
+    .mt-violations .mt-vio-where .mt-row-num {
+      color: var(--muted); margin-left: 4px;
+    }
+    .mt-violations .mt-vio-cols code {
+      background: var(--panel-2); padding: 1px 5px; border-radius: 4px;
+      font-size: 11px; margin-right: 3px; display: inline-block;
+    }
+    .mt-violations .mt-vio-linked {
+      color: var(--muted); font-size: 11px;
+      font-variant-numeric: tabular-nums;
+    }
+    .mt-violations .mt-vio-rationale {
+      color: var(--muted); font-size: 11.5px; line-height: 1.4;
+    }
+    .mt-vio-more {
+      text-align: center; padding: 4px;
+      font-size: 11.5px; color: var(--muted);
+    }
+    .mt-vio-more button {
+      background: transparent; color: var(--accent);
+      border: 1px dashed var(--border); border-radius: 6px;
+      font-family: inherit; font-size: 11.5px;
+      padding: 4px 12px; cursor: pointer;
+    }
+    .mt-vio-more button:hover { border-color: var(--accent); }
+    .mt-empty {
+      color: var(--muted); font-style: italic; font-size: 12.5px;
+      padding: 8px 4px;
+    }
+    .mt-counts {
+      display: inline-flex; gap: 6px; flex-wrap: wrap;
+      font-size: 11px;
+    }
+    .mt-counts .mt-count-pill {
+      background: var(--panel-2); border: 1px solid var(--border);
+      border-radius: 999px; padding: 2px 8px;
+      font-variant-numeric: tabular-nums;
+    }
+    .mt-counts .mt-count-pill b { color: var(--text); margin-left: 4px; }
   </style>
 </head>
 <body>
   <header>
-    <h1><span class="accent">Schema Discovery</span> &mdash; Multi-Column Relations</h1>
+    <h1><span class="accent">Relation Discovery</span> &mdash; Multi-Column Relations</h1>
     <div class="meta" id="run-meta"></div>
   </header>
 
@@ -586,6 +896,7 @@
       <button data-view="overview" class="active">Overview</button>
       <button data-view="sources">Sources</button>
       <button data-view="relations">Relations</button>
+      <button data-view="multi" id="view-toggle-multi" style="display:none">Multi-table</button>
       <button data-view="gt" id="view-toggle-gt" style="display:none">Adaptive (GT)</button>
     </div>
 
@@ -637,14 +948,92 @@
               <option value="medium">medium</option>
               <option value="low">low</option>
             </select>
+            <select id="rel-filter-review" title="Filter by reviewer decision">
+              <option value="">All reviews</option>
+              <option value="pending">Pending</option>
+              <option value="approved">Approved</option>
+              <option value="rejected">Rejected</option>
+              <option value="added">User-added</option>
+            </select>
+            <select id="rel-filter-verify" title="Filter by empirical pass-rate">
+              <option value="">All verifications</option>
+              <option value="perfect">Perfect (>= 99.9%)</option>
+              <option value="mostly">Mostly (85-99.9%)</option>
+              <option value="poor">Poor (< 85%)</option>
+              <option value="refused">Not verifiable</option>
+              <option value="error">Validation error</option>
+              <option value="missing">Not validated</option>
+            </select>
             <label class="rel-collapse-toggle" title="Collapse near-duplicate paraphrases under one card. Originals are preserved in relations.jsonl.">
               <input type="checkbox" id="rel-collapse-dup" checked>
               Collapse near-duplicates
             </label>
+            <button type="button" class="add-rel-btn" id="rel-add-btn" title="Author a new relation that the discovery pass missed">
+              + Add relation
+            </button>
           </div>
+          <form class="add-rel-form hidden" id="rel-add-form">
+            <label for="add-rel-kind">Kind</label>
+            <select id="add-rel-kind" required>
+              <option value="implication">implication</option>
+              <option value="mandatory_when">mandatory_when</option>
+              <option value="equality_within">equality_within</option>
+              <option value="factual">factual</option>
+              <option value="bounded">bounded</option>
+              <option value="cap">cap</option>
+              <option value="equality">equality</option>
+              <option value="fd">fd (functional dependency)</option>
+              <option value="arithmetic">arithmetic</option>
+              <option value="total_row">total_row</option>
+              <option value="other">other</option>
+            </select>
+            <label for="add-rel-source">Source CSV</label>
+            <input type="text" id="add-rel-source" placeholder="filename.csv">
+            <label for="add-rel-error-type">Error type</label>
+            <input type="text" id="add-rel-error-type" placeholder="e.g. fd_violation">
+            <label for="add-rel-cols">Columns (comma-separated)</label>
+            <input type="text" id="add-rel-cols" required placeholder="ColA, ColB">
+            <label for="add-rel-lhs">LHS columns (optional)</label>
+            <input type="text" id="add-rel-lhs" placeholder="ColA">
+            <label for="add-rel-rhs">RHS columns (optional)</label>
+            <input type="text" id="add-rel-rhs" placeholder="ColB">
+            <label for="add-rel-pred">Predicate</label>
+            <input type="text" id="add-rel-pred" required placeholder="If ColA == 'X' then ColB is non-null">
+            <label for="add-rel-exec">Executable (optional)</label>
+            <input type="text" id="add-rel-exec" placeholder="ColA == 'X' implies ColB is not null">
+            <label for="add-rel-rationale">Rationale</label>
+            <textarea id="add-rel-rationale" rows="2" placeholder="Why this rule holds at the schema level."></textarea>
+            <label for="add-rel-note">Note (optional)</label>
+            <input type="text" id="add-rel-note" placeholder="Reviewer note">
+            <div class="form-actions">
+              <button type="button" id="rel-add-cancel">Cancel</button>
+              <button type="submit" class="primary">Save relation</button>
+            </div>
+          </form>
           <div class="relations-list" id="rel-list"></div>
         </div>
       </div>
+    </section>
+
+    <!-- ========================== MULTI-TABLE =========================== -->
+    <section class="view" id="view-multi">
+      <div class="mt-toolbar">
+        <input type="search" id="mt-q" placeholder="Filter by workbook, sheet, column, or rationale…">
+        <select id="mt-filter-kind">
+          <option value="">All violation kinds</option>
+          <option value="header_synonym">header_synonym</option>
+          <option value="dtype_drift">dtype_drift</option>
+          <option value="duplicate_row">duplicate_row</option>
+          <option value="attribute_conflict">attribute_conflict</option>
+          <option value="fk_orphan">fk_orphan</option>
+        </select>
+        <select id="mt-filter-confirm">
+          <option value="">Confirmed + rejected groups</option>
+          <option value="confirmed" selected>Confirmed groups only</option>
+          <option value="rejected">Rejected groups only</option>
+        </select>
+      </div>
+      <div id="mt-list"></div>
     </section>
 
     <!-- =========================== ADAPTIVE GT ========================== -->
@@ -697,7 +1086,13 @@
           Object.keys(attrs).forEach(function (k) {
             if (k === "class") el.className = attrs[k];
             else if (k === "text") el.textContent = attrs[k];
-            else if (k === "html") el.innerHTML = attrs[k];
+            // NOTE: a previous revision exposed an "html" attribute that
+            // assigned to el.innerHTML. It was unused at every call
+            // site (no h(..., { html: ... }) anywhere in this file),
+            // and we removed it as defense-in-depth - HTML strings
+            // would have bypassed the implicit textContent escaping
+            // that the rest of the helper relies on. If you ever need
+            // raw HTML, sanitize at the call site.
             else if (k.indexOf("on") === 0 && typeof attrs[k] === "function") {
               el.addEventListener(k.slice(2), attrs[k]);
             } else if (attrs[k] !== undefined && attrs[k] !== null) {
@@ -739,12 +1134,337 @@
       var sources = DATA.sources || [];
       var gtSummary = DATA.gt_summary || null;
       var sourcesDetail = Array.isArray(DATA.sources_detail) ? DATA.sources_detail : [];
+      var generalized = Array.isArray(DATA.generalized) ? DATA.generalized : [];
+      var aggregated = Array.isArray(DATA.aggregated) ? DATA.aggregated : [];
+      var multiTableGroups = Array.isArray(DATA.multi_table_groups)
+        ? DATA.multi_table_groups : [];
+      var multiTableViolations = Array.isArray(DATA.multi_table_violations)
+        ? DATA.multi_table_violations : [];
       // Index source detail by name for O(1) lookups when rendering
       // the per-source context strip in the Relations view.
       var sourceInfo = {};
       sourcesDetail.forEach(function (s) {
         if (s && typeof s.source === "string") sourceInfo[s.source] = s;
       });
+
+      // Per-arm Chao1/Good-Turing snapshot indexed by
+      // ``source -> error_type -> arm`` so the relations view can
+      // attach a "saturated / active / exhausted" pill to each
+      // (csv x error_type) group header. Empty when the run was
+      // not adaptive.
+      var armBySrcEt = {};
+      ((gtSummary && gtSummary.arms) || []).forEach(function (a) {
+        if (!a || typeof a.source !== "string") return;
+        (armBySrcEt[a.source] = armBySrcEt[a.source] || {})[a.error_type] = a;
+      });
+
+      // ---------------------------------------------------------------
+      // Reviewer state (approve / reject / add). Loaded from
+      // /api/runs/{run_id}/relation-reviews when the report is opened
+      // through the workbench. The CSP allows connect-src 'self', so
+      // fetch is a no-op when the file is opened directly (file://):
+      // the UI degrades to read-only.
+      // ---------------------------------------------------------------
+      var runId = meta.run_id || "";
+      var reviewLatest = {};      // relation_id -> latest review record
+      var addedRelations = [];    // synthetic relations authored by user
+      // Empirical-validation index. Map species_key -> verification
+      // record (verifiable, pass_rate, code, sample_violations,
+      // error). Embedded by experiments.build_relation_report when
+      // ``relation_verifications.jsonl`` is present in the run dir.
+      var verifications = (DATA && DATA.verifications) || {};
+      var reviewApiOk = false;    // becomes true after a successful GET
+      var reviewApiBase = runId
+        ? ("/api/runs/" + encodeURIComponent(runId) + "/relation-reviews")
+        : "";
+
+      function showToast(msg, level) {
+        var t = document.getElementById("review-toast");
+        if (!t) {
+          t = h("div", { class: "review-toast", id: "review-toast" });
+          document.body.appendChild(t);
+        }
+        t.textContent = msg;
+        t.className = "review-toast show " + (level || "");
+        clearTimeout(t._timer);
+        t._timer = setTimeout(function () {
+          t.className = "review-toast " + (level || "");
+        }, 2200);
+      }
+
+      function fetchReviews() {
+        if (!reviewApiBase) return Promise.resolve();
+        return fetch(reviewApiBase, { credentials: "same-origin" })
+          .then(function (r) {
+            if (!r.ok) throw new Error("HTTP " + r.status);
+            return r.json();
+          })
+          .then(function (payload) {
+            reviewApiOk = true;
+            reviewLatest = payload && payload.latest ? payload.latest : {};
+            // Synthesise card entries for "added" decisions so they
+            // appear alongside discovery-emitted relations.
+            addedRelations = [];
+            Object.keys(reviewLatest).forEach(function (rid) {
+              var rec = reviewLatest[rid];
+              if (rec && rec.decision === "added" && rec.relation) {
+                var rel = rec.relation;
+                addedRelations.push({
+                  species_key: rec.relation_id,
+                  source: rel.source || "(user-added)",
+                  error_type: rel.error_type || "user_added",
+                  kind: rel.kind || "other",
+                  columns: rel.columns || [],
+                  lhs: rel.lhs || [],
+                  rhs: rel.rhs || [],
+                  predicate: rel.predicate || "",
+                  executable: rel.executable || null,
+                  rationale: rel.rationale || "",
+                  confidence: "user",
+                  _user_added: true,
+                });
+              }
+            });
+          })
+          .catch(function () {
+            reviewApiOk = false;
+          });
+      }
+
+      function postReview(payload) {
+        if (!reviewApiBase) {
+          showToast("Reviews disabled (open via workbench to label).", "error");
+          return Promise.reject(new Error("no api"));
+        }
+        return fetch(reviewApiBase, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        }).then(function (r) {
+          if (!r.ok) {
+            return r.text().then(function (t) {
+              throw new Error("HTTP " + r.status + ": " + t);
+            });
+          }
+          return r.json();
+        }).then(function (resp) {
+          if (resp && resp.latest) reviewLatest = resp.latest;
+          // Re-derive added list.
+          addedRelations = [];
+          Object.keys(reviewLatest).forEach(function (rid) {
+            var rec = reviewLatest[rid];
+            if (rec && rec.decision === "added" && rec.relation) {
+              var rel = rec.relation;
+              addedRelations.push({
+                species_key: rec.relation_id,
+                source: rel.source || "(user-added)",
+                error_type: rel.error_type || "user_added",
+                kind: rel.kind || "other",
+                columns: rel.columns || [],
+                lhs: rel.lhs || [],
+                rhs: rel.rhs || [],
+                predicate: rel.predicate || "",
+                executable: rel.executable || null,
+                rationale: rel.rationale || "",
+                confidence: "user",
+                _user_added: true,
+              });
+            }
+          });
+          return resp;
+        });
+      }
+
+      function decisionForRelation(relId) {
+        var rec = relId ? reviewLatest[relId] : null;
+        if (!rec) return "";
+        return rec.decision || "";
+      }
+
+      function makeReviewActions(r) {
+        var relId = r && r.species_key;
+        if (!relId) return null;
+        var current = decisionForRelation(relId);
+        var approveBtn = h("button", {
+          class: "review-btn approve" + (current === "approved" ? " active" : ""),
+          type: "button",
+          title: "Approve this relation",
+          text: "\u2713 Approve",
+        });
+        var rejectBtn = h("button", {
+          class: "review-btn reject" + (current === "rejected" ? " active" : ""),
+          type: "button",
+          title: "Reject this relation",
+          text: "\u2717 Reject",
+        });
+        var clearBtn = h("button", {
+          class: "review-btn clear",
+          type: "button",
+          title: "Clear the recorded decision",
+          text: "Reset",
+        });
+        var status = h("span", {
+          class: "review-status" + (current ? " " + current : ""),
+          text: current
+            ? ("Status: " + current
+               + ((reviewLatest[relId] && reviewLatest[relId].author)
+                  ? " by " + reviewLatest[relId].author : ""))
+            : "Pending review"
+        });
+        function send(decision) {
+          // Preserve scroll position across the re-render so the user
+          // doesn't get bounced back to the top of the page after each
+          // approve / reject / reset click. Some browsers (and the
+          // workbench iframe wrapper) report scroll on
+          // ``document.scrollingElement`` rather than ``window``, so
+          // capture both and restore both on the next two frames so
+          // any post-render reflow doesn't undo it.
+          var se = document.scrollingElement || document.documentElement;
+          var prevScroll = (se && se.scrollTop) || window.scrollY
+                           || window.pageYOffset || 0;
+          function restore() {
+            if (se) se.scrollTop = prevScroll;
+            window.scrollTo(0, prevScroll);
+          }
+          postReview({ relation_id: relId, decision: decision })
+            .then(function () {
+              showToast("Review saved (" + decision + ").", "ok");
+              renderRelations();
+              restore();
+              // Layout may shift after re-render (e.g. card class
+              // change resizing). Re-pin on the next two frames.
+              requestAnimationFrame(function () {
+                restore();
+                requestAnimationFrame(restore);
+              });
+            })
+            .catch(function (e) {
+              showToast("Failed to save review: " + e.message, "error");
+            });
+        }
+        approveBtn.addEventListener("click", function () { send("approved"); });
+        rejectBtn.addEventListener("click", function () { send("rejected"); });
+        clearBtn.addEventListener("click", function () { send("cleared"); });
+        var bar = h("div", { class: "review-actions" }, [
+          approveBtn, rejectBtn, clearBtn, status,
+        ]);
+        return bar;
+      }
+
+      function reviewClassFor(r) {
+        var d = decisionForRelation(r && r.species_key);
+        if (r && r._user_added) return "reviewed-added";
+        if (d === "approved") return "reviewed-approved";
+        if (d === "rejected") return "reviewed-rejected";
+        return "";
+      }
+
+      // ---------------------------------------------------------------
+      // Aggregation + Generalization layers
+      //
+      // The discovery pipeline emits rules in three layers:
+      //   1. Originals (`relations.jsonl`)        - what the LLM actually said
+      //   2. Aggregated canonicals (`relations_aggregated.jsonl`) -
+      //      paraphrase clusters merged into canonical rules; each
+      //      canonical carries `aggregated_from = [original species_keys]`
+      //   3. Generalized parametrics (`relations_generalized.jsonl`) -
+      //      value-keyed families collapsed to one parametric rule; each
+      //      parametric carries `generalized_from = [species_keys]` which
+      //      may be CANONICAL keys (when aggregation ran first) or
+      //      ORIGINAL keys (for arms that weren't aggregated).
+      //
+      // We render the highest layer that covers each rule as the primary
+      // card; lower layers are tucked under expand. Originals are NEVER
+      // discarded from the dataset - this is the "we care about what the
+      // LLM really discovered" invariant.
+      // ---------------------------------------------------------------
+      var relationsBySpecies = {};
+      relations.forEach(function (r) {
+        if (r && r.species_key) relationsBySpecies[r.species_key] = r;
+      });
+
+      // Pass 1: aggregation. Each canonical attaches its originals
+      // and we mark every original it covers as consumed.
+      var coveredByAggregation = {};
+      var aggregatedBySpecies = {};
+      aggregated.forEach(function (a) {
+        var keys = Array.isArray(a.aggregated_from) ? a.aggregated_from : [];
+        var originals = [];
+        var freq = 0;
+        keys.forEach(function (k) {
+          var src = relationsBySpecies[k];
+          if (src) {
+            coveredByAggregation[k] = true;
+            originals.push(src);
+            freq += (src.pass_frequency || 0);
+          }
+        });
+        a.aggregated_originals = originals;
+        if (freq && a.pass_frequency == null) a.pass_frequency = freq;
+        if (a.species_key) aggregatedBySpecies[a.species_key] = a;
+      });
+
+      // Unified lookup so generalized's `generalized_from` can resolve
+      // either a canonical (post-aggregation) or an original (when
+      // aggregation didn't cover that arm).
+      var lookupBySpecies = {};
+      Object.keys(relationsBySpecies).forEach(function (k) {
+        lookupBySpecies[k] = relationsBySpecies[k];
+      });
+      Object.keys(aggregatedBySpecies).forEach(function (k) {
+        lookupBySpecies[k] = aggregatedBySpecies[k];
+      });
+
+      // Pass 2: generalization. Each parametric attaches its sources
+      // and we mark every source key as consumed. We also FLATTEN one
+      // level: if a source is a canonical with its own
+      // `aggregated_originals`, expose those originals on the parametric
+      // card so the audit expander shows the LLM's actual emitted
+      // predicates rather than just the merged canonical.
+      var coveredByGeneralization = {};
+      generalized.forEach(function (g) {
+        var keys = Array.isArray(g.generalized_from) ? g.generalized_from : [];
+        var sources = [];      // direct sources (canonicals or originals)
+        var flat = [];         // fully-flattened originals for display
+        var freq = 0;
+        keys.forEach(function (k) {
+          var src = lookupBySpecies[k];
+          if (!src) return;
+          coveredByGeneralization[k] = true;
+          sources.push(src);
+          freq += (src.pass_frequency || 0);
+          var nested = Array.isArray(src.aggregated_originals)
+            ? src.aggregated_originals : null;
+          if (nested && nested.length) {
+            nested.forEach(function (o) { flat.push(o); });
+          } else {
+            flat.push(src);
+          }
+        });
+        g.generalized_sources = sources;
+        g.generalized_originals = flat;
+        if (freq && g.pass_frequency == null) g.pass_frequency = freq;
+      });
+
+      // Build the final pool: the highest-layer rule for each chain,
+      // plus any original/canonical that was never consumed.
+      if (generalized.length || aggregated.length) {
+        var rebuilt = [];
+        generalized.forEach(function (g) { rebuilt.push(g); });
+        aggregated.forEach(function (a) {
+          if (!a.species_key || !coveredByGeneralization[a.species_key]) {
+            rebuilt.push(a);
+          }
+        });
+        relations.forEach(function (r) {
+          if (!r.species_key) return;
+          if (coveredByAggregation[r.species_key]) return;
+          if (coveredByGeneralization[r.species_key]) return;
+          rebuilt.push(r);
+        });
+        relations = rebuilt;
+      }
 
       // ---------------------------------------------------------------
       // Header meta line
@@ -805,6 +1525,30 @@
           (summary.n_saturated_arms || 0) + " / " + (summary.n_arms || 0),
           null,
           summary.n_passes != null ? ("after " + summary.n_passes + " pass" + (summary.n_passes === 1 ? "" : "es")) : null
+        ));
+      }
+
+      // Multi-table cross-sheet pass cards (only when the run wrote
+      // multi_table_*.jsonl artifacts). The numbers come from
+      // ``summary.multi_table`` produced by run_relation_discovery.
+      var mtSummary = summary.multi_table;
+      if (mtSummary && mtSummary.n_workbooks != null) {
+        overviewCards.appendChild(makeCard(
+          "Multi-table workbooks",
+          mtSummary.n_workbooks || 0,
+          null,
+          (mtSummary.n_workbooks_errored || 0) > 0
+            ? (mtSummary.n_workbooks_errored + " errored") : null
+        ));
+        overviewCards.appendChild(makeCard(
+          "Cross-sheet groups",
+          (mtSummary.n_confirmed_groups || 0) + " / " + (mtSummary.n_groups || 0),
+          null, "confirmed / candidate"
+        ));
+        overviewCards.appendChild(makeCard(
+          "Cross-sheet violations",
+          mtSummary.n_violations || 0,
+          (mtSummary.n_violations || 0) > 0 ? "warn" : null
         ));
       }
 
@@ -881,6 +1625,8 @@
       var fTypeEl = document.getElementById("rel-filter-type");
       var fKindEl = document.getElementById("rel-filter-kind");
       var fConfEl = document.getElementById("rel-filter-conf");
+      var fReviewEl = document.getElementById("rel-filter-review");
+      var fVerifyEl = document.getElementById("rel-filter-verify");
 
       var sortedSources = Object.keys(bySrc).sort(function (a, b) {
         return bySrc[b].length - bySrc[a].length || a.localeCompare(b);
@@ -1329,10 +2075,149 @@
         });
       }
 
+      // ---------------------------------------------------------------
+      // Empirical-validation rendering helpers.
+      //   makeVerifyPill(v)      -> a single pill summarising the
+      //                              verification outcome (pass-rate
+      //                              band, refused, or error).
+      //   makeVerifyDetails(v)   -> an expandable block showing the
+      //                              code, refusal reason, sample
+      //                              violations, or error message.
+      // The verification record is keyed by relation species_key in
+      // the global ``verifications`` map.
+      // ---------------------------------------------------------------
+      function _bandForRate(rate) {
+        if (rate >= 0.999) return "perfect";
+        if (rate >= 0.85)  return "mostly";
+        return "poor";
+      }
+      function makeVerifyPill(v) {
+        if (!v) return null;
+        if (v.error) {
+          return h("span", {
+            class: "pill verify-error",
+            title: "Validation error: " + v.error,
+            text: "verify err"
+          });
+        }
+        if (v.verifiable === false) {
+          return h("span", {
+            class: "pill verify-refused",
+            title: "Not code-verifiable: " + (v.reason || ""),
+            text: "not verifiable"
+          });
+        }
+        if (v.pass_rate == null) {
+          return h("span", {
+            class: "pill verify-error",
+            title: "Validation produced no pass-rate",
+            text: "verify ?"
+          });
+        }
+        var band = _bandForRate(v.pass_rate);
+        var pct = (v.pass_rate * 100).toFixed(
+          v.pass_rate >= 0.999 ? 1 : (v.pass_rate >= 0.99 ? 2 : 1)
+        );
+        var label = pct + "% pass";
+        var n_eval = v.n_evaluated || 0;
+        var n_viol = v.n_violating || 0;
+        var title = "Empirical pass-rate over " + n_eval + " row"
+          + (n_eval === 1 ? "" : "s")
+          + " (" + n_viol + " violation" + (n_viol === 1 ? "" : "s") + ")";
+        return h("span", {
+          class: "pill verify-" + band,
+          title: title,
+          text: label
+        });
+      }
+
+      function _kvTable(rows) {
+        // ``rows`` is a list of {col: val} dicts. The first key in any
+        // row is treated as ``__row__`` (row index in source CSV) and
+        // rendered as a right-aligned column. Other columns are pulled
+        // from the union of keys across rows so missing values render
+        // as blanks.
+        if (!rows || !rows.length) return null;
+        var cols = [];
+        var seen = {};
+        rows.forEach(function (rec) {
+          Object.keys(rec).forEach(function (k) {
+            if (k !== "__row__" && !seen[k]) { seen[k] = true; cols.push(k); }
+          });
+        });
+        var thead = h("thead", null, [
+          h("tr", null, [h("th", { text: "row" })].concat(
+            cols.map(function (c) { return h("th", { text: c }); })
+          ))
+        ]);
+        var tbody = h("tbody", null, rows.map(function (rec) {
+          var tds = [
+            h("td", { class: "row-idx", text: String(rec.__row__ != null ? rec.__row__ : "") })
+          ];
+          cols.forEach(function (c) {
+            var v = rec[c];
+            tds.push(h("td", {
+              text: v == null ? "" : String(v),
+              title: v == null ? "" : String(v),
+            }));
+          });
+          return h("tr", null, tds);
+        }));
+        return h("div", { class: "verify-violations" }, [
+          h("table", null, [thead, tbody])
+        ]);
+      }
+
+      function makeVerifyDetails(v) {
+        if (!v) return null;
+        var bits = [];
+        if (v.error) {
+          bits.push(h("div", { class: "verify-error-msg", text: v.error }));
+        }
+        if (v.verifiable === false && v.reason) {
+          bits.push(h("div", { class: "verify-refusal-reason",
+            text: "Reason: " + v.reason }));
+        }
+        if (v.pass_rate != null) {
+          var n_eval = v.n_evaluated || 0;
+          var n_pass = v.n_passing || 0;
+          var n_viol = v.n_violating || 0;
+          bits.push(h("div", { class: "verify-fold", style: "padding: 4px 0;" }, [
+            h("span", { text:
+              "Evaluated " + n_eval + " row"
+              + (n_eval === 1 ? "" : "s") + ": "
+              + n_pass + " passing, " + n_viol + " violating."
+            })
+          ]));
+        }
+        var vt = _kvTable(v.sample_violations || []);
+        if (vt) {
+          bits.push(h("details", { class: "verify-fold" }, [
+            h("summary", { text:
+              "Show " + Math.min(
+                (v.sample_violations || []).length,
+                (v.n_violating || (v.sample_violations || []).length)
+              ) + " sample violation"
+              + ((v.sample_violations || []).length === 1 ? "" : "s")
+            }),
+            vt,
+          ]));
+        }
+        if (v.code) {
+          bits.push(h("details", { class: "verify-fold" }, [
+            h("summary", { text: "Show LLM-generated check() code" }),
+            h("pre", { class: "verify-code", text: v.code })
+          ]));
+        }
+        if (!bits.length) return null;
+        var wrap = h("div", { class: "verify-block" }, bits);
+        return wrap;
+      }
+
       function makeRelationCard(r, variants) {
         // Aggregate error_type and kind labels across variants.
         // The bucket can span error types (the same rule was tagged
-        // both "cross_column_inconsistency" and "business_rule_violation"
+        // both "fd_violation" and "row_calculation_inconsistency"
         // by different LLM samples) so we surface every label.
         var typesSeen = {};
         if (r.error_type) typesSeen[r.error_type] = true;
@@ -1377,7 +2262,41 @@
             text: "+" + variants.length + " variant" + (variants.length === 1 ? "" : "s")
           }));
         }
+        // Parametric / generalized badge.
+        var genOrigins = Array.isArray(r.generalized_originals)
+          ? r.generalized_originals : [];
+        if (genOrigins.length) {
+          pills.push(h("span", { class: "pill",
+            title: "Parametric rule: rewritten by a post-discovery LLM "
+              + "pass to cover " + genOrigins.length
+              + " value-keyed originals.",
+            style: "color: var(--kind-calc); border-color: rgba(52,211,153,0.55); background: rgba(52,211,153,0.10)",
+            text: "parametric"
+          }));
+        }
+        // Aggregated / merged badge.
+        var aggOrigins = Array.isArray(r.aggregated_originals)
+          ? r.aggregated_originals : [];
+        if (aggOrigins.length) {
+          pills.push(h("span", { class: "pill",
+            title: "Canonical rule: merged from " + aggOrigins.length
+              + " paraphrase" + (aggOrigins.length === 1 ? "" : "s")
+              + " by a post-discovery LLM pass.",
+            style: "color: var(--accent-2); border-color: rgba(167,139,250,0.55); background: rgba(167,139,250,0.10)",
+            text: "merged"
+          }));
+        }
         pills.push(h("span", { class: "pill", text: r.source }));
+
+        // Empirical-validation pill: pass-rate from running LLM-written
+        // check() against the source frame. Color-coded by band so a
+        // reviewer can sweep the list and triage. Refused / errored
+        // relations get neutral / italic pills so they don't look like
+        // a confirmed pass.
+        var verify = verifications[r.species_key];
+        if (verify) {
+          pills.push(makeVerifyPill(verify));
+        }
 
         // Columns line: lhs -> rhs (with arrow), or just columns.
         var colsLine = h("div", { class: "columns-line" });
@@ -1445,6 +2364,72 @@
           children.push(dataFold);
         }
 
+        // Generalization originals: when this card is a parametric
+        // rewrite, the LLM-emitted value-keyed rules it replaced
+        // are listed verbatim here so users can audit the merge.
+        if (genOrigins.length) {
+          var genRows = h("div", { class: "variants-list" });
+          genOrigins.forEach(function (v) {
+            var rowKids = [];
+            if (v.error_type) {
+              rowKids.push(h("span", { class: "pill type-pill", text: v.error_type }));
+            }
+            if (v.kind) {
+              rowKids.push(h("span", { class: pillClassForKind(v.kind), text: v.kind }));
+            }
+            var c = (v.confidence || "").toLowerCase();
+            if (c) {
+              rowKids.push(h("span", { class: "pill conf-" + c, text: c }));
+            }
+            rowKids.push(h("span", { class: "v-pred",
+              text: v.predicate || "(no predicate)",
+              title: v.predicate || ""
+            }));
+            genRows.appendChild(h("div", { class: "variant-row" }, rowKids));
+          });
+          children.push(h("details", { class: "variants" }, [
+            h("summary", { class: "variants-summary",
+              text: "Generalized from " + genOrigins.length
+                + " value-keyed rule" + (genOrigins.length === 1 ? "" : "s")
+                + (r.generalization_reason ? " - " + r.generalization_reason : "")
+            }),
+            genRows
+          ]));
+        }
+
+        // Aggregation originals: when this card is a canonical rule
+        // emitted by the paraphrase-merging pass, the original LLM
+        // rephrasings it subsumed are listed verbatim here.
+        if (aggOrigins.length) {
+          var aggRows = h("div", { class: "variants-list" });
+          aggOrigins.forEach(function (v) {
+            var rowKids = [];
+            if (v.error_type) {
+              rowKids.push(h("span", { class: "pill type-pill", text: v.error_type }));
+            }
+            if (v.kind) {
+              rowKids.push(h("span", { class: pillClassForKind(v.kind), text: v.kind }));
+            }
+            var c = (v.confidence || "").toLowerCase();
+            if (c) {
+              rowKids.push(h("span", { class: "pill conf-" + c, text: c }));
+            }
+            rowKids.push(h("span", { class: "v-pred",
+              text: v.predicate || "(no predicate)",
+              title: v.predicate || ""
+            }));
+            aggRows.appendChild(h("div", { class: "variant-row" }, rowKids));
+          });
+          children.push(h("details", { class: "variants" }, [
+            h("summary", { class: "variants-summary",
+              text: "Merged " + aggOrigins.length
+                + " paraphrase" + (aggOrigins.length === 1 ? "" : "s")
+                + (r.aggregation_reason ? " - " + r.aggregation_reason : "")
+            }),
+            aggRows
+          ]));
+        }
+
         // Variants block: one row per collapsed paraphrase, with kind
         // + confidence pills and the alternative predicate text.
         if (variants && variants.length) {
@@ -1474,19 +2459,112 @@
           ]));
         }
 
+        // Empirical-validation details: code, sample violations,
+        // refusal reason, or sandbox error. Rendered AFTER variants
+        // so the "primary signal" (predicate, columns, badges) stays
+        // at the top of the card.
+        var verifyDetails = makeVerifyDetails(verifications[r.species_key]);
+        if (verifyDetails) children.push(verifyDetails);
+
         return h("div", { class: "relation-card" }, children);
       }
 
+      function decorateCard(node, r) {
+        var cls = reviewClassFor(r);
+        if (cls) node.classList.add(cls);
+        var actions = makeReviewActions(r);
+        if (actions) node.appendChild(actions);
+        return node;
+      }
+
+      function _convergencePill(src, errType) {
+        // Build a short pill summarising adaptive saturation for the
+        // (source, error_type) arm. ``src`` may be ALL, in which case
+        // we aggregate across every source's arm with that error
+        // type. Returns null when no arm is found (e.g. non-adaptive
+        // run, or user-added error type).
+        function _label(arm) {
+          if (!arm) return null;
+          if (arm.saturated) return {
+            text: "converged @ pass " + (arm.saturated_at_pass != null ? arm.saturated_at_pass : "?"),
+            cls: "conf-high",
+          };
+          var passes = arm.passes_run || 0;
+          var cfg = (gtSummary && gtSummary.config) || {};
+          var hitMax = cfg.max_passes && passes >= cfg.max_passes;
+          return {
+            text: hitMax ? ("not converged after " + passes + " pass" + (passes === 1 ? "" : "es"))
+                          : ("active (" + passes + " pass" + (passes === 1 ? "" : "es") + ")"),
+            cls: hitMax ? "conf-medium" : "conf-low",
+          };
+        }
+        if (src && src !== ALL) {
+          var arm = (armBySrcEt[src] || {})[errType];
+          var lab = _label(arm);
+          if (!lab) return null;
+          return h("span", { class: "pill " + lab.cls, text: lab.text });
+        }
+        // ALL view: aggregate over every source's arm of this error type.
+        var nArms = 0, nSat = 0, nExhausted = 0;
+        var cfg = (gtSummary && gtSummary.config) || {};
+        Object.keys(armBySrcEt).forEach(function (s) {
+          var a = (armBySrcEt[s] || {})[errType];
+          if (!a) return;
+          nArms += 1;
+          if (a.saturated) {
+            nSat += 1;
+          } else if (cfg.max_passes && (a.passes_run || 0) >= cfg.max_passes) {
+            nExhausted += 1;
+          }
+        });
+        if (nArms === 0) return null;
+        var cls, txt;
+        if (nSat === nArms) { cls = "conf-high"; txt = "all converged (" + nArms + ")"; }
+        else if (nSat === 0 && nExhausted === nArms) {
+          cls = "conf-medium"; txt = "none converged (" + nArms + ")";
+        } else {
+          cls = nSat > 0 ? "conf-medium" : "conf-low";
+          txt = nSat + "/" + nArms + " converged";
+        }
+        return h("span", { class: "pill " + cls, text: txt });
+      }
+
       function renderRelations() {
-        var pool = activeSource === ALL ? relations : (bySrc[activeSource] || []);
+        // Merge in user-authored relations matching the active source
+        // (or all sources when ALL is selected). User-added cards are
+        // synthesised from the latest "added" decision in reviewLatest.
+        var basePool = activeSource === ALL
+          ? relations
+          : (bySrc[activeSource] || []);
+        var userPool = addedRelations.filter(function (r) {
+          return activeSource === ALL || r.source === activeSource;
+        });
+        var pool = userPool.concat(basePool);
         var q = (qEl.value || "").trim().toLowerCase();
         var ftype = fTypeEl.value || "";
         var fkind = fKindEl.value || "";
         var fconf = fConfEl.value || "";
+        var freview = (fReviewEl && fReviewEl.value) || "";
+        var fverify = (fVerifyEl && fVerifyEl.value) || "";
         var filtered = pool.filter(function (r) {
           if (ftype && r.error_type !== ftype) return false;
           if (fkind && r.kind !== fkind) return false;
           if (fconf && (r.confidence || "").toLowerCase() !== fconf) return false;
+          if (freview) {
+            var d = r._user_added ? "added" : (decisionForRelation(r.species_key) || "pending");
+            if (freview === "pending" && d !== "pending") return false;
+            if (freview !== "pending" && d !== freview) return false;
+          }
+          if (fverify) {
+            var v = verifications[r.species_key];
+            var bucket;
+            if (!v) bucket = "missing";
+            else if (v.error) bucket = "error";
+            else if (v.verifiable === false) bucket = "refused";
+            else if (v.pass_rate == null) bucket = "error";
+            else bucket = _bandForRate(v.pass_rate);
+            if (bucket !== fverify) return false;
+          }
           if (q) {
             var hay = [
               r.predicate, r.rationale, r.executable,
@@ -1497,6 +2575,14 @@
           return true;
         });
 
+        // Pin the list's height across the rebuild. Without this,
+        // ``listEl.replaceChildren()`` momentarily collapses the
+        // document height which the browser uses to clamp scroll
+        // position to 0, snapping the user back to the top before we
+        // can restore. Holding min-height keeps the page tall while
+        // the new cards are appended.
+        var prevListHeight = listEl.offsetHeight;
+        if (prevListHeight > 0) listEl.style.minHeight = prevListHeight + "px";
         listEl.replaceChildren();
         if (!filtered.length) {
           listEl.appendChild(h("div", { class: "empty-state",
@@ -1537,24 +2623,120 @@
           var label = collapseOn && unique !== raw
             ? unique + " unique (of " + raw + ")"
             : raw + " relation" + (raw === 1 ? "" : "s");
-          listEl.appendChild(h("div", { class: "rel-group-header" }, [
+          var headerChildren = [
             h("span", { class: "pill type-pill", text: key }),
             h("span", { class: "count", text: label })
-          ]));
+          ];
+          // Adaptive convergence pill. When viewing a single source
+          // we have a precise per-arm status (saturated / active /
+          // exhausted). In the ALL view we aggregate over arms with
+          // this error type: "all sat", "N/M sat", or hidden when
+          // gtSummary is absent (non-adaptive run).
+          if (gtSummary) {
+            var convPill = _convergencePill(activeSource, key);
+            if (convPill) headerChildren.push(convPill);
+          }
+          listEl.appendChild(h("div", { class: "rel-group-header" }, headerChildren));
           bs.forEach(function (b) {
-            listEl.appendChild(makeRelationCard(b.primary, b.variants));
+            listEl.appendChild(decorateCard(makeRelationCard(b.primary, b.variants), b.primary));
           });
         });
+        // Release the height pin on the next frame, after the
+        // browser has had a chance to lay the new cards out.
+        if (prevListHeight > 0) {
+          requestAnimationFrame(function () {
+            listEl.style.minHeight = "";
+          });
+        }
       }
 
       qEl.addEventListener("input", renderRelations);
       [fTypeEl, fKindEl, fConfEl].forEach(function (el) {
         el.addEventListener("change", renderRelations);
       });
+      if (fReviewEl) fReviewEl.addEventListener("change", renderRelations);
+      if (fVerifyEl) fVerifyEl.addEventListener("change", renderRelations);
       var dupToggleEl = document.getElementById("rel-collapse-dup");
       if (dupToggleEl) {
         dupToggleEl.addEventListener("change", renderRelations);
       }
+
+      // "Add relation" inline form: collects user-authored relations
+      // and POSTs them with decision=added so they survive across
+      // report rebuilds. The author field is left server-side blank
+      // (annotator defaults apply on the workbench).
+      var addBtn = document.getElementById("rel-add-btn");
+      var addForm = document.getElementById("rel-add-form");
+      var addCancel = document.getElementById("rel-add-cancel");
+      function _splitCsv(s) {
+        return (s || "")
+          .split(",").map(function (x) { return x.trim(); })
+          .filter(function (x) { return x.length > 0; });
+      }
+      function _genId() {
+        // Stable-enough client id; backend doesn't enforce species_key
+        // collision for user-added relations (decision is keyed by
+        // relation_id which the user owns).
+        return "user_" + Math.random().toString(36).slice(2, 10)
+          + Date.now().toString(36);
+      }
+      if (addBtn && addForm) {
+        addBtn.addEventListener("click", function () {
+          addForm.classList.toggle("hidden");
+          if (!addForm.classList.contains("hidden")) {
+            var srcInput = document.getElementById("add-rel-source");
+            if (srcInput && !srcInput.value && activeSource && activeSource !== ALL) {
+              srcInput.value = activeSource;
+            }
+          }
+        });
+      }
+      if (addCancel && addForm) {
+        addCancel.addEventListener("click", function () {
+          addForm.classList.add("hidden");
+        });
+      }
+      if (addForm) {
+        addForm.addEventListener("submit", function (ev) {
+          ev.preventDefault();
+          var cols = _splitCsv(document.getElementById("add-rel-cols").value);
+          if (!cols.length) {
+            showToast("At least one column is required.", "error");
+            return;
+          }
+          var payload = {
+            relation_id: _genId(),
+            decision: "added",
+            note: document.getElementById("add-rel-note").value || "",
+            relation: {
+              kind: document.getElementById("add-rel-kind").value || "other",
+              columns: cols,
+              lhs: _splitCsv(document.getElementById("add-rel-lhs").value),
+              rhs: _splitCsv(document.getElementById("add-rel-rhs").value),
+              predicate: document.getElementById("add-rel-pred").value || "",
+              executable: document.getElementById("add-rel-exec").value || null,
+              rationale: document.getElementById("add-rel-rationale").value || "",
+              source: document.getElementById("add-rel-source").value || null,
+              error_type: document.getElementById("add-rel-error-type").value || null,
+            },
+          };
+          postReview(payload)
+            .then(function () {
+              showToast("Relation added.", "ok");
+              addForm.reset();
+              addForm.classList.add("hidden");
+              renderRelations();
+            })
+            .catch(function (e) {
+              showToast("Failed to add relation: " + e.message, "error");
+            });
+        });
+      }
+
+      // Kick off review fetch; re-render once it lands.
+      fetchReviews().then(function () {
+        if (reviewApiOk) renderRelations();
+      });
 
       setActiveSource(ALL);
 
@@ -1605,7 +2787,7 @@
             // Switch to Relations view.
             Array.prototype.forEach.call(toggle.querySelectorAll("button"),
               function (x) { x.classList.toggle("active", x.getAttribute("data-view") === "relations"); });
-            ["overview", "sources", "relations", "gt"].forEach(function (id) {
+            ["overview", "sources", "relations", "multi", "gt"].forEach(function (id) {
               var el = document.getElementById("view-" + id);
               if (el) el.classList.toggle("active", id === "relations");
             });
@@ -1661,12 +2843,295 @@
             var v = b.getAttribute("data-view");
             Array.prototype.forEach.call(toggle.querySelectorAll("button"),
               function (x) { x.classList.toggle("active", x === b); });
-            ["overview", "sources", "relations", "gt"].forEach(function (id) {
+            ["overview", "sources", "relations", "multi", "gt"].forEach(function (id) {
               var el = document.getElementById("view-" + id);
               if (el) el.classList.toggle("active", id === v);
             });
           });
         });
+
+      // ---------------------------------------------------------------
+      // Multi-table cross-sheet view (only when the run produced
+      // multi_table_groups.jsonl / multi_table_violations.jsonl).
+      // Renders one workbook card per ResolvedWorkbook, with each
+      // confirmed group expanded inline showing its column mapping
+      // (synonyms highlighted), primary key, and per-row violations
+      // grouped by the violation kind. Filtering is text + violation
+      // kind + confirmed/rejected.
+      // ---------------------------------------------------------------
+      if ((multiTableGroups && multiTableGroups.length) ||
+          (multiTableViolations && multiTableViolations.length)) {
+        document.getElementById("view-toggle-multi").style.display = "";
+
+        // Index violations by (workbook, group_id) so we can splice
+        // them under the right group card without an O(N*M) scan per
+        // render.
+        var vioByGroup = {};
+        multiTableViolations.forEach(function (v) {
+          if (!v) return;
+          var key = (v.workbook || "") + "::" + (v.group_id || "");
+          (vioByGroup[key] = vioByGroup[key] || []).push(v);
+        });
+
+        var mtListEl  = document.getElementById("mt-list");
+        var mtQEl     = document.getElementById("mt-q");
+        var mtKindEl  = document.getElementById("mt-filter-kind");
+        var mtConfEl  = document.getElementById("mt-filter-confirm");
+
+        function fmtCols(cols) {
+          var out = h("span");
+          (cols || []).forEach(function (c) {
+            out.appendChild(h("code", { text: String(c) }));
+          });
+          return out;
+        }
+
+        function renderViolationRow(v) {
+          var sheet = v.sheet || "?";
+          var rowLabel = (v.row != null && v.row >= 0)
+            ? "row " + v.row : "header";
+          var linkedTxt = (v.linked || []).map(function (l) {
+            var sh = l && l.sheet ? l.sheet : "?";
+            var rn = (l && l.row != null && l.row >= 0) ? l.row : "—";
+            return sh + ":" + rn;
+          }).join(", ");
+          return h("div",
+            { class: "mt-vio-row kind-" + (v.kind || "unknown") },
+            [
+              h("div", { class: "mt-vio-kind",  text: v.kind || "?" }),
+              h("div", { class: "mt-vio-where" }, [
+                h("span", { text: sheet }),
+                h("span", { class: "mt-row-num", text: rowLabel })
+              ]),
+              h("div", { class: "mt-vio-cols" }, [fmtCols(v.columns)]),
+              h("div", { class: "mt-vio-linked",
+                text: linkedTxt ? "↔ " + linkedTxt : "" }),
+              h("div", { class: "mt-vio-rationale",
+                text: v.rationale || "" })
+            ]);
+        }
+
+        function renderViolations(parent, vios) {
+          var INITIAL = 30;
+          var listEl = h("div", { class: "mt-violations" });
+          vios.slice(0, INITIAL).forEach(function (v) {
+            listEl.appendChild(renderViolationRow(v));
+          });
+          parent.appendChild(listEl);
+          if (vios.length > INITIAL) {
+            var remaining = vios.length - INITIAL;
+            var moreEl = h("div", { class: "mt-vio-more" });
+            var btn = h("button", {
+              text: "Show " + remaining + " more violation"
+                    + (remaining === 1 ? "" : "s"),
+              onclick: function () {
+                vios.slice(INITIAL).forEach(function (v) {
+                  listEl.appendChild(renderViolationRow(v));
+                });
+                moreEl.remove();
+              }
+            });
+            moreEl.appendChild(btn);
+            parent.appendChild(moreEl);
+          }
+        }
+
+        function renderGroup(wb, g) {
+          var key = (wb || "") + "::" + (g.group_id || "");
+          var allVios = vioByGroup[key] || [];
+
+          // Apply violation-kind filter at render time (pure
+          // client-side filtering; the underlying arrays are not
+          // mutated, so toggling filters re-renders fast).
+          var kindFilter = mtKindEl.value || "";
+          var qRaw = (mtQEl.value || "").trim().toLowerCase();
+          var vios = allVios.filter(function (v) {
+            if (kindFilter && v.kind !== kindFilter) return false;
+            if (!qRaw) return true;
+            var hay = [
+              v.sheet || "",
+              v.kind || "",
+              (v.columns || []).join(" "),
+              v.rationale || "",
+              JSON.stringify(v.values || {})
+            ].join(" ").toLowerCase();
+            return hay.indexOf(qRaw) >= 0;
+          });
+
+          // Per-kind tally.
+          var byKind = {};
+          allVios.forEach(function (v) {
+            byKind[v.kind] = (byKind[v.kind] || 0) + 1;
+          });
+
+          var headChildren = [
+            h("span", { class: "mt-group-id", text: g.group_id || "" }),
+            h("span", {
+              class: "mt-group-kind " + (g.kind || ""),
+              text: (g.kind || "?")
+            }),
+            h("span", {
+              class: "mt-group-confirm " +
+                     (g.confirmed ? "confirmed" : "rejected"),
+              text: g.confirmed ? "confirmed" : "rejected"
+            })
+          ];
+          if (g.confirmed && Array.isArray(g.primary_key) && g.primary_key.length) {
+            var pkEl = h("span", { class: "mt-group-pk" });
+            pkEl.appendChild(document.createTextNode("PK: "));
+            g.primary_key.forEach(function (c) {
+              pkEl.appendChild(h("code", { text: String(c) }));
+            });
+            headChildren.push(pkEl);
+          }
+          // Tally pills next to the head.
+          var counts = h("span", { class: "mt-counts" });
+          Object.keys(byKind).sort().forEach(function (k) {
+            counts.appendChild(h("span", { class: "mt-count-pill" }, [
+              h("span", { text: k }),
+              h("b", { text: String(byKind[k]) })
+            ]));
+          });
+          headChildren.push(counts);
+
+          // Sheets line.
+          var sheetsEl = h("div", { class: "mt-group-pk", text:
+            "Sheets: " + (g.sheets || []).join(", ") });
+
+          // Column mapping (canonical -> raw variants per sheet),
+          // synonyms highlighted (when distinct raw column names map
+          // to the same canonical).
+          var mappingEl = h("div", { class: "mt-mapping" });
+          var mapping = g.column_mapping || {};
+          Object.keys(mapping).forEach(function (canonical) {
+            var entries = mapping[canonical] || [];
+            var rawCols = {};
+            entries.forEach(function (e) { if (e && e.column) rawCols[e.column] = true; });
+            var rawList = Object.keys(rawCols);
+            var isSyn = rawList.length > 1;
+            mappingEl.appendChild(h("div", {
+              class: "mt-canonical" + (isSyn ? " synonym" : ""),
+              text: canonical
+            }));
+            var variantsEl = h("div", { class: "mt-variants" });
+            entries.forEach(function (e) {
+              if (!e) return;
+              var lbl = (e.sheet || "?") + ":" + (e.column || "?");
+              variantsEl.appendChild(h("code", { text: lbl }));
+            });
+            mappingEl.appendChild(variantsEl);
+          });
+
+          var groupChildren = [
+            h("div", { class: "mt-group-head" }, headChildren),
+            sheetsEl
+          ];
+          if (g.rationale) {
+            groupChildren.push(h("div", {
+              class: "mt-group-rationale", text: g.rationale
+            }));
+          }
+          if (g.confirmed) {
+            groupChildren.push(mappingEl);
+          }
+
+          var groupEl = h("div", {
+            class: "mt-group" + (g.confirmed ? "" : " rejected")
+          }, groupChildren);
+
+          if (vios.length) {
+            renderViolations(groupEl, vios);
+          } else if (g.confirmed && allVios.length === 0) {
+            groupEl.appendChild(h("div", {
+              class: "mt-empty",
+              text: "No violations detected for this group."
+            }));
+          } else if (g.confirmed && allVios.length > 0) {
+            // Filter hid them.
+            groupEl.appendChild(h("div", {
+              class: "mt-empty",
+              text: allVios.length + " violation"
+                + (allVios.length === 1 ? "" : "s")
+                + " hidden by current filter."
+            }));
+          }
+          return groupEl;
+        }
+
+        function workbookMatchesQuery(wb, q) {
+          if (!q) return true;
+          if ((wb.workbook || "").toLowerCase().indexOf(q) >= 0) return true;
+          var sheets = wb.sheets || [];
+          for (var i = 0; i < sheets.length; i++) {
+            if (String(sheets[i]).toLowerCase().indexOf(q) >= 0) return true;
+          }
+          var groups = wb.groups || [];
+          for (var j = 0; j < groups.length; j++) {
+            var g = groups[j];
+            if ((g.rationale || "").toLowerCase().indexOf(q) >= 0) return true;
+            var mapping = g.column_mapping || {};
+            var keys = Object.keys(mapping);
+            for (var k = 0; k < keys.length; k++) {
+              if (keys[k].toLowerCase().indexOf(q) >= 0) return true;
+              var entries = mapping[keys[k]] || [];
+              for (var m = 0; m < entries.length; m++) {
+                if ((entries[m].column || "").toLowerCase().indexOf(q) >= 0) return true;
+              }
+            }
+          }
+          return false;
+        }
+
+        function renderMultiTable() {
+          mtListEl.replaceChildren();
+          var qRaw = (mtQEl.value || "").trim().toLowerCase();
+          var confFilter = mtConfEl.value || "";
+
+          var anyShown = false;
+          multiTableGroups.forEach(function (wb) {
+            if (!workbookMatchesQuery(wb, qRaw)) return;
+
+            var groups = (wb.groups || []).filter(function (g) {
+              if (confFilter === "confirmed" && !g.confirmed) return false;
+              if (confFilter === "rejected" && g.confirmed) return false;
+              return true;
+            });
+            if (!groups.length) return;
+
+            anyShown = true;
+            var stats = h("span", { class: "mt-wb-stats", text:
+              groups.length + " group"
+              + (groups.length === 1 ? "" : "s")
+              + " · " + (wb.n_confirmed || 0) + " confirmed"
+              + " · " + (wb.sheets ? wb.sheets.length : 0) + " sheet"
+              + (wb.sheets && wb.sheets.length === 1 ? "" : "s")
+            });
+
+            var wbHead = h("div", { class: "mt-wb-head" }, [
+              h("span", { class: "mt-wb-name", text: wb.workbook || "?" }),
+              stats
+            ]);
+
+            var wbCard = h("div", { class: "mt-workbook" }, [wbHead]);
+            groups.forEach(function (g) {
+              wbCard.appendChild(renderGroup(wb.workbook || "", g));
+            });
+            mtListEl.appendChild(wbCard);
+          });
+
+          if (!anyShown) {
+            mtListEl.appendChild(h("div", {
+              class: "empty-state",
+              text: "No groups match the current filter."
+            }));
+          }
+        }
+
+        mtQEl.addEventListener("input", renderMultiTable);
+        mtKindEl.addEventListener("change", renderMultiTable);
+        mtConfEl.addEventListener("change", renderMultiTable);
+        renderMultiTable();
+      }
 
       // ---------------------------------------------------------------
       // Adaptive (GT) view (only when run had --adaptive)
@@ -1684,6 +3149,15 @@
           "Stop threshold (GT)",
           fmtPct(cfg.gt_threshold)
         ));
+        if (cfg.epsilon_chao1 != null) {
+          gtCards.appendChild(makeCard(
+            "Stop threshold (Chao1)",
+            fmtPct(cfg.epsilon_chao1)
+          ));
+        }
+        if (cfg.stop_when) {
+          gtCards.appendChild(makeCard("Stop when", String(cfg.stop_when)));
+        }
         gtCards.appendChild(makeCard(
           "Pass bounds",
           (cfg.min_passes || 0) + " – " + (cfg.max_passes || 0)

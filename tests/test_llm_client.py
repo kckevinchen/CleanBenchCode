@@ -144,22 +144,24 @@ class TestQueryChatCompletions:
             endpoints=["http://a", "http://b"], max_retries=3,
             backoff_base_seconds=0.0,
         )
-        # Both client mocks: first 2 calls (across the round-robin)
-        # raise; 3rd call succeeds.
-        c._clients[0].chat.completions.create.side_effect = [
-            RuntimeError("boom"),
-            _stub_chat_response("recovered"),
-        ]
+        # Round-robin advances on every call, so a failure on ``a``
+        # naturally rolls the next attempt to ``b`` -- which is
+        # exactly what we want under transient failure (give a
+        # different endpoint a chance to recover).
+        #   * endpoint a: first call raises
+        #   * endpoint b: succeeds on the second attempt
+        c._clients[0].chat.completions.create.side_effect = (
+            RuntimeError("boom")
+        )
         c._clients[1].chat.completions.create.side_effect = [
-            RuntimeError("also boom"),
+            _stub_chat_response("recovered"),
         ]
         resp = c.query("gpt-4o", "x")
         assert resp.ok
         assert resp.text == "recovered"
-        assert resp.attempts == 3
-        # Endpoint reflects the one that finally succeeded — index 0
-        # again on the third round-robin step.
-        assert resp.endpoint == "http://a"
+        assert resp.attempts == 2
+        assert resp.endpoint == "http://b"
+        c._clients[1].chat.completions.create.assert_called_once()
 
     def test_retry_exhausted_returns_error_response(self) -> None:
         c = LLMClient(

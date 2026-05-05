@@ -1,4 +1,4 @@
-"""Render the schema-discovery dashboard from a run directory.
+"""Render the relation-discovery dashboard from a run directory.
 
 A discovery run (``experiments.run_relation_discovery``) writes
 ``relations.jsonl``, ``discovery_reports.json``, ``summary.json``, and
@@ -40,14 +40,7 @@ logger = logging.getLogger("build_relation_report")
 DATA_PLACEHOLDER = "/*__RELATION_DATA_JSON__*/"
 
 
-def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
-    with path.open("r", encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if line:
-                out.append(json.loads(line))
-    return out
+from src.core.jsonl_io import read_jsonl as _read_jsonl  # noqa: E402
 
 
 def _load_optional_json(path: Path) -> Optional[Dict[str, Any]]:
@@ -63,14 +56,62 @@ def _load_optional_json(path: Path) -> Optional[Dict[str, Any]]:
 def _build_payload(run_dir: Path) -> Dict[str, Any]:
     summary_path = run_dir / "summary.json"
     relations_path = run_dir / "relations.jsonl"
+    multi_groups_path = run_dir / "multi_table_groups.jsonl"
+    multi_violations_path = run_dir / "multi_table_violations.jsonl"
     if not summary_path.is_file():
         raise FileNotFoundError(f"missing artifact: {summary_path}")
-    if not relations_path.is_file():
+    # ``relations.jsonl`` is the legacy single-table artifact; a
+    # multi-table-only run (--error-types inter_table_inconsistency)
+    # produces no relations but does write multi_table_groups.jsonl
+    # and multi_table_violations.jsonl. Tolerate either being absent
+    # so long as at least one is present.
+    has_relations = relations_path.is_file()
+    has_multi = multi_groups_path.is_file() or multi_violations_path.is_file()
+    if not (has_relations or has_multi):
         raise FileNotFoundError(f"missing artifact: {relations_path}")
 
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    relations = _read_jsonl(relations_path)
+    relations = _read_jsonl(relations_path) if has_relations else []
     gt_summary = _load_optional_json(run_dir / "gt_summary.json")
+
+    # Multi-table cross-sheet pass artifacts (optional). Each line of
+    # multi_table_groups.jsonl is a ResolvedWorkbook record from
+    # ``src.core.multi_table_resolver``: workbook name, candidate
+    # groups (union/join), and the LLM's confirm/reject decision +
+    # column mapping + primary key. multi_table_violations.jsonl is
+    # the flat list of MultiTableViolation rows produced by the
+    # deterministic compiler in ``src.core.multi_table_violations``.
+    multi_table_groups: List[Dict[str, Any]] = (
+        _read_jsonl(multi_groups_path) if multi_groups_path.is_file() else []
+    )
+    multi_table_violations: List[Dict[str, Any]] = (
+        _read_jsonl(multi_violations_path)
+        if multi_violations_path.is_file() else []
+    )
+
+    # Generalization output (optional). When the runner ran the
+    # parametric-rewrite pass, ``relations_generalized.jsonl`` holds
+    # one parametric rule per collapsed family with a
+    # ``generalized_from`` list pointing back to the originals'
+    # species_keys. The report uses this to surface the parametric
+    # rule as the primary card and tuck the originals under expand,
+    # without ever discarding the LLM's raw output.
+    generalized_path = run_dir / "relations_generalized.jsonl"
+    generalized: List[Dict[str, Any]] = (
+        _read_jsonl(generalized_path) if generalized_path.is_file() else []
+    )
+
+    # Aggregation output (optional). When the runner ran the
+    # paraphrase-merging pass, ``relations_aggregated.jsonl`` holds
+    # one canonical rule per collapsed paraphrase cluster, with an
+    # ``aggregated_from`` list pointing back to the originals'
+    # species_keys. The report stacks aggregation BEFORE
+    # generalization in the UI: an aggregated canonical rule may
+    # itself be the originals-side of a generalized parametric rule.
+    aggregated_path = run_dir / "relations_aggregated.jsonl"
+    aggregated: List[Dict[str, Any]] = (
+        _read_jsonl(aggregated_path) if aggregated_path.is_file() else []
+    )
 
     # Per-source context: the runner persists a sources.json whose
     # entries are TableDigest.to_dict() values (shape, headers,
@@ -132,6 +173,21 @@ def _build_payload(run_dir: Path) -> Dict[str, Any]:
         "generated_at": run_dir.name.split("_", 1)[0] if "_" in run_dir.name else "",
     }
 
+    # Empirical-validation output (optional). When
+    # ``experiments.run_relation_validation`` has been run on this
+    # directory, ``relation_verifications.jsonl`` holds one record
+    # per relation with ``species_key``, ``verifiable``, ``pass_rate``,
+    # ``code``, and a few sample violations. Indexing by species_key
+    # at build time lets the report renderer attach the badge to the
+    # right card without scanning the list per render.
+    verifications_path = run_dir / "relation_verifications.jsonl"
+    verifications: Dict[str, Dict[str, Any]] = {}
+    if verifications_path.is_file():
+        for vrec in _read_jsonl(verifications_path):
+            key = vrec.get("species_key")
+            if isinstance(key, str) and key:
+                verifications[key] = vrec
+
     return {
         "run_metadata": run_metadata,
         "summary": summary,
@@ -139,6 +195,11 @@ def _build_payload(run_dir: Path) -> Dict[str, Any]:
         "sources": sources,
         "sources_detail": sources_payload,
         "gt_summary": gt_summary,
+        "generalized": generalized,
+        "aggregated": aggregated,
+        "verifications": verifications,
+        "multi_table_groups": multi_table_groups,
+        "multi_table_violations": multi_table_violations,
     }
 
 
@@ -170,7 +231,7 @@ def build_relation_report(
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Render report.html from a saved schema-discovery run.",
+        description="Render report.html from a saved relation-discovery run.",
     )
     p.add_argument(
         "run_dir", type=Path,

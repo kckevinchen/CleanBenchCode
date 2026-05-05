@@ -33,6 +33,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 import pandas as pd
 
 from .aggregator import Cluster, summarise_clusters
+from .columns import canonicalize_columns
 from .detector import ChunkReport, summarise_reports
 
 logger = logging.getLogger(__name__)
@@ -179,6 +180,12 @@ def flatten_issues(
         return frame_lookup.get(source_name)
 
     flat: List[Dict[str, Any]] = []
+    # Aggregate quality counters so the demo runner can surface a
+    # one-line summary at the end ("LLM emitted 1342 issues; 17
+    # referenced row indices that don't exist in the source frame").
+    _empty_row_context = 0
+    _total_dropped_oob = 0
+
     for report_idx, report in enumerate(reports):
         source_name = Path(report.source).name
         frame = _frame_for(source_name)
@@ -197,7 +204,6 @@ def flatten_issues(
             # clustering from merging them and produces apparent
             # "duplicate clusters on the same cell" in the labeling UI.
             if frame is not None and columns:
-                from .columns import canonicalize_columns
                 canonical = canonicalize_columns(columns, list(frame.columns))
                 if canonical:
                     columns = canonical
@@ -226,6 +232,7 @@ def flatten_issues(
                 # requested ``columns`` exist in the frame. Both are worth
                 # surfacing once at debug level so they can be diagnosed
                 # against the run's chunk_reports.jsonl.
+                _empty_row_context += 1
                 logger.debug(
                     "row context empty: source=%s row=%s columns=%s "
                     "frame_index_in=%s",
@@ -259,6 +266,7 @@ def flatten_issues(
                 else:
                     affected_rows.append(r_int)
             if dropped_oob:
+                _total_dropped_oob += dropped_oob
                 logger.debug(
                     "dropped %d out-of-bounds affected_rows entries: "
                     "source=%s row=%s",
@@ -296,6 +304,14 @@ def flatten_issues(
             if include_full_row and isinstance(row, int):
                 record["full_row_values"] = _full_row_values(frame, row)
             flat.append(record)
+    if _empty_row_context or _total_dropped_oob:
+        logger.warning(
+            "report_builder data-quality issues: %d issues had empty "
+            "row context (LLM referenced unknown row/columns); %d "
+            "out-of-bounds affected_rows entries dropped. Run with "
+            "log level DEBUG for per-issue detail.",
+            _empty_row_context, _total_dropped_oob,
+        )
     return flat
 
 

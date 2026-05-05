@@ -72,9 +72,19 @@ class TestParseLlmJson:
         assert err is None
         assert issues == [{"row": 1}]
 
-    def test_unfenced_json_with_prose_around_fails(self) -> None:
-        # No fence + non-JSON prose surrounding → parse fails.
+    def test_unfenced_json_with_prose_around_recovers(self) -> None:
+        # No fence, but the bracket-balanced fallback finds the JSON
+        # inside the prose. This is the "LLM forgot the fence"
+        # recovery path; without it a single missing fence drops every
+        # detection from that call.
         text = 'Sure! [{"row":1}] is the answer.'
+        issues, err = parse_llm_json(text)
+        assert err is None
+        assert issues == [{"row": 1}]
+
+    def test_unfenced_pure_garbage_still_fails(self) -> None:
+        # No JSON-shaped substring at all → parse still fails.
+        text = "I cannot answer this question."
         issues, err = parse_llm_json(text)
         assert issues == []
         assert err == "failed to parse JSON from response"

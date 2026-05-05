@@ -1,0 +1,145 @@
+Data-Cleaning Benchmark Generator — Progress Update
+===================================================
+
+What we are building
+--------------------
+A tool that produces high-quality data-cleaning benchmarks: curated
+spreadsheet/CSV errors with ground-truth labels, usable to evaluate
+any cleaning system. An LLM proposes likely-error cells, a reviewer
+confirms or rejects each one in a web UI, and a statistical layer
+estimates how complete each benchmark is.
+
+Why: existing benchmarks are small and dated, and labelling from
+scratch is expensive because most cells are clean. Letting the LLM
+propose candidates means reviewers spend their time confirming, not
+scanning.
+
+
+Error taxonomy (9 types)
+------------------------
+The benchmark covers nine error categories, each with a precise
+definition and concrete examples:
+
+  Within a single column (4):
+    - Typo — "Unietd States" vs. "United States".
+    - Single-column inconsistency — "USA" vs. "U.S.A.";
+      "james smith" vs. "James Smith"; "10,000" vs. "10000";
+      "15%" mixed with "0.15" in one column.
+    - Semantically incompatible value — a phone number sitting in
+      a "Name" column.
+    - Numeric outlier — a $1,000,000 salary in a column whose
+      values otherwise sit between $40k and $120k.
+
+  Within a row, across columns (3):
+    - Functional-dependency violation — ZIP "10001" paired with
+      State "California".
+    - Numeric calculation inconsistency — Qty 3 × Price $10 with
+      Total $25.
+    - String calculation inconsistency — First "Jane",
+      Last "Doe", Full Name "John Doe".
+
+  Across rows (1):
+    - Row duplication — the same transaction recorded twice.
+
+  Across tables (1):
+    - Inter-table inconsistency — the same entity's name differs
+      across tables (e.g. "Acme Corp." in the Customers table vs.
+      "ACME Corporation" in the Orders table).
+
+
+Pipeline (per dataset)
+----------------------
+The pipeline is fully LLM-based. A run takes a CSV / spreadsheet
+(or a folder of them) and walks through five stages. Each stage
+either adds candidates to the benchmark queue, refines existing
+ones, or filters out cases the system can already settle on its
+own.
+
+  1. Per-type LLM scan.
+     Tables are read in chunks. For each chunk the LLM is asked
+     one focused question per error type ("any typos here?", "any
+     numeric outliers in this column?", …). Narrow prompts are
+     more accurate than one monolithic prompt that tries to spot
+     everything at once.
+
+  2. Grouping and explanation.
+     Findings on the same row that overlap (e.g. typo + casing on
+     the same cell) are merged into one candidate. The LLM then
+     writes a single canonical explanation, suggested fix, and
+     confidence score per candidate, and self-flags candidates it
+     now believes are false positives.
+
+  3. Relation discovery (multi-column rules).
+     Before per-row checks, the LLM is shown a compact summary of
+     each table and asked to enumerate the rules that should hold
+     (e.g. "Total = Quantity × Price", "ZIP determines State",
+     "Full Name = First + ' ' + Last"). Every discovered rule is
+     then validated row-by-row, and each violation becomes a
+     candidate.
+
+  4. Web verification.
+     For candidates whose value is a real-world named entity
+     (organisation, address, etc.), the system runs a web search
+     and asks the LLM to issue a verdict — "confirmed wrong",
+     "looks correct", or "no evidence" — using only the retrieved
+     snippets. This either upgrades a candidate's confidence with
+     a citation or removes it from the queue, so reviewers do not
+     spend time on cases the web can already settle.
+
+  5. Human review.
+     The remaining candidates are sent to the labelling UI, where
+     a reviewer accepts, rejects, or annotates each one.
+     Confirmed candidates form the benchmark; rejections are kept
+     as hard negatives, which are themselves valuable for
+     evaluating future cleaning systems.
+
+The whole run also produces a coverage estimate (next section), so
+each finished benchmark ships with both its labelled errors and a
+quantitative statement about what it likely missed.
+
+
+Coverage estimate (how complete is the benchmark?)
+--------------------------------------------------
+For every benchmark we ship a quantitative answer to "what fraction
+of the errors did we capture?" This means each benchmark comes with:
+
+  - An estimated total error count for the dataset, with a 95%
+    confidence interval — so consumers know the benchmark's
+    coverage, not just its size.
+  - A principled stop rule per (file, error type): we stop adding
+    review effort to an arm once the estimated coverage gap is
+    below a target threshold, and continue investing where it is
+    not. This makes labelling cost predictable and keeps reviewer
+    time focused where it still moves coverage.
+  - Comparable coverage numbers across datasets, so progress over
+    time is measurable rather than anecdotal.
+
+
+Labeling system
+---------------
+Web UI to launch runs, browse them, step through candidates with
+filters, label each as TP / FP / partial / unsure / skip with notes,
+compare two runs, and export the labelled benchmark. Each run also
+produces a self-contained HTML report shareable without the server.
+
+  [Screenshot 1: Runs dashboard]
+  [Screenshot 2: Launch-new-run form]
+  [Screenshot 3: Labeling view with flagged cells in context]
+  [Screenshot 4: Self-contained HTML report]
+
+
+Status and next steps
+---------------------
+End-to-end pipeline (generation → grouping → explanation → relation
+discovery → verification → coverage estimate → review) is in place
+for single-column and multi-column intra-row types.
+
+Remaining work:
+
+  - Multi-row and multi-table types (row duplication, inter-table
+    inconsistency) — different evidence-gathering strategy.
+  - Hand-label a sample of real data to produce the first
+    microbenchmark.
+  - Validation experiment against that microbenchmark to measure
+    benchmark quality (FP rate of the queue) and coverage
+    (estimated FN rate), with confidence intervals.

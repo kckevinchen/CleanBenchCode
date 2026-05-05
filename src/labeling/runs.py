@@ -66,7 +66,7 @@ class RunInfo:
     # discovery). Inferred from artifacts on disk - run dirs predate
     # the "kind" concept so we don't rely on metadata.
     kind: str = "detection"
-    # Schema-discovery runs only.
+    # Relation-discovery runs only.
     has_relations: bool = False
     n_relations: int = 0
     n_passes: Optional[int] = None
@@ -211,7 +211,7 @@ class RunRegistry:
             if not child.is_dir():
                 continue
             # Heuristic: real runs have at least summary.json OR
-            # clusters.json OR (for schema-discovery runs) relations.jsonl.
+            # clusters.json OR (for relation-discovery runs) relations.jsonl.
             if (
                 not (child / "summary.json").exists()
                 and not (child / "clusters.json").exists()
@@ -243,6 +243,16 @@ _BOOL_KEYS_DETECT = {
 
 def _append_if(argv: List[str], flag: str, value: Any) -> None:
     if value is None or value == "":
+        return
+    if isinstance(value, (list, tuple)):
+        # Lists from the JSON launcher payload (e.g. ``error_types``,
+        # ``scopes``, ``columns``) need to be flattened into the CLI's
+        # comma-separated form. ``str([...])`` would smuggle Python
+        # repr noise (brackets, quotes) into argv.
+        items = [str(v).strip() for v in value if str(v).strip()]
+        if not items:
+            return
+        argv.extend([flag, ",".join(items)])
         return
     argv.extend([flag, str(value)])
 
@@ -383,6 +393,77 @@ def build_detection_argv(payload: Dict[str, Any]) -> List[str]:
     if payload.get("normalize_lowercase"):
         argv.append("--normalize-lowercase")
 
+    # row_duplication detector knobs (only consulted when
+    # ``row_duplication`` is in --error-types). Tri-state booleans are
+    # forwarded via paired --no-* flags so the user can explicitly
+    # override the YAML in either direction.
+    _append_if(
+        argv,
+        "--row-dup-detection-mode",
+        payload.get("row_dup_detection_mode"),
+    )
+    _append_bool(
+        argv,
+        payload.get("row_dup_normalize_keys"),
+        "--row-dup-normalize-keys",
+        "--no-row-dup-normalize-keys",
+    )
+    _append_bool(
+        argv,
+        payload.get("row_dup_adjudicate"),
+        "--row-dup-adjudicate",
+        "--no-row-dup-adjudicate",
+    )
+    _append_if(
+        argv,
+        "--row-dup-max-groups-per-source",
+        payload.get("row_dup_max_groups_per_source"),
+    )
+    _append_bool(
+        argv,
+        payload.get("row_dup_canonicalize_keys"),
+        "--row-dup-canonicalize-keys",
+        "--no-row-dup-canonicalize-keys",
+    )
+    _append_if(
+        argv,
+        "--row-dup-canonicalize-max-cardinality",
+        payload.get("row_dup_canonicalize_max_cardinality"),
+    )
+    _append_bool(
+        argv,
+        payload.get("row_dup_blocking_enabled"),
+        "--row-dup-blocking",
+        "--no-row-dup-blocking",
+    )
+    _append_bool(
+        argv,
+        payload.get("row_dup_minhash_enabled"),
+        "--row-dup-minhash",
+        "--no-row-dup-minhash",
+    )
+    _append_if(
+        argv,
+        "--row-dup-minhash-threshold",
+        payload.get("row_dup_minhash_threshold"),
+    )
+    _append_bool(
+        argv,
+        payload.get("row_dup_embedding_enabled"),
+        "--row-dup-embedding",
+        "--no-row-dup-embedding",
+    )
+    _append_if(
+        argv,
+        "--row-dup-embedding-threshold",
+        payload.get("row_dup_embedding_threshold"),
+    )
+    _append_if(
+        argv,
+        "--row-dup-embedding-model",
+        payload.get("row_dup_embedding_model"),
+    )
+
     # Good-Turing (adaptive mode).
     _append_if(argv, "--gt-mode", payload.get("gt_mode"))
     _append_if(argv, "--gt-num-runs", payload.get("gt_num_runs"))
@@ -430,13 +511,14 @@ def build_report_argv(run_dir: Path) -> List[str]:
     return ["-m", "experiments.build_report", str(run_dir)]
 
 
-# ---- Schema discovery (multi-column relations) -----------------------------
+# ---- Relation discovery (multi-column relations) -----------------------------
 
 # Path/glob keys forwarded from the launcher form to
 # ``run_relation_discovery``.  Validated for project-root containment
 # in ``launch_relations`` before the subprocess is spawned.
 _RELATIONS_PATH_KEYS = ("config", "csv", "csv_dir", "output_dir",
-                        "discovery_prompt")
+                        "discovery_prompt", "aggregate_prompt",
+                        "generalize_prompt", "validate_prompt")
 _RELATIONS_GLOB_KEYS = ("csv_glob",)
 
 
@@ -461,12 +543,67 @@ def build_relations_argv(payload: Dict[str, Any]) -> List[str]:
         _append_if(argv, "--max-passes", payload.get("max_passes"))
         _append_if(argv, "--min-passes", payload.get("min_passes"))
         _append_if(argv, "--gt-threshold", payload.get("gt_threshold"))
+        _append_if(argv, "--stop-when", payload.get("stop_when"))
+        _append_if(argv, "--epsilon-chao1", payload.get("epsilon_chao1"))
         _append_if(argv, "--base-seed", payload.get("base_seed"))
+    # Post-discovery passes. Both default ON in the CLI; the launcher
+    # form sends ``aggregate``/``generalize`` as bools so we can flip
+    # the negative flag without leaking flag-name semantics into the
+    # form payload schema.
+    if payload.get("aggregate") is False:
+        argv.append("--no-aggregate")
+    else:
+        _append_if(argv, "--aggregate-prompt", payload.get("aggregate_prompt"))
+        _append_if(argv, "--aggregate-min-cluster",
+                   payload.get("aggregate_min_cluster"))
+    if payload.get("generalize") is False:
+        argv.append("--no-generalize")
+    else:
+        _append_if(argv, "--generalize-prompt", payload.get("generalize_prompt"))
+        _append_if(argv, "--generalize-min-cluster",
+                   payload.get("generalize_min_cluster"))
+    # Empirical-validation pass also defaults ON; flip the negative
+    # flag when the form explicitly opts out.
+    if payload.get("validate") is False:
+        argv.append("--no-validate")
+    else:
+        _append_if(argv, "--validate-prompt", payload.get("validate_prompt"))
+        _append_if(argv, "--validate-layer", payload.get("validate_layer"))
+        _append_if(argv, "--validate-sample-rows",
+                   payload.get("validate_sample_rows"))
+        _append_if(argv, "--validate-timeout",
+                   payload.get("validate_timeout"))
+        _append_if(argv, "--validate-max-violations",
+                   payload.get("validate_max_violations"))
+        _append_if(argv, "--validate-limit", payload.get("validate_limit"))
     return argv
 
 
 def build_relation_report_argv(run_dir: Path) -> List[str]:
     return ["-m", "experiments.build_relation_report", str(run_dir)]
+
+
+def build_relation_validation_argv(
+    run_dir: Path,
+    *,
+    layer: Optional[str] = None,
+    concurrency: Optional[int] = None,
+    limit: Optional[int] = None,
+) -> List[str]:
+    """Argv for ``experiments.run_relation_validation``.
+
+    Optional kwargs map onto the script's CLI flags. They are exposed
+    as job-launcher params so the UI can offer a small form (layer
+    select + max-relations cap for a smoke test) without hardcoding.
+    """
+    argv: List[str] = ["-m", "experiments.run_relation_validation", str(run_dir)]
+    if layer:
+        argv.extend(["--layer", str(layer)])
+    if concurrency is not None:
+        argv.extend(["--concurrency", str(int(concurrency))])
+    if limit is not None:
+        argv.extend(["--limit", str(int(limit))])
+    return argv
 
 
 # ---- Data-prep (unified curate) -------------------------------------------
@@ -664,6 +801,27 @@ class JobManager:
         return self._launch(
             "relation_report", build_relation_report_argv(run_dir),
         )
+
+    def launch_relation_validation(
+        self,
+        run_id: str,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Job:
+        run_dir = self.project_root / "outputs" / run_id
+        if not run_dir.is_dir():
+            raise FileNotFoundError(f"run not found: {run_id}")
+        try:
+            _path_within(str(run_dir), self.project_root)
+        except ValueError as exc:
+            raise ValueError(f"invalid run_id: {exc}") from exc
+        params = dict(params or {})
+        argv = build_relation_validation_argv(
+            run_dir,
+            layer=params.get("layer"),
+            concurrency=params.get("concurrency"),
+            limit=params.get("limit"),
+        )
+        return self._launch("relation_validation", argv)
 
     def launch_curate(self, payload: Dict[str, Any]) -> Job:
         payload = dict(payload)

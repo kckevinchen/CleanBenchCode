@@ -356,6 +356,131 @@ def _langdetect_english(
     return is_english, detail
 
 
+def _lingua_english(
+    df: pd.DataFrame,
+    *,
+    min_english_prob: float,
+    max_chars: int = 4000,
+) -> Tuple[bool, dict]:
+    """Use ``lingua-language-detector`` to decide if the table is English.
+
+    Lingua is materially more accurate than ``langdetect`` on the
+    short, header-heavy samples we extract from CSVs - it uses
+    rule-based filtering plus per-language n-gram models trained on
+    larger corpora and exposes per-language probabilities even for
+    inputs of just a few words. The detector itself is heavyweight
+    (~170 MB wheel, lazy-loaded n-gram models) but is built once
+    per process and reused across every table.
+
+    Decision rule: REJECT iff the top non-English language has a
+    confidence above the language-specific noise floor AND English's
+    confidence is below ``min_english_prob``. We do NOT require
+    English to have the highest confidence - a CSV of ASCII column
+    headers ("Region", "Total", ...) often has no language with high
+    confidence, and we do not want to reject those.
+    """
+    try:
+        from lingua import LanguageDetectorBuilder
+    except ImportError:
+        return True, {"language": "unknown", "probability": 0.0,
+                      "error": "lingua_not_installed"}
+
+    detector = _get_lingua_detector()
+    sample = _sample_text_for_lang(df, max_chars=max_chars)
+    if not sample.strip() or len(sample) < 8:
+        # Diacritic guard - useful when the sample is empty / tiny:
+        # any Latin-script alpha char outside ASCII is suspicious.
+        has_diacritic = any(
+            ord(ch) > 127 and ch.isalpha() for ch in sample
+        )
+        if has_diacritic:
+            return False, {
+                "language": "non_english_latin",
+                "probability": 0.0,
+                "sample_chars": len(sample),
+                "sample_preview": sample[:120],
+                "reason": "short_sample_with_diacritics",
+            }
+        return True, {"language": "und", "probability": 0.0,
+                      "sample_chars": len(sample),
+                      "reason": "insufficient_text"}
+
+    confidences = detector.compute_language_confidence_values(sample)
+    if not confidences:
+        return True, {"language": "und", "probability": 0.0,
+                      "sample_chars": len(sample),
+                      "reason": "no_confidence_scores"}
+
+    en_prob = 0.0
+    top_non_en: Optional[Tuple[str, float]] = None
+    top_three: List[Tuple[str, float]] = []
+    for c in confidences[:3]:
+        top_three.append((c.language.name, float(c.value)))
+    for c in confidences:
+        name = c.language.name
+        prob = float(c.value)
+        if name == "ENGLISH":
+            en_prob = prob
+        elif top_non_en is None:
+            top_non_en = (name, prob)
+
+    detail: Dict[str, Any] = {
+        "english_probability": en_prob,
+        "top_three": top_three,
+        "sample_chars": len(sample),
+        "sample_preview": sample[:120],
+    }
+    if top_non_en is not None:
+        detail["top_non_english"] = {
+            "language": top_non_en[0],
+            "probability": top_non_en[1],
+        }
+
+    # Reject when the top non-English candidate dominates English by
+    # a large factor and clears an absolute floor. Tuned on the Bing21
+    # corpus: a 2x dominance ratio plus a 0.30 floor catches Dutch /
+    # French / German / Spanish CSVs whose headers all score around
+    # 0.4-0.7 in their language and <0.1 in English, while leaving
+    # bare-ASCII tables (every score <0.15, no clear winner) accepted.
+    if top_non_en is not None:
+        nen_lang, nen_prob = top_non_en
+        if nen_prob >= 0.30 and nen_prob > 2.0 * max(en_prob, 0.05):
+            detail["language"] = nen_lang
+            detail["probability"] = nen_prob
+            detail["reason"] = "non_english_dominant"
+            return False, detail
+
+    is_english = en_prob >= min_english_prob or (
+        top_non_en is None or top_non_en[1] < 0.30
+    )
+    detail["language"] = "ENGLISH" if is_english else (
+        top_non_en[0] if top_non_en else "und"
+    )
+    detail["probability"] = en_prob if is_english else (
+        top_non_en[1] if top_non_en else 0.0
+    )
+    return is_english, detail
+
+
+_LINGUA_DETECTOR_CACHE: list = []
+
+
+def _get_lingua_detector():
+    """Lazy-build and cache the lingua detector (full-accuracy mode).
+
+    The high-accuracy build pre-loads n-gram models on first call to
+    ``compute_language_confidence_values`` (~1-2 s per language the
+    first time it sees that language). The cache keeps the warmed
+    detector alive across calls so per-table cost is amortized.
+    """
+    if _LINGUA_DETECTOR_CACHE:
+        return _LINGUA_DETECTOR_CACHE[0]
+    from lingua import LanguageDetectorBuilder
+    detector = LanguageDetectorBuilder.from_all_languages().build()
+    _LINGUA_DETECTOR_CACHE.append(detector)
+    return detector
+
+
 def _sample_text_for_lang(df: pd.DataFrame, max_chars: int = 1500) -> str:
     """Return a compact sample of natural-language text for the LID."""
     seen: set = set()
@@ -700,6 +825,17 @@ def _evaluate_table(
                     f"english_prob={detail.get('english_probability', 0.0):.2f} "
                     f"(< {language_min_english_prob})"
                 )
+        elif language_check == "lingua":
+            is_english, detail = _lingua_english(
+                df, min_english_prob=language_min_english_prob,
+            )
+            if not is_english:
+                return None, (
+                    f"lingua_top={detail.get('language')!r} "
+                    f"prob={detail.get('probability', 0.0):.2f} "
+                    f"english_prob={detail.get('english_probability', 0.0):.2f} "
+                    f"reason={detail.get('reason', 'low_english_prob')}"
+                )
         elif language_check == "llm":
             is_english, detail = _llm_is_english(
                 df,
@@ -863,9 +999,9 @@ def curate(
         raise ValueError("max_rows must be positive")
     if oversize not in ("subsample", "reject"):
         raise ValueError("oversize must be 'subsample' or 'reject'")
-    if language_check not in ("off", "script", "langdetect", "llm"):
+    if language_check not in ("off", "script", "langdetect", "lingua", "llm"):
         raise ValueError(
-            "language_check must be one of: off, script, langdetect, llm"
+            "language_check must be one of: off, script, langdetect, lingua, llm"
         )
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1145,8 +1281,14 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--language-check",
-        choices=("off", "script", "langdetect", "llm"),
-        default="langdetect",
+        choices=("off", "script", "langdetect", "lingua", "llm"),
+        default="lingua",
+        help=(
+            "'lingua' (default) uses lingua-language-detector - more "
+            "accurate than langdetect on short / header-heavy samples. "
+            "'langdetect' is the previous default. 'llm' calls a model. "
+            "'script' only checks for non-Latin chars. 'off' disables."
+        ),
     )
     p.add_argument("--language-min-english-prob", type=float, default=0.5)
     p.add_argument("--language-min-confidence", type=float, default=0.6)

@@ -1,12 +1,19 @@
 """Per-cluster web-grounded verifier.
 
-Pulls eligible clusters through a 3-step loop:
+Runs every gate-eligible cluster through a single Foundry Agents call:
 
-1. **Build queries** from the suspect value (verbatim) and the
-   detector's suggested fix (if any), biased by entity kind.
-2. **Run web search** (cached) and dedupe results by URL.
-3. **One LLM call** asks the model to emit a structured verdict using
-   only the retrieved snippets + sibling values from the same column.
+1. Build the user prompt from the suspect cell, sibling values, and
+   full row context.
+2. Hand it to an :class:`AgentBackend` (production: the Web-Search-
+   equipped Foundry agent; tests: :class:`StubAgentBackend`).
+3. Parse the agent's JSON reply into a structured :class:`Verification`,
+   filtering out citation URLs the runtime did not actually record as
+   Web Search sources (anti-hallucination).
+
+The agent owns query formulation and result fetching; we never see raw
+snippet text. We DO see the URL citations the agent emitted via
+``url_citation`` annotations, plus the Bing search query URLs from the
+run steps - both of which feed into the labeling UI.
 
 The output is a list of :class:`Verification` records ready to dump
 to JSON. We never overwrite a verification record from a previous
@@ -16,6 +23,7 @@ run unless the operator explicitly asks for it (the CLI flag
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -28,10 +36,8 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 import yaml
 
-from src.core.llm_client import LLMClient, LLMResponse
-
-from .gate import EntityKind, GateConfig, classify_cluster, should_verify
-from .web_tool import SearchHit, SearchResult, WebSearchTool
+from .agent_backend import AgentBackend, AgentVerdict, Citation
+from .gate import EntityKind, GateConfig, classify_cluster, cluster_shape
 
 logger = logging.getLogger(__name__)
 
@@ -63,19 +69,44 @@ class Verification:
     confidence: float = 0.0
     evidence: List[EvidenceCitation] = field(default_factory=list)
     reasoning: str = ""
+    # Bing search query URLs (api host swapped for www.bing.com per
+    # display requirements) the agent fired during this run.
     queries: List[str] = field(default_factory=list)
+    # Total Web Search tool calls the agent made for this cluster.
     n_results: int = 0
+    # Unique citation URLs the agent recorded in url_citation annotations.
     n_unique_urls: int = 0
     error: Optional[str] = None
     parse_error: Optional[str] = None
+    # Carried over from the LLM era: how many backend calls + which
+    # endpoint produced this verdict. We keep both for backwards-
+    # compat with on-disk records and the labeling UI.
     llm_attempts: int = 0
     llm_endpoint: str = ""
+    # ---- Multi-row / multi-column extensions (additive) -----------
+    # Spatial layout the verifier processed for this cluster.
+    # ``pattern`` is one of ``"single_cell"`` | ``"multi_row"`` |
+    # ``"multi_column"`` | ``"composite"``. ``rows`` / ``columns_all``
+    # are the full row + column lists the cluster spans (``row`` and
+    # ``column`` remain the primary anchors for the UI).
+    pattern: str = "single_cell"
+    rows: List[int] = field(default_factory=list)
+    columns_all: List[str] = field(default_factory=list)
+    # One projected snapshot per record actually shown to the agent
+    # (column -> str value). For single_cell this is the single
+    # suspect cell wrapped in a 1-element list; for multi_row it
+    # holds one entry per affected row, projected to the cluster's
+    # columns when set or to the full row otherwise.
+    record_snapshots: List[Dict[str, str]] = field(default_factory=list)
+    # Optional structured fix returned by the agent for multi-column
+    # patterns: ``{column_name: corrected_value}``. ``canonical_value``
+    # remains the human-readable summary; this field is consumed by
+    # the labeling UI when applying a multi-column correction.
+    canonical_record: Optional[Dict[str, str]] = None
     ts: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def to_dict(self) -> Dict[str, Any]:
-        d = asdict(self)
-        # asdict produces nested dicts for evidence already.
-        return d
+        return asdict(self)
 
 
 # ---------------------------------------------------------------------------
@@ -87,26 +118,32 @@ class Verification:
 class VerifierConfig:
     """Tunables for the verifier loop."""
 
+    # Carried for output-schema compatibility (``Verification.llm_endpoint``);
+    # the actual model is configured on the Foundry agent in the portal.
     model: str = "gpt-5.2"
     reasoning_effort: str = "medium"
     reasoning_summary: str = "concise"
     concurrency: int = 4
-    # Per-cluster search budget. Two queries (raw value + suggested
-    # fix) is the sweet spot - more rarely helps and burns rate limit.
-    max_queries_per_cluster: int = 2
-    # Per-query result cap.
-    max_results_per_query: int = 5
-    # Per-cluster cap on snippets fed to the LLM (deduped by URL).
+    # Per-cluster cap on snippets / citations we surface to the LLM.
+    # The agent decides on its own how many searches to run; this is
+    # only a hard cap on what we copy back into the Verification record.
     max_snippets: int = 6
     # Hard cap on snippet length (chars) before we truncate.
     snippet_chars: int = 600
     # Top-N distinct sibling values to include for in-corpus context.
     sibling_samples: int = 8
-    # Path to the YAML prompt file.
-    prompt_path: Path = Path("prompts/verify_entity.yaml")
+    # Path to the YAML prompt file. Resolved against the project root
+    # (``<repo>/prompts/verify_entity.yaml``) by default so the
+    # verifier doesn't depend on the caller's CWD.
+    prompt_path: Path = field(
+        default_factory=lambda: Path(__file__).resolve().parents[2]
+        / "prompts" / "verify_entity.yaml"
+    )
     # Gate config (filters which clusters to run).
     gate: GateConfig = field(default_factory=GateConfig)
-    # When True, even cached verifications get recomputed.
+    # When True, even cached verifications get recomputed (caller
+    # clears the on-disk cache; the verifier itself only honours this
+    # flag for diagnostics).
     force: bool = False
 
 
@@ -120,7 +157,7 @@ _OBJECT_RE = re.compile(r"\{[\s\S]*\}")
 
 
 def _parse_json_object(text: str) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """Extract a JSON object from possibly-fenced LLM output."""
+    """Extract a JSON object from possibly-fenced agent output."""
     if not text:
         return None, "empty response"
     candidates: List[str] = []
@@ -143,107 +180,164 @@ def _parse_json_object(text: str) -> tuple[Optional[Dict[str, Any]], Optional[st
     return None, "failed to parse a JSON object"
 
 
-def _query_for_kind(value: str, kind: str) -> str:
-    """Bias the search query to the entity kind."""
-    base = f'"{value}"'
-    if kind == EntityKind.ORG.value:
-        return f"{base} official site"
-    if kind == EntityKind.ADDRESS.value:
-        return f"{base} address postal"
-    if kind == EntityKind.PHONE.value:
-        return f"{base} phone"
-    if kind == EntityKind.URL.value:
-        return value  # don't quote URLs
-    return base
-
-
-def _build_queries(
-    suspect_value: str,
-    suggested_fix: Optional[str],
-    kind: str,
-    cap: int,
-) -> List[str]:
-    queries: List[str] = []
-
-    def _push(q: str) -> None:
-        q = (q or "").strip()
-        if not q or q in queries or len(queries) >= cap:
-            return
-        queries.append(q)
-
-    _push(_query_for_kind(suspect_value, kind))
-    if suggested_fix and suggested_fix.strip() and suggested_fix.strip() != suspect_value.strip():
-        _push(_query_for_kind(suggested_fix, kind))
-    return queries
-
-
 def _format_sibling_values(values: Sequence[str]) -> str:
     if not values:
         return "  (none)"
     return "\n".join(f"  - {v}" for v in values)
 
 
-def _format_row_context(
-    row: Mapping[str, Any],
-    *,
-    suspect_column: str,
-    cap_value_chars: int = 120,
-    max_columns: int = 24,
-) -> str:
-    """Render the full row as ``column: value`` lines, with the
-    flagged column marked. Long values are truncated; the suspect
-    column always appears first regardless of column order.
-
-    Returns ``"  (unavailable)"`` when ``row`` is empty so the prompt
-    template still has a deterministic block.
+def _cache_key(cluster_id: str, prompt: str) -> str:
+    """Stable per-cluster cache key. Includes a hash of the prompt so
+    a prompt-template change invalidates the cache automatically.
     """
-    if not row:
-        return "  (unavailable)"
+    h = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
+    return f"{cluster_id}::{h}"
 
-    def _fmt(col: str, val: Any) -> str:
+
+def _format_records_under_review(
+    records: Sequence[Mapping[str, str]],
+    rows: Sequence[int],
+    cluster_columns: Sequence[str],
+    *,
+    suspect_column: str = "",
+    cap_value_chars: int = 120,
+    max_columns_per_record: int = 24,
+) -> str:
+    """Render the ``RECORDS UNDER REVIEW`` block of the prompt.
+
+    Each record is one row's projected snapshot. Columns that are
+    part of the cluster (i.e. flagged for review) are marked with
+    ``" *"`` so the agent knows which fields the detector
+    suspects. For single-cell clusters ``cluster_columns`` is empty
+    and ``suspect_column`` carries the one flagged column.
+    """
+    if not records:
+        return "  (no records available)"
+
+    flagged: set[str] = {c for c in cluster_columns if c}
+    if suspect_column:
+        flagged.add(suspect_column)
+
+    def _fmt_value(val: Any) -> str:
         s = "" if val is None else str(val)
         s = s.replace("\n", " ").replace("\r", " ").strip()
         if len(s) > cap_value_chars:
-            s = s[:cap_value_chars].rstrip() + "\u2026"
-        marker = " *" if col == suspect_column else ""
-        return f"  - {col}{marker}: {s}"
+            s = s[: cap_value_chars].rstrip() + "\u2026"
+        return s
 
-    items = [(k, v) for k, v in row.items()]
-    # Move the suspect column to the top so the LLM sees it first.
-    head = [(k, v) for k, v in items if k == suspect_column]
-    tail = [(k, v) for k, v in items if k != suspect_column]
-    ordered = head + tail
-    rendered = [_fmt(k, v) for k, v in ordered[:max_columns]]
-    if len(ordered) > max_columns:
-        rendered.append(f"  - ... and {len(ordered) - max_columns} more columns")
-    return "\n".join(rendered)
-
-
-def _format_evidence(snippets: Sequence[SearchHit], cap_chars: int) -> str:
-    if not snippets:
-        return "  (no web results)"
     lines: List[str] = []
-    for i, h in enumerate(snippets, 1):
-        title = (h.title or "").strip() or "(no title)"
-        body = (h.snippet or "").strip()
-        if len(body) > cap_chars:
-            body = body[:cap_chars].rstrip() + "..."
-        lines.append(f"[{i}] {title} - {h.url}\n    {body}")
-    return "\n\n".join(lines)
+    for idx, rec in enumerate(records):
+        row_idx = rows[idx] if idx < len(rows) else None
+        header = (
+            f"  Record {idx + 1} (row {row_idx}):"
+            if isinstance(row_idx, int)
+            else f"  Record {idx + 1}:"
+        )
+        lines.append(header)
+        # Order: flagged columns first (preserving cluster_columns
+        # order), then other columns in insertion order. This lets
+        # the agent see the columns under review at the top of each
+        # record block.
+        items = list(rec.items())
+        head = [(k, v) for k, v in items if k in flagged]
+        # Preserve cluster_columns order for the head section.
+        if cluster_columns:
+            order = {c: i for i, c in enumerate(cluster_columns)}
+            head.sort(key=lambda kv: order.get(kv[0], 1_000_000))
+        tail = [(k, v) for k, v in items if k not in flagged]
+        ordered = head + tail
+        rendered = 0
+        for col, val in ordered:
+            mark = " *" if col in flagged else ""
+            lines.append(f"    - {col}{mark}: {_fmt_value(val)}")
+            rendered += 1
+            if rendered >= max_columns_per_record:
+                remaining = len(ordered) - rendered
+                if remaining > 0:
+                    lines.append(
+                        f"    - ... and {remaining} more columns"
+                    )
+                break
+    return "\n".join(lines)
 
 
-def _dedup_hits(hits: Sequence[SearchHit], limit: int) -> List[SearchHit]:
-    seen: set[str] = set()
-    out: List[SearchHit] = []
-    for h in hits:
-        url = (h.url or "").strip()
-        if not url or url in seen:
-            continue
-        seen.add(url)
-        out.append(h)
-        if len(out) >= limit:
-            break
-    return out
+def _format_task_block(pattern: str, columns: Sequence[str], n_rows: int) -> str:
+    """Pattern-specific TASK instructions slotted into the prompt.
+
+    The verifier composes this in code (rather than in the YAML)
+    because each pattern asks the agent a fundamentally different
+    question about the records under review.
+    """
+    cols = [c for c in columns if c]
+    cols_str = ", ".join(cols) if cols else ""
+
+    if pattern == "single_cell":
+        return (
+            "Use the Web Search tool to find authoritative evidence about "
+            "the suspect cell value (and, if useful, the suggested fix). "
+            "Decide which verdict best fits using ONLY the evidence the "
+            "tool surfaced.\n"
+            "  * \"confirmed_error\" - the suspect value is wrong and a "
+            "single canonical alternative is supported by at least one "
+            "quoted snippet. Provide it as ``canonical_value``.\n"
+            "  * \"false_positive\" - the suspect value is in fact "
+            "correct. Set ``canonical_value`` to null.\n"
+            "  * \"ambiguous\" - evidence is missing or contradictory. "
+            "Set ``canonical_value`` to null."
+        )
+    if pattern == "multi_row":
+        return (
+            f"Use the Web Search tool to determine whether the {n_rows} "
+            "records under review describe the SAME real-world entity. "
+            "The detector suspects they may be duplicate records of one "
+            "entity that has been written down in different ways.\n"
+            "  * \"confirmed_error\" - the records ARE the same entity "
+            "and at least one record has a wrong / non-canonical "
+            "representation. Set ``canonical_value`` to the canonical "
+            "name (or a short description like \"merge as <Name>\"). "
+            "Cite at least one URL whose page text contains the "
+            "canonical name verbatim.\n"
+            "  * \"false_positive\" - the records refer to DISTINCT "
+            "real-world entities (i.e. they are NOT duplicates). Set "
+            "``canonical_value`` to null and explain in ``reasoning`` "
+            "which differentiating fact the web confirmed.\n"
+            "  * \"ambiguous\" - the web does not have enough evidence "
+            "to decide."
+        )
+    if pattern == "multi_column":
+        return (
+            "Use the Web Search tool to verify whether the columns "
+            f"under review ({cols_str}) hold values that are mutually "
+            "consistent for THIS record - i.e. they all describe the "
+            "same real-world entity according to authoritative sources.\n"
+            "  * \"confirmed_error\" - at least one column's value is "
+            "inconsistent with the others according to the web. Set "
+            "``canonical_value`` to a short human-readable summary of "
+            "the corrected record AND populate ``canonical_record`` "
+            "with ``{col: corrected_value}`` for every column you are "
+            "correcting (omit columns whose value is already correct).\n"
+            "  * \"false_positive\" - the columns are mutually "
+            "consistent. Set ``canonical_value`` and ``canonical_record`` "
+            "to null.\n"
+            "  * \"ambiguous\" - the web does not adjudicate the "
+            "relationship clearly."
+        )
+    # composite (multi-row + multi-column)
+    return (
+        f"Use the Web Search tool to verify whether the {n_rows} "
+        f"records share consistent values across the columns "
+        f"({cols_str}). The detector suspects either a functional-"
+        "dependency violation (different rows disagree on what the "
+        "value of a column should be for a shared key) or a duplicate "
+        "group with inconsistent attributes.\n"
+        "  * \"confirmed_error\" - the records refer to the same "
+        "entity / key but disagree on at least one column's value, "
+        "and the web supports a single canonical value. Use "
+        "``canonical_record`` to map ``{col: corrected_value}``.\n"
+        "  * \"false_positive\" - the records are mutually consistent "
+        "or refer to distinct entities. Set ``canonical_value`` to null.\n"
+        "  * \"ambiguous\" - insufficient web evidence."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -255,26 +349,31 @@ def _dedup_hits(hits: Sequence[SearchHit], limit: int) -> List[SearchHit]:
 class Verifier:
     """Run :class:`Verification` for each gate-eligible cluster.
 
-    Inputs are kept narrow on purpose: the verifier never opens
-    DataFrames itself - the caller passes a ``cell_lookup`` callback
-    that resolves ``(source, row, column) -> str`` and a
+    The verifier is intentionally narrow: it never opens DataFrames
+    itself - the caller passes a ``cell_lookup`` callback that
+    resolves ``(source, row, column) -> str`` and a
     ``column_samples`` callback that returns up to N distinct sibling
-    values for a column.
+    values for a column. ``row_lookup`` is optional and provides the
+    full row dictionary for cross-column context.
     """
 
-    llm: LLMClient
-    web: WebSearchTool
+    agent: AgentBackend
     cell_lookup: Callable[[str, int, str], Optional[str]]
     column_samples: Callable[[str, str, int], List[str]]
-    # Optional: full-row context (column -> value). Defaults to a
-    # no-op so existing tests / callers that don't supply it still
-    # work; when provided, the row is included in the LLM prompt.
     row_lookup: Optional[Callable[[str, int], Mapping[str, Any]]] = None
     cfg: VerifierConfig = field(default_factory=VerifierConfig)
     _prompt: Mapping[str, str] = field(init=False, default_factory=dict)
 
     def __post_init__(self) -> None:
         self._prompt = self._load_prompt(self.cfg.prompt_path)
+        # Plumb the system prompt onto the backend so it doesn't have
+        # to be re-passed per call. The backend uses it as the run's
+        # ``instructions`` override.
+        if hasattr(self.agent, "system_prompt"):
+            try:
+                setattr(self.agent, "system_prompt", self._prompt["system"])
+            except Exception:  # pragma: no cover (immutable backend)
+                pass
 
     # ---- prompt loading ------------------------------------------
 
@@ -298,35 +397,131 @@ class Verifier:
     def _verify_one(self, cluster: Mapping[str, Any]) -> Verification:
         cid = str(cluster.get("cluster_id") or "")
         source = str(cluster.get("source") or "")
-        row = cluster.get("row")
-        cols = cluster.get("columns") or []
-        column = str(cols[0]) if isinstance(cols, list) and cols else ""
+
+        shape = cluster_shape(cluster)
+        pattern = shape["pattern"]
+        all_rows: List[int] = list(shape["rows"])
+        all_cols: List[str] = list(shape["columns"])
+
+        # Apply caps from the gate config so we never blast a
+        # 200-row dup group into one prompt.
+        capped_rows = all_rows[: max(1, self.cfg.gate.multi_row_cap)] if all_rows else []
+        capped_cols = all_cols[: max(1, self.cfg.gate.multi_col_cap)] if all_cols else []
+
+        primary_row = capped_rows[0] if capped_rows else (
+            cluster.get("row") if isinstance(cluster.get("row"), int) else None
+        )
+        primary_col = capped_cols[0] if capped_cols else ""
+
         kind = classify_cluster(cluster, cfg=self.cfg.gate)
 
-        # Resolve cell value via callback. We tolerate missing values:
-        # the gate already vetted eligibility, but if we can't load the
-        # cell now (e.g. CSV moved), record the error and bail.
-        suspect_value = ""
-        try:
-            if isinstance(row, int) and column:
-                suspect_value = self.cell_lookup(source, row, column) or ""
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("cell_lookup failed for %s: %s", cid, exc)
+        # ---- build per-record snapshots --------------------------
+        records: List[Dict[str, str]] = []
+        if pattern == "single_cell":
+            # Existing behavior: a single cell, with the full row
+            # populating the snapshot for cross-column hints. The
+            # agent sees the row marked with ``*`` on the suspect
+            # column.
+            cell_val = ""
+            try:
+                if isinstance(primary_row, int) and primary_col:
+                    cell_val = self.cell_lookup(source, primary_row, primary_col) or ""
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("cell_lookup failed for %s: %s", cid, exc)
+            row_dict: Mapping[str, Any] = {}
+            if (
+                self.row_lookup is not None
+                and isinstance(primary_row, int)
+            ):
+                try:
+                    row_dict = self.row_lookup(source, primary_row) or {}
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("row_lookup failed for %s: %s", cid, exc)
+                    row_dict = {}
+            if row_dict:
+                snap = {str(k): ("" if v is None else str(v)) for k, v in row_dict.items()}
+                # If primary_col is missing from the row, splice in
+                # the explicitly-fetched cell so the prompt is
+                # never silently empty.
+                if primary_col and primary_col not in snap:
+                    snap[primary_col] = cell_val
+            else:
+                snap = {primary_col: cell_val} if primary_col else {}
+            records.append(snap)
+            suspect_value_for_record = cell_val
+        else:
+            # Multi-row, multi-column, or composite: one snapshot
+            # per affected row.
+            for r in capped_rows:
+                row_dict = {}
+                if self.row_lookup is not None:
+                    try:
+                        row_dict = self.row_lookup(source, r) or {}
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "row_lookup failed for %s row=%s: %s", cid, r, exc,
+                        )
+                        row_dict = {}
+                if capped_cols:
+                    # Project to the cluster's columns first; for
+                    # multi-row clusters with no cluster.columns the
+                    # projection is the full row.
+                    snap = {
+                        c: ("" if row_dict.get(c) is None else str(row_dict.get(c, "")))
+                        for c in capped_cols
+                    }
+                    # Also keep a few high-signal identifier columns
+                    # (e.g. license #, ID, name) so the agent can
+                    # ground its searches.
+                    for c, v in row_dict.items():
+                        if c in snap:
+                            continue
+                        snap[str(c)] = "" if v is None else str(v)
+                else:
+                    snap = {
+                        str(c): ("" if v is None else str(v))
+                        for c, v in row_dict.items()
+                    }
+                records.append(snap)
+            suspect_value_for_record = ""
+
+        # ---- build the Verification skeleton ---------------------
+        # ``suspect_value`` is the textual value of the primary
+        # suspect cell for single_cell, or a short JSON summary for
+        # multi-record patterns (kept short so it fits cleanly in
+        # the labeling UI).
+        if pattern == "single_cell":
+            display_suspect = suspect_value_for_record
+        else:
+            try:
+                display_suspect = json.dumps(records, ensure_ascii=False)[:1000]
+            except (TypeError, ValueError):
+                display_suspect = ""
 
         ver = Verification(
             cluster_id=cid,
             source=source,
-            row=row if isinstance(row, int) else None,
-            column=column,
-            suspect_value=str(suspect_value),
+            row=primary_row if isinstance(primary_row, int) else None,
+            column=primary_col,
+            suspect_value=str(display_suspect),
             entity_kind=kind.value,
+            pattern=pattern,
+            rows=list(all_rows),
+            columns_all=list(all_cols),
+            record_snapshots=[dict(r) for r in records],
         )
 
-        if not suspect_value:
-            ver.error = "suspect cell value unavailable"
-            return ver
+        # ---- early-exit: missing data ----------------------------
+        if pattern == "single_cell":
+            if not suspect_value_for_record:
+                ver.error = "suspect cell value unavailable"
+                return ver
+        else:
+            if not records or not any(records):
+                ver.error = "row context unavailable for multi-record cluster"
+                return ver
 
-        # Pull suggested_fix out of the synthesis block if present.
+        # ---- suggested fix + sibling values ----------------------
         syn = cluster.get("synthesis") or {}
         if not isinstance(syn, Mapping):
             syn = {}
@@ -335,113 +530,110 @@ class Verifier:
             or (cluster.get("suggested_fix") or "")
         )
 
-        queries = _build_queries(
-            suspect_value, suggested_fix or None, kind.value,
-            cap=self.cfg.max_queries_per_cluster,
-        )
-        ver.queries = queries
-
-        # Search every query, merge.
-        all_hits: List[SearchHit] = []
-        n_results = 0
-        for q in queries:
-            res: SearchResult = self.web.search(
-                q, max_results=self.cfg.max_results_per_query,
-                include_raw_content=False,
-            )
-            if res.error:
-                logger.warning(
-                    "search error for cluster=%s query=%r: %s",
-                    cid, q, res.error,
-                )
-                continue
-            n_results += len(res.hits)
-            all_hits.extend(res.hits)
-        snippets = _dedup_hits(all_hits, self.cfg.max_snippets)
-        ver.n_results = n_results
-        ver.n_unique_urls = len(snippets)
-
-        # Sibling values for in-corpus context.
-        try:
-            siblings = self.column_samples(
-                source, column, self.cfg.sibling_samples,
-            ) or []
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("column_samples failed for %s: %s", cid, exc)
-            siblings = []
-        # Drop the suspect value itself and dedupe.
-        siblings = [
-            s for s in (str(s).strip() for s in siblings)
-            if s and s != suspect_value.strip()
-        ]
-        # Stable dedupe.
-        seen_sib: set[str] = set()
-        siblings = [
-            s for s in siblings
-            if not (s in seen_sib or seen_sib.add(s))  # type: ignore[func-returns-value]
-        ][: self.cfg.sibling_samples]
-
-        # Full-row context (column -> value mapping). Provides the LLM
-        # the same fields a human reviewer would see when judging the
-        # cell - e.g. "if District=Marin County Office of Education then
-        # County=Marin is consistent". Skipped silently when no
-        # row_lookup callback is supplied (back-compat).
-        row_dict: Mapping[str, Any] = {}
-        if self.row_lookup is not None and isinstance(row, int):
+        siblings: List[str] = []
+        if pattern == "single_cell" and primary_col:
             try:
-                row_dict = self.row_lookup(source, row) or {}
+                raw_sib = self.column_samples(
+                    source, primary_col, self.cfg.sibling_samples,
+                ) or []
             except Exception as exc:  # noqa: BLE001
-                logger.warning("row_lookup failed for %s: %s", cid, exc)
-                row_dict = {}
-        row_context_str = (
-            _format_row_context(row_dict, suspect_column=column)
-            if row_dict else "  (unavailable)"
+                logger.warning("column_samples failed for %s: %s", cid, exc)
+                raw_sib = []
+            cleaned = [
+                s for s in (str(s).strip() for s in raw_sib)
+                if s and s != suspect_value_for_record.strip()
+            ]
+            seen_sib: set[str] = set()
+            siblings = [
+                s for s in cleaned
+                if not (s in seen_sib or seen_sib.add(s))  # type: ignore[func-returns-value]
+            ][: self.cfg.sibling_samples]
+
+        # ---- prompt construction ---------------------------------
+        records_block = _format_records_under_review(
+            records=records,
+            rows=capped_rows or ([primary_row] if isinstance(primary_row, int) else []),
+            cluster_columns=capped_cols,
+            suspect_column=primary_col if pattern == "single_cell" else "",
+        )
+        task_block = _format_task_block(
+            pattern=pattern,
+            columns=capped_cols,
+            n_rows=max(len(capped_rows), 1),
         )
 
         prompt = self._prompt["user_template"].format(
             source=source,
-            column=column or "(unknown)",
-            row=row if isinstance(row, int) else "n/a",
+            pattern=pattern,
+            column=primary_col or "(unknown)",
+            columns=", ".join(capped_cols) if capped_cols else "(none)",
+            row=primary_row if isinstance(primary_row, int) else "n/a",
+            rows=", ".join(str(r) for r in capped_rows) if capped_rows else "n/a",
+            n_records=len(records),
             entity_kind=kind.value,
             error_types=", ".join(
                 str(t) for t in (cluster.get("error_types") or [])
             ) or "(none)",
-            suspect_value=suspect_value,
+            suspect_value=(
+                suspect_value_for_record
+                if pattern == "single_cell"
+                else "(see RECORDS UNDER REVIEW)"
+            ),
             suggested_fix=suggested_fix or "(none)",
             sibling_values=_format_sibling_values(siblings),
-            row_context=row_context_str,
-            evidence_block=_format_evidence(snippets, self.cfg.snippet_chars),
+            records_block=records_block,
+            task_block=task_block,
         )
 
-        resp: LLMResponse = self.llm.query(
-            self.cfg.model,
-            prompt,
-            reasoning_effort=self.cfg.reasoning_effort,
-            reasoning_summary=self.cfg.reasoning_summary,
-            system_prompt=self._prompt["system"],
+        verdict: AgentVerdict = self.agent.verify(
+            prompt, cache_key=_cache_key(cid, prompt),
         )
-        ver.llm_attempts = resp.attempts
-        ver.llm_endpoint = resp.endpoint
-        if not resp.ok:
-            ver.error = resp.error or "llm returned no text"
+        ver.llm_attempts = 1
+        ver.llm_endpoint = getattr(self.agent, "endpoint", "") or self.agent.name
+        ver.queries = list(verdict.bing_query_urls)
+        ver.n_results = int(verdict.n_search_calls)
+        ver.n_unique_urls = len(verdict.citations)
+
+        if verdict.error:
+            ver.error = verdict.error
+            return ver
+        if not verdict.text:
+            ver.error = "agent returned empty response"
             return ver
 
-        payload, parse_err = _parse_json_object(resp.text)
+        payload, parse_err = _parse_json_object(verdict.text)
         ver.parse_error = parse_err
         if not payload:
             return ver
 
-        verdict = str(payload.get("verdict") or "").strip().lower()
-        if verdict not in ("confirmed_error", "false_positive", "ambiguous"):
-            ver.parse_error = f"unknown verdict: {verdict!r}"
+        verdict_str = str(payload.get("verdict") or "").strip().lower()
+        if verdict_str not in ("confirmed_error", "false_positive", "ambiguous"):
+            ver.parse_error = f"unknown verdict: {verdict_str!r}"
             return ver
-        ver.verdict = verdict
+        ver.verdict = verdict_str
 
         canon = payload.get("canonical_value")
         if canon in (None, "", "null", "None"):
             ver.canonical_value = None
         else:
             ver.canonical_value = str(canon).strip() or None
+
+        # Optional structured per-column fix for multi-column /
+        # composite patterns. We accept any mapping the agent emits
+        # and filter to columns we asked about (ignoring keys for
+        # columns the agent invented).
+        canon_record_raw = payload.get("canonical_record")
+        if isinstance(canon_record_raw, Mapping) and capped_cols:
+            allowed_cols = {c for c in capped_cols if c}
+            cleaned_record: Dict[str, str] = {}
+            for k, v in canon_record_raw.items():
+                key = str(k).strip()
+                if not key or key not in allowed_cols:
+                    continue
+                if v in (None, "", "null", "None"):
+                    continue
+                cleaned_record[key] = str(v).strip()
+            ver.canonical_record = cleaned_record or None
 
         try:
             ver.confidence = float(payload.get("confidence") or 0.0)
@@ -450,29 +642,31 @@ class Verifier:
         ver.confidence = max(0.0, min(1.0, ver.confidence))
         ver.reasoning = str(payload.get("reasoning") or "").strip()
 
-        snippet_urls = {h.url for h in snippets if h.url}
+        # Anti-hallucination filter: only keep cites whose URL the
+        # agent runtime actually recorded as a Web Search source
+        # (i.e. it appeared as a ``url_citation`` annotation).
+        allowed_urls = {c.url for c in verdict.citations if c.url}
+        url_to_title = {c.url: c.title for c in verdict.citations}
         for ev in payload.get("evidence") or []:
             if not isinstance(ev, Mapping):
                 continue
             url = str(ev.get("url") or "").strip()
-            if not url:
-                continue
-            # Anti-hallucination: only keep cites whose URL we actually
-            # gave the model. This is the cheapest filter that catches
-            # the vast majority of fabricated citations.
-            if url not in snippet_urls:
+            if not url or url not in allowed_urls:
                 continue
             ver.evidence.append(EvidenceCitation(
                 url=url,
-                title=str(ev.get("title") or "").strip(),
-                quote=str(ev.get("quote") or "").strip()[:600],
+                title=str(ev.get("title") or url_to_title.get(url, "")).strip(),
+                quote=str(ev.get("quote") or "").strip()[: self.cfg.snippet_chars],
             ))
+            if len(ver.evidence) >= self.cfg.max_snippets:
+                break
 
         # Tighten the verdict if it claims confirmed_error without
         # surviving evidence: downgrade to ambiguous.
         if ver.verdict == "confirmed_error" and not ver.evidence:
             ver.verdict = "ambiguous"
             ver.canonical_value = None
+            ver.canonical_record = None
             ver.parse_error = (ver.parse_error or "") + (
                 "; downgraded to ambiguous: no evidence URLs survived"
             ).lstrip("; ")
@@ -516,7 +710,6 @@ class Verifier:
                 for fut in as_completed(futures):
                     out.append(fut.result())
 
-        # Stable order by cluster_id so re-runs diff cleanly.
         out.sort(key=lambda v: v.cluster_id)
         return out
 
@@ -554,17 +747,40 @@ def load_verifications(path: Path) -> List[Verification]:
         return []
     out: List[Verification] = []
     for r in raw:
-        if not isinstance(r, Mapping):
+        if not isinstance(r, dict):
             continue
-        evidence = [
-            EvidenceCitation(
-                url=str(e.get("url") or ""),
-                title=str(e.get("title") or ""),
-                quote=str(e.get("quote") or ""),
-            )
-            for e in (r.get("evidence") or [])
-            if isinstance(e, Mapping)
-        ]
+        evidence = []
+        for ev in r.get("evidence") or []:
+            if isinstance(ev, dict):
+                evidence.append(EvidenceCitation(
+                    url=str(ev.get("url") or ""),
+                    title=str(ev.get("title") or ""),
+                    quote=str(ev.get("quote") or ""),
+                ))
+        # Multi-row / multi-column extension fields. Older records
+        # written before the schema bump simply default these to
+        # empty / None, which preserves the single_cell semantics.
+        rows_raw = r.get("rows") or []
+        rows: List[int] = []
+        if isinstance(rows_raw, list):
+            for x in rows_raw:
+                try:
+                    rows.append(int(x))
+                except (TypeError, ValueError):
+                    continue
+        columns_all_raw = r.get("columns_all") or []
+        columns_all = [str(c) for c in columns_all_raw] if isinstance(columns_all_raw, list) else []
+        snapshots_raw = r.get("record_snapshots") or []
+        record_snapshots: List[Dict[str, str]] = []
+        if isinstance(snapshots_raw, list):
+            for s in snapshots_raw:
+                if isinstance(s, dict):
+                    record_snapshots.append({str(k): "" if v is None else str(v) for k, v in s.items()})
+        canon_rec_raw = r.get("canonical_record")
+        canon_rec: Optional[Dict[str, str]] = None
+        if isinstance(canon_rec_raw, dict) and canon_rec_raw:
+            canon_rec = {str(k): "" if v is None else str(v) for k, v in canon_rec_raw.items()}
+
         out.append(Verification(
             cluster_id=str(r.get("cluster_id") or ""),
             source=str(r.get("source") or ""),
@@ -573,27 +789,25 @@ def load_verifications(path: Path) -> List[Verification]:
             suspect_value=str(r.get("suspect_value") or ""),
             entity_kind=str(r.get("entity_kind") or "other"),
             verdict=str(r.get("verdict") or "ambiguous"),
-            canonical_value=r.get("canonical_value") if r.get("canonical_value") not in ("", None) else None,
+            canonical_value=(
+                str(r["canonical_value"])
+                if r.get("canonical_value") not in (None, "", "null") else None
+            ),
             confidence=float(r.get("confidence") or 0.0),
             evidence=evidence,
             reasoning=str(r.get("reasoning") or ""),
             queries=[str(q) for q in (r.get("queries") or [])],
             n_results=int(r.get("n_results") or 0),
             n_unique_urls=int(r.get("n_unique_urls") or 0),
-            error=r.get("error") or None,
-            parse_error=r.get("parse_error") or None,
+            error=r.get("error") if r.get("error") else None,
+            parse_error=r.get("parse_error") if r.get("parse_error") else None,
             llm_attempts=int(r.get("llm_attempts") or 0),
             llm_endpoint=str(r.get("llm_endpoint") or ""),
+            pattern=str(r.get("pattern") or "single_cell"),
+            rows=rows,
+            columns_all=columns_all,
+            record_snapshots=record_snapshots,
+            canonical_record=canon_rec,
             ts=str(r.get("ts") or ""),
         ))
     return out
-
-
-__all__ = [
-    "EvidenceCitation",
-    "Verification",
-    "VerifierConfig",
-    "Verifier",
-    "write_verifications",
-    "load_verifications",
-]

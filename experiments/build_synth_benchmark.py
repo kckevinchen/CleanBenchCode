@@ -46,7 +46,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.core.data_loader import load_csv  # noqa: E402
-from src.synth import INJECTOR_REGISTRY, InjectionRecord  # noqa: E402
+from src.synth import (  # noqa: E402
+    INJECTOR_REGISTRY,
+    InjectionRecord,
+    WORKBOOK_INJECTOR_REGISTRY,
+)
 
 logger = logging.getLogger("build_synth_benchmark")
 
@@ -157,6 +161,25 @@ def build_benchmark(
     all_records: List[InjectionRecord] = []
     per_source_counts: Dict[str, Dict[str, int]] = {}
 
+    # Partition injector names into per-cell and workbook scopes.
+    cell_names: List[str] = []
+    workbook_names: List[str] = []
+    for name in injector_names:
+        if name in INJECTOR_REGISTRY:
+            cell_names.append(name)
+        elif name in WORKBOOK_INJECTOR_REGISTRY:
+            workbook_names.append(name)
+        else:
+            raise SystemExit(
+                f"unknown injector {name!r}; "
+                f"available cell={sorted(INJECTOR_REGISTRY)} "
+                f"workbook={sorted(WORKBOOK_INJECTOR_REGISTRY)}"
+            )
+
+    # Cache final per-source frames so workbook injectors operate on
+    # the post-cell-injection state.
+    finalised_frames: Dict[str, pd.DataFrame] = {}
+
     with manifest_path.open("w", encoding="utf-8") as mf:
         for path in csv_paths:
             source = path.stem
@@ -166,14 +189,8 @@ def build_benchmark(
             # Serialise injectors so the same cell isn't perturbed
             # twice. Each injector gets its own deterministic sub-RNG
             # derived from (seed, source, name) for reproducibility.
-            for name in injector_names:
-                if name not in INJECTOR_REGISTRY:
-                    raise SystemExit(
-                        f"unknown injector {name!r}; "
-                        f"available: {sorted(INJECTOR_REGISTRY)}"
-                    )
+            for name in cell_names:
                 sub_rng = random.Random(
-                    base_rng.random() if False else
                     hash((seed, source, name)) & 0xFFFFFFFF
                 )
                 current, records = _inject_dataframe(
@@ -187,6 +204,52 @@ def build_benchmark(
                 for rec in records:
                     mf.write(json.dumps(asdict(rec), ensure_ascii=False) + "\n")
                 all_records.extend(records)
+            finalised_frames[path.name] = current
+
+        # Workbook-scope injectors: operate on the full frame mapping
+        # (sheet-name == filename). Treat the entire input_dir as one
+        # workbook. Each injector gets its own deterministic RNG.
+        if workbook_names and len(finalised_frames) >= 2:
+            workbook_id = input_dir.name or "workbook"
+            for name in workbook_names:
+                cls = WORKBOOK_INJECTOR_REGISTRY[name]
+                inj = cls()
+                if not inj.applicable(finalised_frames):
+                    logger.info(
+                        "[%s|%s] workbook injector skipped (not applicable)",
+                        workbook_id, name,
+                    )
+                    continue
+                sub_rng = random.Random(
+                    hash((seed, workbook_id, name)) & 0xFFFFFFFF
+                )
+                result = inj.try_inject(finalised_frames, rng=sub_rng)
+                if result is None:
+                    logger.info(
+                        "[%s|%s] workbook injector returned no perturbation",
+                        workbook_id, name,
+                    )
+                    continue
+                new_frames, records = result
+                finalised_frames = dict(new_frames)
+                per_source_counts.setdefault(workbook_id, {})[name] = len(records)
+                for rec in records:
+                    mf.write(json.dumps(asdict(rec), ensure_ascii=False) + "\n")
+                all_records.extend(records)
+                logger.info(
+                    "[%s|%s] workbook injector emitted %d records",
+                    workbook_id, name, len(records),
+                )
+        elif workbook_names:
+            logger.warning(
+                "workbook injectors requested but only %d sheet(s) "
+                "available; skipping: %s",
+                len(finalised_frames), workbook_names,
+            )
+
+        # Persist (possibly post-workbook-perturbed) frames.
+        for path in csv_paths:
+            current = finalised_frames[path.name]
             out_path = injected_dir / path.name
             current.to_csv(out_path, index=False)
 
@@ -231,12 +294,15 @@ def main() -> None:
     if args.list_injectors:
         for name in sorted(INJECTOR_REGISTRY):
             cls = INJECTOR_REGISTRY[name]
-            print(f"{name:20s} -> error_type={cls.error_type}")
+            print(f"{name:32s} [cell]      error_type={cls.error_type}")
+        for name in sorted(WORKBOOK_INJECTOR_REGISTRY):
+            cls = WORKBOOK_INJECTOR_REGISTRY[name]
+            print(f"{name:32s} [workbook]  error_type={cls.error_type}")
         return
 
     spec = args.error_types.strip()
     if spec.lower() == "all":
-        injector_names = sorted(INJECTOR_REGISTRY)
+        injector_names = sorted(INJECTOR_REGISTRY) + sorted(WORKBOOK_INJECTOR_REGISTRY)
     else:
         injector_names = [s.strip() for s in spec.split(",") if s.strip()]
 

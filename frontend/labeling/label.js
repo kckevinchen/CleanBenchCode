@@ -528,9 +528,28 @@ async function refreshQueue({ keepSelection }) {
       srcHdr.className = "group-header src";
       srcHdr.dataset.wb = wb;
       srcHdr.dataset.src = src;
+      // Surface a budget-exhausted warning when ANY cluster in this
+      // source had its row_duplication candidate budget capped.
+      // Some duplicate clusters may not have been adjudicated, so
+      // the operator should consider rerunning with a larger
+      // ``max_groups_per_source``.
+      let budgetExhausted = false;
+      let budgetCap = 0;
+      for (const it of items) {
+        if (it.c && it.c.cluster_budget_exhausted) {
+          budgetExhausted = true;
+          if (it.c.max_groups_per_source && it.c.max_groups_per_source > budgetCap) {
+            budgetCap = it.c.max_groups_per_source;
+          }
+        }
+      }
+      const budgetBadge = budgetExhausted
+        ? `<span class="budget-warn-badge" title="Row-duplication candidate budget exhausted${budgetCap ? ` (cap=${budgetCap})` : ""}; some clusters may have been dropped. Rerun with a larger --row-dup-max-groups-per-source.">budget exhausted</span>`
+        : "";
       srcHdr.innerHTML =
         `<span class="caret">${collapsedSrc ? "\u25B8" : "\u25BE"}</span>` +
         `<span class="label">${escape(src)}</span>` +
+        budgetBadge +
         `<span class="count">${headerSummary(items)}</span>`;
       wbBox.appendChild(srcHdr);
       const srcBody = document.createElement("div");
@@ -541,7 +560,29 @@ async function refreshQueue({ keepSelection }) {
         toggleGroup(srcHdr, srcBody, srcKey);
       });
 
-      for (const { c, idx } of items) {
+      // Within a CSV, row_duplication clusters are bucketed by their
+      // duplicate-group key (sorted ``affected_rows``) so the operator
+      // sees ONE "Duplicate group: rows 5, 12, 27 (×3)" sub-header per
+      // candidate group instead of N separate cluster rows (one per
+      // member). Non-row_duplication clusters render flat, just like
+      // before.
+      const dupBuckets = new Map(); // key -> [{c, idx}]
+      const flatItems = [];
+      for (const entry of items) {
+        const c = entry.c;
+        const dupRows = Array.isArray(c.affected_rows) ? c.affected_rows : [];
+        const isDupCluster = (c.error_types || []).includes("row_duplication") && dupRows.length >= 1;
+        if (!isDupCluster) {
+          flatItems.push(entry);
+          continue;
+        }
+        const key = dupRows.slice().sort((a, b) => a - b).join(",");
+        if (!dupBuckets.has(key)) dupBuckets.set(key, []);
+        dupBuckets.get(key).push(entry);
+      }
+
+      const renderQueueRow = (entry) => {
+        const { c, idx } = entry;
         const row = document.createElement("div");
         row.className = "row" + (c.inferred ? " row-inferred" : "");
         row.dataset.queueIndex = String(idx);
@@ -549,16 +590,101 @@ async function refreshQueue({ keepSelection }) {
         const inferredBadge = c.inferred
           ? `<span class="inferred-badge" title="No primary detection on this row \u2014 surfaced via a sibling detection's affected_rows. Labelling it captures the LLM's full claim and prevents FN drift.">inf</span>`
           : "";
+        const dupRows = Array.isArray(c.affected_rows) ? c.affected_rows : [];
+        const isDup = (c.error_types || []).includes("row_duplication") && dupRows.length > 1;
+        const dupBadge = isDup
+          ? `<span class="dup-badge" title="row_duplication group spans ${dupRows.length} rows">×${dupRows.length}</span>`
+          : "";
+        // Inside a dup-bucket the row line shows just THIS cluster's
+        // canonical row (the sibling rows are already named in the
+        // sub-header above).
+        const rowLine = `row ${escape(String(c.row ?? "?"))}`;
         row.innerHTML = `
           <div class="dot ${status}"></div>
           <div class="main">
-            <div class="src">row ${escape(String(c.row ?? "?"))} ${inferredBadge}</div>
+            <div class="src">${rowLine} ${dupBadge}${inferredBadge}</div>
             <div class="cols">${escape((c.columns || []).join(", "))}</div>
             <div class="types">${escape((c.error_types || []).join(" \u00B7 "))}</div>
           </div>
         `;
         row.addEventListener("click", () => selectIndex(idx));
-        srcBody.appendChild(row);
+        return row;
+      };
+
+      // Flat (non-dup) clusters first, in queue order.
+      for (const entry of flatItems) srcBody.appendChild(renderQueueRow(entry));
+
+      // Dup buckets, sorted by smallest member row so groups are stable.
+      const sortedBuckets = [...dupBuckets.entries()].sort((a, b) => {
+        const ra = Number((a[0].split(",")[0] || "").trim());
+        const rb = Number((b[0].split(",")[0] || "").trim());
+        return (Number.isFinite(ra) ? ra : 0) - (Number.isFinite(rb) ? rb : 0);
+      });
+      for (const [key, bucket] of sortedBuckets) {
+        const dupKey = `dup:${wb}/${src}/${key}`;
+        const collapsedDup = state.collapsed.has(dupKey);
+        const dupHdr = document.createElement("div");
+        const sample = bucket[0]?.c || {};
+        // Bucket-level verdict: prefer the strongest verdict in
+        // any cluster in the bucket. ``duplicate`` > ``near_duplicate``
+        // > <unset>. Used to decorate the header amber for confirmed
+        // duplicates and orange for "needs review" near-duplicates.
+        const verdictRank = { duplicate: 2, near_duplicate: 1 };
+        let bucketVerdict = "";
+        let bestRank = -1;
+        const strategies = new Set();
+        for (const { c } of bucket) {
+          const v = String(c.verdict || "").toLowerCase();
+          if (verdictRank[v] != null && verdictRank[v] > bestRank) {
+            bestRank = verdictRank[v];
+            bucketVerdict = v;
+          }
+          for (const s of c.discovery_strategies || []) strategies.add(s);
+        }
+        dupHdr.className = "group-header dup" + (
+          bucketVerdict === "near_duplicate" ? " near-dup" : ""
+        );
+        const dupRows = Array.isArray(sample.affected_rows) ? sample.affected_rows : [];
+        const previewRows = dupRows.slice(0, 6);
+        const moreCount = dupRows.length - previewRows.length;
+        const groupNoun = bucketVerdict === "near_duplicate"
+          ? "Near-duplicate group"
+          : "Duplicate group";
+        const labelText = dupRows.length
+          ? `${groupNoun} \u2014 rows ${previewRows.join(", ")}${moreCount > 0 ? `, +${moreCount}` : ""}`
+          : `${groupNoun} \u2014 ${bucket.length} cluster(s)`;
+        // Bucket-level summary: how many of the sibling clusters in
+        // this group are still unlabeled.
+        let bucketLabeled = 0;
+        for (const { c } of bucket) {
+          if (c.label_status && c.label_status !== "unlabeled") bucketLabeled += 1;
+        }
+        const strategyChips = strategies.size
+          ? `<span class="strategy-chips" title="Discovered by: ${[...strategies].join(", ")}">${
+              [...strategies].map((s) =>
+                `<span class="strategy-chip strategy-${escape(s)}">${escape(s)}</span>`
+              ).join("")
+            }</span>`
+          : "";
+        const verdictBadge = bucketVerdict === "near_duplicate"
+          ? `<span class="verdict-badge near-dup-badge" title="LLM marked as near-duplicate; needs human review">near-dup</span>`
+          : "";
+        dupHdr.innerHTML =
+          `<span class="caret">${collapsedDup ? "\u25B8" : "\u25BE"}</span>` +
+          `<span class="label">${escape(labelText)}</span>` +
+          verdictBadge +
+          strategyChips +
+          `<span class="dup-badge" title="row_duplication group spans ${dupRows.length || bucket.length} rows">\u00d7${dupRows.length || bucket.length}</span>` +
+          `<span class="count">${bucketLabeled}/${bucket.length}</span>`;
+        srcBody.appendChild(dupHdr);
+        const dupBody = document.createElement("div");
+        dupBody.className = "group-body dup-body";
+        if (collapsedDup) dupBody.style.display = "none";
+        srcBody.appendChild(dupBody);
+        dupHdr.addEventListener("click", () => {
+          toggleGroup(dupHdr, dupBody, dupKey);
+        });
+        for (const entry of bucket) dupBody.appendChild(renderQueueRow(entry));
       }
     }
   }
@@ -738,6 +864,35 @@ function renderDetail(bundle) {
     </div>
   `).join("");
 
+  // Duplicate-group summary: only meaningful for row_duplication
+  // clusters. We collect the union of every detection's
+  // ``affected_rows`` (plus the primary row) and surface the count +
+  // row-list so the operator can verify the group at a glance and
+  // jump into the context table (where these rows are already
+  // amber-highlighted via the .dup-group class).
+  let dupBlockHtml = "";
+  const isDupCluster = (c.error_types || []).includes("row_duplication");
+  if (isDupCluster) {
+    const rows = new Set([Number(c.row)]);
+    for (const d of c.detections || []) {
+      for (const r of d.affected_rows || []) {
+        const n = Number(r);
+        if (Number.isFinite(n)) rows.add(n);
+      }
+    }
+    const sorted = [...rows].sort((a, b) => a - b);
+    const keyCols = (c.columns || []).join(", ");
+    dupBlockHtml = `
+      <div class="block">
+        <h2>Duplicate group (${sorted.length} rows)</h2>
+        <div class="cols">key: [${escape(keyCols)}]</div>
+        <div style="margin-top:6px; font-size:12px;">
+          rows: ${sorted.map((r) => `<span class="sev-chip">${escape(String(r))}</span>`).join(" ")}
+        </div>
+      </div>
+    `;
+  }
+
   const currentStatus = label?.status || "";
   const btn = (s, key) => `<button data-status="${s}" class="${s}${currentStatus === s ? " active" : ""}" title="key ${key}">${s} <kbd>${key}</kbd></button>`;
 
@@ -784,6 +939,8 @@ function renderDetail(bundle) {
       </label>
       ${label ? `<div class="muted" style="margin-top:6px; font-size:11px;">last: ${escape(label.status)} by ${escape(label.annotator)} @ ${escape(label.ts)}</div>` : ""}
     </div>
+
+    ${dupBlockHtml}
 
     <div class="block">
       <h2>Detections (${(c.detections || []).length})</h2>
@@ -884,7 +1041,7 @@ function renderWebVerificationBlock(bundle) {
         <h2><span>Web verification</span></h2>
         <div class="muted" style="font-size:12px; margin-bottom:8px;">
           This cluster has not been verified on the web yet.
-          Click below to run a one-shot search + LLM check.
+          Click below to run the Foundry agent (Web Search tool).
         </div>
         <button class="web-verify-btn" data-web-verify="${escape(cid)}">
           Verify on web
@@ -916,14 +1073,27 @@ function renderWebVerificationBlock(bundle) {
   `).join("");
 
   // Accept button: only meaningful when the verdict is actionable.
-  // confirmed_error -> set Corrected value + pre-select TP.
+  // single_cell + confirmed_error -> set Corrected value + pre-select TP.
   // false_positive  -> just pre-select FP (no corrected value).
+  // multi_row / multi_column / composite + confirmed_error -> we
+  // currently only offer a TP pre-select (operator applies the
+  // structured fix manually using the ``canonical_record`` table
+  // shown below), since the row/column targeting differs per
+  // detection and we don't have a single "correct value" to
+  // splice into the existing TP-flow.
+  const pattern = String(v.pattern || "single_cell");
   let acceptBtn = "";
-  if (!errored && verdict === "confirmed_error" && v.canonical_value) {
+  if (!errored && verdict === "confirmed_error" && v.canonical_value && pattern === "single_cell") {
     acceptBtn = `<button class="web-accept" data-web-accept="tp"
         data-canonical="${escape(v.canonical_value)}"
         title="Use this canonical value as the correction and pre-select TP">
         Accept TP -> "${escape(v.canonical_value)}"
+      </button>`;
+  } else if (!errored && verdict === "confirmed_error" && pattern !== "single_cell") {
+    acceptBtn = `<button class="web-accept" data-web-accept="tp"
+        data-canonical=""
+        title="Pre-select TP; apply the structured fix from canonical_record manually">
+        Accept TP
       </button>`;
   } else if (!errored && verdict === "false_positive") {
     acceptBtn = `<button class="web-accept" data-web-accept="fp"
@@ -933,9 +1103,107 @@ function renderWebVerificationBlock(bundle) {
       </button>`;
   }
 
-  const queriesHtml = (v.queries || []).map((q) =>
-    `<code>${escape(q)}</code>`
-  ).join(" ");
+  // ``v.queries`` now holds Bing search URLs the agent fired (api
+  // host already rewritten to www.bing.com on the server). Render
+  // them as clickable links so an operator can audit the searches.
+  const queriesHtml = (v.queries || []).map((q) => {
+    const url = String(q || "");
+    let label = url;
+    try { label = decodeURIComponent(new URL(url).search.replace(/^\?q=/, "")) || url; }
+    catch (_) { /* not a URL: fall back to raw text */ }
+    return `<a href="${escape(url)}" target="_blank" rel="noopener noreferrer"><code>${escape(label)}</code></a>`;
+  }).join(" ");
+
+  const nCalls = Number(v.n_results || 0);
+  const nUrls = Number(v.n_unique_urls || 0);
+  const callsLabel = `${nUrls} cited url${nUrls === 1 ? "" : "s"} / ${nCalls} web search${nCalls === 1 ? "" : "es"}`;
+
+  // ---- Pattern badge + structured-fix / records-snapshot blocks --
+  // Only rendered for non-single_cell verifications so the existing
+  // single-cell UI stays compact.
+  const patternLabels = {
+    single_cell: "single cell",
+    multi_row: "multi-row (duplicate check)",
+    multi_column: "multi-column (consistency check)",
+    composite: "composite (rows x cols)",
+  };
+  const patternBadge = (pattern && pattern !== "single_cell")
+    ? `<span class="verdict-chip" style="border-color:var(--muted);color:var(--muted);margin-left:6px;" title="Cluster shape">${escape(patternLabels[pattern] || pattern)}</span>`
+    : "";
+
+  // canonical_record: column -> corrected_value mapping for
+  // multi_column / composite confirmed_error verdicts. Render as a
+  // small table so the operator can see at a glance which columns
+  // need to change.
+  let canonicalRecordHtml = "";
+  if (v.canonical_record && typeof v.canonical_record === "object") {
+    const rows = Object.entries(v.canonical_record);
+    if (rows.length) {
+      canonicalRecordHtml = `
+        <div style="margin-top:8px;">
+          <div class="muted" style="font-size:11px; margin-bottom:4px;">
+            Suggested per-column fixes:
+          </div>
+          <table class="canonical-record" style="font-size:12px;border-collapse:collapse;">
+            <tbody>
+              ${rows.map(([col, val]) => `
+                <tr>
+                  <td style="padding:2px 8px 2px 0;color:var(--muted);">${escape(col)}</td>
+                  <td style="padding:2px 0;"><code>${escape(String(val))}</code></td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </div>
+      `;
+    }
+  }
+
+  // record_snapshots: one entry per record actually shown to the
+  // agent. For multi_row / composite this is the list of duplicate-
+  // candidate rows; for multi_column it's a single record projected
+  // to the columns under review. We render a compact summary so the
+  // operator can verify the agent saw the right data.
+  let recordsHtml = "";
+  const snaps = Array.isArray(v.record_snapshots) ? v.record_snapshots : [];
+  if ((pattern === "multi_row" || pattern === "composite") && snaps.length >= 2) {
+    const rowsList = Array.isArray(v.rows) ? v.rows : [];
+    // Collect the union of keys (column names) across all snapshots
+    // so the operator sees one consistent column order.
+    const keyOrder = [];
+    const seenKey = new Set();
+    for (const s of snaps) {
+      for (const k of Object.keys(s || {})) {
+        if (!seenKey.has(k)) { seenKey.add(k); keyOrder.push(k); }
+      }
+    }
+    const headerHtml = keyOrder.slice(0, 8).map((k) =>
+      `<th style="padding:2px 6px;text-align:left;color:var(--muted);font-weight:600;">${escape(k)}</th>`
+    ).join("");
+    const bodyHtml = snaps.map((s, i) => {
+      const r = rowsList[i];
+      const rowLabel = (typeof r === "number")
+        ? `row ${r}`
+        : `record ${i + 1}`;
+      const tds = keyOrder.slice(0, 8).map((k) => {
+        const val = String((s && s[k]) || "");
+        const trunc = val.length > 60 ? val.slice(0, 60) + "\u2026" : val;
+        return `<td style="padding:2px 6px;">${escape(trunc)}</td>`;
+      }).join("");
+      return `<tr><td style="padding:2px 6px;color:var(--muted);white-space:nowrap;">${escape(rowLabel)}</td>${tds}</tr>`;
+    }).join("");
+    recordsHtml = `
+      <div style="margin-top:8px;overflow-x:auto;">
+        <div class="muted" style="font-size:11px; margin-bottom:4px;">
+          Records compared (${snaps.length}):
+        </div>
+        <table style="font-size:12px;border-collapse:collapse;">
+          <thead><tr><th style="padding:2px 6px;text-align:left;color:var(--muted);">&nbsp;</th>${headerHtml}</tr></thead>
+          <tbody>${bodyHtml}</tbody>
+        </table>
+      </div>
+    `;
+  }
 
   return `
     <div class="block web-verify">
@@ -944,6 +1212,7 @@ function renderWebVerificationBlock(bundle) {
         <span class="verdict-chip" style="border-color:${chipColor};color:${chipColor};">
           ${escape(errored ? "errored" : verdict)} · ${confPct}
         </span>
+        ${patternBadge}
       </h2>
       ${errored
         ? `<div class="muted" style="font-size:12px;">${escape(v.error || "verifier failed")}</div>`
@@ -954,12 +1223,14 @@ function renderWebVerificationBlock(bundle) {
           ${v.reasoning
             ? `<div class="reasoning">${escape(v.reasoning)}</div>`
             : ""}
+          ${canonicalRecordHtml}
+          ${recordsHtml}
           ${evidenceHtml
             ? `<ul class="evidence">${evidenceHtml}</ul>`
             : `<div class="muted" style="font-size:12px;">No surviving evidence citations.</div>`}
           <div class="muted web-meta">
-            ${queriesHtml ? `queries: ${queriesHtml} · ` : ""}
-            ${v.n_unique_urls || 0} unique urls / ${v.n_results || 0} results
+            ${queriesHtml ? `searches: ${queriesHtml} · ` : ""}
+            ${callsLabel}
             ${v.entity_kind ? ` · kind: ${escape(v.entity_kind)}` : ""}
           </div>
           ${acceptBtn ? `<div style="margin-top:8px;">${acceptBtn}</div>` : ""}
@@ -974,6 +1245,22 @@ async function renderCsv(cluster) {
   const source = cluster.source;
   const targetRow = cluster.row ?? 0;
   const flagged = new Set(cluster.columns || []);
+  // Affected-rows set: union of every detection's ``affected_rows``
+  // in this cluster, minus the primary row. Painted in the context
+  // table so a row_duplication cluster shows the whole group
+  // highlighted, not just the canonical row.
+  const affectedRows = new Set();
+  for (const d of cluster.detections || []) {
+    for (const r of d.affected_rows || []) {
+      const n = Number(r);
+      if (Number.isFinite(n)) affectedRows.add(n);
+    }
+  }
+  affectedRows.delete(targetRow);
+  // For row_duplication clusters, highlight the target row as part
+  // of the duplicate group too so the visual band is contiguous and
+  // the operator can see at a glance which rows are siblings.
+  const isDupCluster_ = (cluster.error_types || []).includes("row_duplication");
   state.currentSource = source;
   state.currentTargetRow = targetRow;
   state.currentColumns = flagged;
@@ -1044,7 +1331,11 @@ async function renderCsv(cluster) {
   html += "</tr></thead><tbody>";
   for (const r of data.rows) {
     const isTarget = r.row === targetRow;
-    html += `<tr class="row-idx${isTarget ? " target" : ""}" data-row="${escape(String(r.row))}"><td>${escape(String(r.row))}</td>`;
+    const isDup = affectedRows.has(r.row) || (isDupCluster_ && isTarget);
+    const rowCls = ["row-idx", isTarget ? "target" : "", isDup ? "dup-group" : ""]
+      .filter(Boolean)
+      .join(" ");
+    html += `<tr class="${rowCls}" data-row="${escape(String(r.row))}"><td>${escape(String(r.row))}</td>`;
     for (const col of data.columns) {
       const flag = flagged.has(col) && isTarget;
       const ce = cellMap.get(`${r.row}\x00${col}`);
@@ -1477,6 +1768,15 @@ async function skipRowSiblings(currentCluster) {
 
 async function submitLabel(status, { advance = true } = {}) {
   if (!state.cluster) return;
+  // Re-entrancy guard: a fast operator can press Enter (or 1-5) again
+  // while the previous POST is still in flight, which would race two
+  // /api/labels writes on the same cluster and double-fire the
+  // same-value propagation. We drop the second click silently - the
+  // verdict for the same cluster is idempotent and `advance` will
+  // happen at the end of the first call anyway.
+  if (submitLabel._inFlight) return;
+  submitLabel._inFlight = true;
+  document.body.classList.add("saving");
   const c = state.cluster.cluster;
   const corrected = ($("#corrected-value")?.value ?? "").trim();
   const note = ($("#note")?.value ?? "");
@@ -1563,6 +1863,9 @@ async function submitLabel(status, { advance = true } = {}) {
     if (advance) selectIndex(nextUnlabeledIndex(state.index + 1));
   } catch (e) {
     toast(`error: ${e.message}`, 3000);
+  } finally {
+    submitLabel._inFlight = false;
+    document.body.classList.remove("saving");
   }
 }
 

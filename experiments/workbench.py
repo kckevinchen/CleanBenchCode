@@ -31,7 +31,8 @@ if str(PROJECT_ROOT) not in sys.path:
 def _load_dotenv(path: Path) -> None:
     """Tiny zero-dep ``.env`` loader.
 
-    The web-verifier needs ``TAVILY_API_KEY`` (and ``LLMClient`` reads
+    The web-verifier needs ``AZURE_AGENTS_ENDPOINT`` and
+    ``AZURE_AGENTS_VERIFIER_AGENT_ID`` (and ``LLMClient`` reads
     ``AZURE_OPENAI_*``) at request time. We load ``<repo>/.env`` here so
     operators can run ``python -m experiments.workbench`` without
     having to remember ``set -a; source .env`` first. We do NOT

@@ -58,15 +58,15 @@ Total detection calls =
 
 ## Error-type taxonomy
 
-The 20 keys in [`prompts/error_types.yaml`](prompts/error_types.yaml)
+The 13 keys in [`prompts/error_types.yaml`](prompts/error_types.yaml)
 mirror `error_type.csv` row-for-row, grouped by Scope:
 
 | Scope | Types | column_mode |
 |---|---|---|
 | **Single-Column** *(default)* | typo, text_inconsistency, casing_inconsistency, pattern_inconsistency, punctuation_inconsistency, number_format_inconsistency, semantic_incompatible, numeric_outlier | `single` ok |
-| **Multi-Column** *(intra-row)* | missing_value, embedded_value_error, cross_column_inconsistency, fd_violation, row_calculation_inconsistency, business_rule_violation | `all` required |
-| **Multi-Row** *(intra-table)* | column_aggregation_inconsistency, row_duplication, cross_record_inconsistency | `all` required |
-| **Multi-Table** *(rare in single-table chunks)* | cross_table_error, cross_source_naming_conflict, value_representation_conflict | `all` required |
+| **Multi-Column** *(intra-row)* | fd_violation, row_calculation_inconsistency, string_calculation_inconsistency | `all` required |
+| **Multi-Row** *(intra-table)* | row_duplication | `all` required |
+| **Multi-Table** *(rare in single-table chunks)* | inter_table_inconsistency | `all` required |
 
 Subset via `prompts.error_types` in `config/experiment.yaml` or
 `--error-types` on the CLI. List the active set with
@@ -107,7 +107,7 @@ python -m experiments.run_cleaning_detection --column-mode all
 
 # Cross-column / cross-row types (require column_mode=all)
 python -m experiments.run_cleaning_detection \
-  --error-types typo,cross_column_inconsistency,fd_violation,row_duplication \
+  --error-types typo,fd_violation,row_calculation_inconsistency,row_duplication \
   --column-mode all --chunk-size 20
 
 # Run on a folder of CSVs (multi-CSV mode; per-CSV tabs in the dashboard)

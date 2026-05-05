@@ -39,7 +39,14 @@ logger = logging.getLogger(__name__)
 # without extra coercion. Validated in :func:`iter_chunks`.
 COLUMN_MODE_ALL = "all"
 COLUMN_MODE_SINGLE = "single"
+# Dispatcher-only mode: the chunker never sees ``auto`` (it raises if
+# fed to :func:`iter_chunks`); instead, the run-cleaning-detection
+# entry point splits selected error types by scope and invokes the
+# detector twice - single-column-scope types against ``single`` chunks
+# and the rest against ``all`` chunks.
+COLUMN_MODE_AUTO = "auto"
 VALID_COLUMN_MODES = {COLUMN_MODE_ALL, COLUMN_MODE_SINGLE}
+VALID_DISPATCHER_COLUMN_MODES = VALID_COLUMN_MODES | {COLUMN_MODE_AUTO}
 
 
 @dataclass

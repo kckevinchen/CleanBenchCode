@@ -68,14 +68,7 @@ class _ClusterShim:
         return self.data
 
 
-def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
-    with path.open("r", encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if line:
-                out.append(json.loads(line))
-    return out
+from src.core.jsonl_io import read_jsonl as _read_jsonl  # noqa: E402
 
 
 def _load_source_frames(

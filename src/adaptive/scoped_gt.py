@@ -872,37 +872,20 @@ def evaluate_stop(
             "ensure global_default is fully populated."
         )
 
-    # Good-Turing criterion: point estimate of next-emission missing
-    # mass below ``epsilon``. GT is upward-biased for the true missing
-    # mass so the point estimate is already conservative; no CI wrap.
-    gt_ok = estimate.good_turing_missing_mass <= epsilon
-    # Chao1 criterion: upper 95% CI on missing count, normalised by
-    # S_obs, below ``epsilon_chao1``. Chao1 is a *lower* bound on S, so
-    # ``chao1_ci_95_high - n_observed`` is the conservative upper end
-    # of the missing count.
-    if estimate.n_observed > 0:
-        f0_upper = max(
-            0.0, estimate.chao1_ci_95_high - estimate.n_observed
-        )
-        chao1_ratio = f0_upper / estimate.n_observed
-    else:
-        # No species observed yet: estimator is degenerate. Treat as
-        # "satisfied" only if pure-GT mode is in use (which itself
-        # returns p_miss=0 in this regime); otherwise fail safe.
-        chao1_ratio = float("inf")
-    chao1_ok = chao1_ratio <= epsilon_chao1
+    # Saturation criterion is shared with the inner adaptive loop
+    # (``src.adaptive.inner_loop.run_adaptive``) so the row-duplication
+    # adjudicator and canonicaliser, the per-chunk LLM scan, and this
+    # outer per-arm loop all apply the *same* FN-control rule.
+    from ._chao1 import is_saturated_by_estimate
 
-    if stop_when == "gt":
-        criterion_ok = gt_ok
-    elif stop_when == "chao1":
-        criterion_ok = chao1_ok
-    elif stop_when == "both":
-        criterion_ok = gt_ok and chao1_ok
-    else:
-        raise ValueError(
-            f"ArmConfig.stop_when has unknown value {stop_when!r}; "
-            "expected one of 'gt', 'chao1', 'both'."
-        )
+    criterion_ok = is_saturated_by_estimate(
+        n_observed=estimate.n_observed,
+        good_turing_missing_mass=estimate.good_turing_missing_mass,
+        chao1_ci_95_high=estimate.chao1_ci_95_high,
+        epsilon=epsilon,
+        epsilon_chao1=epsilon_chao1,
+        stop_when=stop_when,
+    )
 
     sat_now = criterion_ok and estimate.num_runs >= k_min
     new_streak = previous_streak + 1 if sat_now else 0

@@ -205,12 +205,20 @@ function renderCells(cells) {
     const aSnip = c.a_issues.length ? snippet(c.a_issues[0]) : `<span class="cmp-issue-empty">—</span>`;
     const bSnip = c.b_issues.length ? snippet(c.b_issues[0]) : `<span class="cmp-issue-empty">—</span>`;
     const bucketLabel = (c.buckets && c.buckets.length) ? c.buckets.join(", ") : (c.bucket || "");
+    // Whole-row issues (e.g. ``row_duplication``) come back from the
+    // backend with a sentinel column ``(whole row)`` so the diff list
+    // can show them. Render that as muted italic prose - it isn't a
+    // real column header.
+    const isWholeRow = c.column === "(whole row)";
+    const colCell = isWholeRow
+      ? `<span class="muted" style="font-style:italic;">whole row</span>`
+      : `<code>${escape(c.column)}</code>`;
     return `<tr>
       <td><span class="cmp-side-badge cmp-side-${c.side}">${c.side === "a_only" ? "A only" : c.side === "b_only" ? "B only" : "both"}</span></td>
       <td><code>${escape(bucketLabel)}</code></td>
       <td><code>${escape(c.source)}</code></td>
       <td class="num">${escape(String(c.row))}</td>
-      <td><code>${escape(c.column)}</code></td>
+      <td>${colCell}</td>
       <td class="cmp-issue-snippet">${aSnip}</td>
       <td class="cmp-issue-snippet">${bSnip}</td>
       <td><button type="button" class="cmp-view-btn"
@@ -312,13 +320,16 @@ function renderFrameContext(frame, targetRow, targetCol) {
     const s = String(v ?? "");
     return s.length > colWidth ? s.slice(0, colWidth - 1) + "…" : s.padEnd(colWidth, " ");
   };
+  // Whole-row issues highlight the entire target row rather than a
+  // single cell (there isn't a single suspect column).
+  const wholeRow = targetCol === "(whole row)";
   const header = ["row".padEnd(5), ...cols.map(fmt)].join(" │ ");
   const lines = [escape(header), escape("─".repeat(header.length))];
   for (const r of frame.rows) {
     const cells = cols.map((c) => {
       const v = r.values[c];
       const cell = fmt(v);
-      if (r.row === targetRow && c === targetCol) {
+      if (r.row === targetRow && (wholeRow || c === targetCol)) {
         return `<span class="cell-target">${escape(cell)}</span>`;
       }
       return escape(cell);

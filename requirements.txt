@@ -6,8 +6,15 @@
 # Azure OpenAI client (Chat Completions + Responses APIs).
 openai>=1.0.0
 
-# Entra ID auth for Azure OpenAI (AzureCliCredential, bearer token provider).
+# Entra ID auth for Azure OpenAI / Foundry Agents (AzureCliCredential,
+# bearer token provider).
 azure-identity>=1.14.0
+
+# Microsoft Foundry Agents Service client. Used by the web-grounded
+# verifier (src/verifier/agent_backend.py) to drive an agent equipped
+# with the Web Search tool. AzureCliCredential is the only auth path
+# we rely on, so no extra secrets are needed beyond `az login`.
+azure-ai-agents>=1.0.0
 
 # CSV loading, chunking, and Markdown table rendering for prompts.
 pandas>=1.5.0
@@ -27,6 +34,12 @@ tqdm>=4.65
 # Latin-script non-English tables (French, Spanish, German, ...).
 langdetect>=1.0.9
 
+# Higher-accuracy language identifier used in `--language-check lingua`
+# (the default). Materially better than `langdetect` on short, header-
+# heavy samples extracted from CSVs - correctly flags single Dutch /
+# German / French tokens that langdetect's tri-gram model misses.
+lingua-language-detector>=2.0
+
 # Workbench web app (experiments.workbench). FastAPI serves both the
 # JSON API and the static frontend; uvicorn is the ASGI runner. Kept
 # optional-feeling here because the detection pipeline itself does not
@@ -38,3 +51,16 @@ uvicorn>=0.27
 # transitively by FastAPI/Starlette - listed explicitly so a runner
 # without the labeling extras still gets it.
 httpx>=0.27
+
+# Row-duplication MinHash LSH clusterer (src.core.row_dup_clusterers).
+# Used by ``MinHashLSHClusterer`` to cheaply surface near-duplicate
+# rows that share token signatures but no exact key. Pure-Python with
+# a NumPy/scipy backend; safe to skip if you only run the
+# KeyCollisionClusterer.
+datasketch>=1.6
+
+# Optional: sentence-embedding near-duplicate clusterer
+# (src.core.row_dup_clusterers.EmbeddingClusterer). Heavy: pulls in
+# torch (~2GB). Only install if you plan to enable
+# ``row_duplication.embedding_enabled``.
+sentence-transformers>=2.2

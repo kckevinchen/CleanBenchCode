@@ -20,6 +20,7 @@ __all__ = [
     "frequency_of_frequencies",
     "ChaoCore",
     "compute_core",
+    "is_saturated_by_estimate",
 ]
 
 
@@ -93,22 +94,33 @@ def frequency_of_frequencies(
 ) -> Dict[int, int]:
     """Bucket per-species emission counts into ``{r: n_r}``.
 
-    Each value in ``frequencies`` is the total number of detection
-    emissions for one species (Interpretation B: "individual" =
-    one detection emission, with NO within-pass de-duplication).
-    Counts are NOT capped at ``num_runs`` because under this
-    interpretation a species can be emitted multiple times within a
-    single pass, so ``R_x`` is unbounded above.
+    The function is agnostic to which Good-Turing interpretation the
+    caller is using:
+
+    * **Interpretation A (Bernoulli per pass)** -- ``r`` is the number
+      of passes (out of ``num_runs``) that observed the species. Used
+      by :mod:`src.core.relation_adaptive` and
+      :mod:`src.adaptive.inner_loop` where a "pass" is one LLM call
+      and the question is "did the species appear at least once in
+      this pass?". Under this interpretation ``r`` is bounded by
+      ``num_runs`` and ``p_0 = n_1 / N`` estimates the next-pass
+      missing mass.
+    * **Interpretation B (raw emission count)** -- ``r`` is the total
+      number of raw detection emissions for the species (no
+      within-pass de-duplication). Used by
+      :mod:`src.adaptive.scoped_gt` (``raw_hits``) where ``r`` may
+      exceed ``num_runs`` and ``p_0`` estimates next-emission missing
+      mass.
+
+    The closed-form math (Chao 1987 / Chao-Yang 1993) is identical
+    under both interpretations -- only the units of ``p_0`` differ,
+    so keep callers consistent within a single dashboard tile.
 
     The returned dict zero-fills ``r in [1, num_runs]`` for shape
     stability on empty / sparse arms; observed counts above
-    ``num_runs`` are added on top. Frequencies ``< 1`` are silently
-    dropped (a species with zero observations is not a species).
-
-    Both :mod:`cell_gt` and :mod:`scoped_gt` call this with the raw
-    emission count of their respective ``SpeciesRecord`` types, so
-    the input is taken as a raw iterable of ints to keep this
-    module decoupled from either dataclass.
+    ``num_runs`` are added on top (only relevant under Interpretation
+    B). Frequencies ``< 1`` are silently dropped (a species with zero
+    observations is not a species).
     """
     counts: Dict[int, int] = {r: 0 for r in range(1, max(num_runs, 1) + 1)}
     for r in frequencies:
@@ -225,4 +237,57 @@ def compute_core(
         fn_rate_point=fn_point,
         fn_rate_ci_95_low=fn_low,
         fn_rate_ci_95_high=fn_high,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Shared saturation predicate
+# ---------------------------------------------------------------------------
+
+
+def is_saturated_by_estimate(
+    *,
+    n_observed: int,
+    good_turing_missing_mass: float,
+    chao1_ci_95_high: float,
+    epsilon: float,
+    epsilon_chao1: float,
+    stop_when: str,
+) -> bool:
+    """Shared saturation criterion for adaptive loops.
+
+    Used by both the outer per-arm loop (``scoped_gt.evaluate_arm_stop``)
+    and the inner per-LLM-call loops (``adaptive.inner_loop.run_adaptive``)
+    so the FN-control semantics are identical at every layer.
+
+    Criteria:
+    * ``"gt"``    -- Good-Turing missing-mass point estimate
+                     ``p_0 <= epsilon``.
+    * ``"chao1"`` -- Chao1 upper-95 CI on missing count, normalised
+                     by ``S_obs``, ``<=  epsilon_chao1``. When
+                     ``S_obs == 0`` the estimator is degenerate and
+                     this branch is treated as failing-safe (False).
+    * ``"both"``  -- conjunction of the above.
+
+    Returns ``True`` if the configured criterion is met, else
+    ``False``. Callers combine this with ``k_min`` / ``k_max`` /
+    two-consecutive bookkeeping.
+    """
+    gt_ok = good_turing_missing_mass <= epsilon
+    if n_observed > 0:
+        f0_upper = max(0.0, chao1_ci_95_high - n_observed)
+        chao1_ratio = f0_upper / n_observed
+    else:
+        chao1_ratio = float("inf")
+    chao1_ok = chao1_ratio <= epsilon_chao1
+
+    if stop_when == "gt":
+        return gt_ok
+    if stop_when == "chao1":
+        return chao1_ok
+    if stop_when == "both":
+        return gt_ok and chao1_ok
+    raise ValueError(
+        f"is_saturated_by_estimate: unknown stop_when={stop_when!r}; "
+        "expected one of 'gt', 'chao1', 'both'."
     )

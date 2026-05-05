@@ -16,7 +16,10 @@ from __future__ import annotations
 import logging
 import random
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Tuple, Type
+from typing import Any, Dict, List, Mapping, Optional, TYPE_CHECKING, Tuple, Type
+
+if TYPE_CHECKING:  # pragma: no cover
+    import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -72,4 +75,68 @@ def register_injector(cls: Type[Injector]) -> Type[Injector]:
     if cls.name in INJECTOR_REGISTRY and INJECTOR_REGISTRY[cls.name] is not cls:
         raise ValueError(f"Injector name collision: {cls.name!r}")
     INJECTOR_REGISTRY[cls.name] = cls
+    return cls
+
+
+# ---------------------------------------------------------------------------
+# Workbook-scope injectors (cross-sheet perturbations) -- Gap G
+# ---------------------------------------------------------------------------
+
+
+class WorkbookInjector:
+    """Cross-sheet perturbation operating on a multi-sheet workbook.
+
+    Unlike the per-cell :class:`Injector` protocol, workbook injectors
+    take a mapping ``{sheet: DataFrame}`` and return a *new* mapping
+    with the perturbation applied across one or more sheets, plus the
+    list of :class:`InjectionRecord` describing every cell touched.
+
+    Implementations should be deterministic given the same inputs and
+    ``rng`` and must not mutate the supplied frames in place
+    (callers should pass copies, but defensive ``.copy()`` is cheap).
+
+    Subclass contract
+    -----------------
+    * Set the class-level ``name`` (snake_case, used in CLI flags +
+      manifest) and ``error_type`` (taxonomy slug emitted on each
+      :class:`InjectionRecord`).
+    * Override :meth:`try_inject` to return
+      ``(new_frames, [InjectionRecord, ...])`` on success or
+      ``None`` when the injector cannot apply to this workbook.
+    * Optionally override :meth:`applicable` for cheaper pre-checks
+      (default: ``len(frames) >= min_sheets``).
+    * Override ``min_sheets`` if more than 2 sibling sheets are
+      required.
+    """
+
+    name: str = ""
+    error_type: str = ""
+    #: Minimum number of sheets in the workbook required for this
+    #: injector to apply.
+    min_sheets: int = 2
+
+    def applicable(self, frames: "Mapping[str, pd.DataFrame]") -> bool:
+        return len(frames) >= self.min_sheets
+
+    def try_inject(
+        self,
+        frames: "Mapping[str, pd.DataFrame]",
+        *,
+        rng: random.Random,
+    ) -> "Optional[Tuple[Dict[str, pd.DataFrame], List[InjectionRecord]]]":
+        """Return ``(new_frames, [InjectionRecord, ...])`` or ``None``
+        if the injector cannot apply to this workbook (e.g. no
+        suitable shared column)."""
+        raise NotImplementedError
+
+
+WORKBOOK_INJECTOR_REGISTRY: Dict[str, Type[WorkbookInjector]] = {}
+
+
+def register_workbook_injector(cls: Type[WorkbookInjector]) -> Type[WorkbookInjector]:
+    if not cls.name:
+        raise ValueError(f"WorkbookInjector {cls.__name__} must set 'name'")
+    if cls.name in WORKBOOK_INJECTOR_REGISTRY and WORKBOOK_INJECTOR_REGISTRY[cls.name] is not cls:
+        raise ValueError(f"WorkbookInjector name collision: {cls.name!r}")
+    WORKBOOK_INJECTOR_REGISTRY[cls.name] = cls
     return cls

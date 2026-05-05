@@ -19,6 +19,9 @@ from .base import (
     Injector,
     INJECTOR_REGISTRY,
     register_injector,
+    WorkbookInjector,
+    WORKBOOK_INJECTOR_REGISTRY,
+    register_workbook_injector,
 )
 
 from . import (  # noqa: F401  (registration side-effects)
@@ -27,6 +30,7 @@ from . import (  # noqa: F401  (registration side-effects)
     numeric,
     typo,
     whitespace_inject,
+    multi_table,
 )
 
 __all__ = [
@@ -34,4 +38,7 @@ __all__ = [
     "Injector",
     "INJECTOR_REGISTRY",
     "register_injector",
+    "WorkbookInjector",
+    "WORKBOOK_INJECTOR_REGISTRY",
+    "register_workbook_injector",
 ]

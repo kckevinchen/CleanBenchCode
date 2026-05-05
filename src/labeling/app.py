@@ -64,6 +64,11 @@ from .schema import (
     cell_target_id,
 )
 from .store import LabelStore
+from .relation_review_store import (
+    RelationReviewStore,
+    ReviewIn as RelationReviewIn,
+    ReviewDecision as RelationReviewDecision,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1063,9 +1068,10 @@ def create_app(
 
         Used by the "Verify on web" button in the labeling UI for
         clusters the batch verifier didn't pick up. Synchronous - the
-        UI shows a spinner while we make the Tavily + LLM calls
-        (typically 5-15 s per cluster). Returns the new verification
-        record on success.
+        UI shows a spinner while we make the Foundry agent call
+        (typically 5-30 s per cluster, depending on how many web
+        searches the agent decides to run). Returns the new
+        verification record on success.
 
         Status codes:
         * ``200`` - verification produced (verdict may be any of
@@ -1075,15 +1081,15 @@ def create_app(
           double-click; refuse to clobber).
         * ``422`` - cluster is gate-rejected (PII column / non-entity
           column with no whitelisted error_type / unsuitable value).
-        * ``500`` - missing API key, prompt file unreadable, etc.
+        * ``500`` - missing agent config, prompt file unreadable, etc.
         """
         ctx = cache.get(run_id)
         if ctx.cluster(cluster_id) is None:
             raise HTTPException(404, f"cluster not found: {cluster_id}")
         # Importing inside the handler keeps the labeling-app
         # importable even when the verifier package has unmet
-        # dependencies (httpx is the only one and is already required
-        # transitively by FastAPI, but be defensive).
+        # dependencies (the only network-side dep is azure-ai-agents,
+        # which is required by requirements.txt; be defensive anyway).
         try:
             from experiments.run_web_verify import (  # noqa: WPS433
                 VerifyError,
@@ -1483,6 +1489,63 @@ def create_app(
             "cells": propagated_cells,
         }
 
+    # ---------------------------------------------------------------
+    # Relation-review endpoints (approve / reject / add custom).
+    # Backed by ``<run_dir>/relation_reviews.jsonl``. Latest decision
+    # per ``relation_id`` (= species_key) wins. ``added`` decisions
+    # carry a full ``relation`` snapshot so user-authored relations
+    # survive when the LLM rerun changes the discovered set.
+    # ---------------------------------------------------------------
+
+    _relation_review_stores: Dict[str, RelationReviewStore] = {}
+    _relation_review_lock = threading.Lock()
+
+    def _relation_review_store(run_id: str) -> RelationReviewStore:
+        rd = cache._safe_run_dir(run_id)
+        if not rd.is_dir():
+            raise HTTPException(404, f"run not found: {run_id}")
+        with _relation_review_lock:
+            store = _relation_review_stores.get(run_id)
+            if store is None:
+                store = RelationReviewStore(rd / "relation_reviews.jsonl")
+                _relation_review_stores[run_id] = store
+            return store
+
+    @app.get("/api/runs/{run_id}/relation-reviews")
+    def list_relation_reviews(run_id: str) -> Dict[str, Any]:
+        store = _relation_review_store(run_id)
+        records = [r.model_dump(mode="json") for r in store.all()]
+        latest = {
+            rid: rec.model_dump(mode="json")
+            for rid, rec in store.latest_by_relation().items()
+        }
+        return {"records": records, "latest": latest}
+
+    @app.post("/api/runs/{run_id}/relation-reviews")
+    def post_relation_review(
+        run_id: str,
+        payload: RelationReviewIn,
+    ) -> Dict[str, Any]:
+        if payload.decision == RelationReviewDecision.ADDED:
+            if payload.relation is None:
+                raise HTTPException(
+                    400,
+                    "decision=added requires a 'relation' snapshot in the body",
+                )
+            if not payload.relation.kind:
+                raise HTTPException(400, "relation.kind is required")
+            if not payload.relation.columns:
+                raise HTTPException(400, "relation.columns must be non-empty")
+        store = _relation_review_store(run_id)
+        record = store.append(payload)
+        return {
+            "record": record.model_dump(mode="json"),
+            "latest": {
+                rid: rec.model_dump(mode="json")
+                for rid, rec in store.latest_by_relation().items()
+            },
+        }
+
     @app.get("/api/runs/{run_id}/stats")
     def stats(run_id: str) -> Dict[str, Any]:
         ctx = cache.get(run_id)
@@ -1750,7 +1813,7 @@ def create_app(
         path = outputs_dir / run_id / "report.html"
         if not path.exists():
             raise HTTPException(404, "report.html not generated for this run")
-        # The schema-discovery dashboard is a self-contained,
+        # The relation-discovery dashboard is a self-contained,
         # generated HTML artifact with inline <script>/<style> blocks
         # (no third-party origins, no remote loads). The workbench's
         # default strict CSP would block its inline JS, so we relax
@@ -1911,11 +1974,12 @@ def create_app(
     @app.get("/api/launcher/config")
     def launcher_config() -> Dict[str, Any]:
         defaults = load_config_defaults(project_root)
-        # Schema-discovery prompt: surface the subset of error types
+        # Relation-discovery prompt: surface the subset of error types
         # for which we have a discovery template, so the UI can filter
         # the chip list down to multi-column / multi-row / multi-table
         # types only.
         relations_types: List[str] = []
+        relations_type_scopes: Dict[str, str] = {}
         try:
             import yaml
             disc_path = project_root / "prompts" / "discover_relations.yaml"
@@ -1924,16 +1988,25 @@ def create_app(
                 types_node = raw.get("types") or {}
                 if isinstance(types_node, dict):
                     relations_types = sorted(types_node.keys())
+                    # Surface per-type scope so the launcher chip can
+                    # show a tooltip explaining that ``table`` types
+                    # only fire on multi-sheet workbooks.
+                    for et_key, et_node in types_node.items():
+                        if isinstance(et_node, dict):
+                            scope = str(et_node.get("scope") or "row")
+                            relations_type_scopes[et_key] = scope
         except Exception:  # noqa: BLE001
             relations_types = []
+            relations_type_scopes = {}
         return {
             "project_root": str(project_root),
             "defaults": defaults,
             "error_types": load_taxonomy_keys(project_root),
             "relations_error_types": relations_types,
+            "relations_error_type_scopes": relations_type_scopes,
             "datasets": list_datasets(project_root / "data"),
             "scopes": ["single-column", "multi-column", "multi-row", "multi-table"],
-            "column_modes": ["single", "all"],
+            "column_modes": ["auto", "single", "all"],
             "modes": ["single", "adaptive"],
             "reasoning_efforts": ["low", "medium", "high"],
             "gt_modes": ["fixed", "adaptive"],
@@ -1970,6 +2043,14 @@ def create_app(
                     raise HTTPException(400, "run_id is required for kind=relation_report")
                 try:
                     job = jobs.launch_relation_report(run_id)
+                except FileNotFoundError as exc:
+                    raise HTTPException(404, str(exc)) from exc
+            elif kind == "relation_validation":
+                run_id = payload.get("run_id")
+                if not run_id:
+                    raise HTTPException(400, "run_id is required for kind=relation_validation")
+                try:
+                    job = jobs.launch_relation_validation(run_id, params=params)
                 except FileNotFoundError as exc:
                     raise HTTPException(404, str(exc)) from exc
             else:
@@ -2035,15 +2116,70 @@ def _cluster_summary(c: Mapping[str, Any]) -> Dict[str, Any]:
     primary = None
     if isinstance(syn, Mapping):
         primary = syn.get("primary_error_type")
+    error_types = list(c.get("error_types") or [])
+    # For row_duplication clusters, surface the duplicate-group row
+    # list (union of every detection's ``affected_rows`` plus the
+    # primary row) so the queue panel can show "rows: 5, 12, 27" at
+    # a glance instead of forcing the operator to open each cluster
+    # and scan the context table.
+    affected_rows: List[int] = []
+    if "row_duplication" in error_types:
+        seen: set = set()
+        primary_row = c.get("row")
+        if isinstance(primary_row, (int, float)):
+            seen.add(int(primary_row))
+        for d in c.get("detections") or []:
+            for r in (d.get("affected_rows") or []) if isinstance(d, Mapping) else []:
+                try:
+                    seen.add(int(r))
+                except (TypeError, ValueError):
+                    continue
+        affected_rows = sorted(seen)
+    # Verdict / strategy: row_duplication clusters carry these on
+    # each detection. We surface the strongest verdict (duplicate
+    # beats near_duplicate) and the union of strategies so the queue
+    # panel can show a "near-dup" badge alongside the row list.
+    verdict = ""
+    discovery_strategies: List[str] = []
+    cluster_budget_exhausted = False
+    max_groups_per_source = 0
+    if "row_duplication" in error_types:
+        verdict_rank = {"duplicate": 2, "near_duplicate": 1}
+        seen_strats: set = set()
+        best_rank = -1
+        for d in c.get("detections") or []:
+            if not isinstance(d, Mapping):
+                continue
+            v = str(d.get("verdict", "") or "").strip().lower()
+            if v in verdict_rank and verdict_rank[v] > best_rank:
+                best_rank = verdict_rank[v]
+                verdict = v
+            s = str(d.get("discovery_strategy", "") or "").strip()
+            if s and s not in seen_strats:
+                seen_strats.add(s)
+                discovery_strategies.append(s)
+            if d.get("cluster_budget_exhausted"):
+                cluster_budget_exhausted = True
+                try:
+                    cap = int(d.get("max_groups_per_source") or 0)
+                except (TypeError, ValueError):
+                    cap = 0
+                if cap > max_groups_per_source:
+                    max_groups_per_source = cap
     return {
         "cluster_id": c.get("cluster_id"),
         "source": c.get("source"),
         "row": c.get("row"),
         "columns": list(c.get("columns") or []),
-        "error_types": list(c.get("error_types") or []),
+        "error_types": error_types,
         "evidence_count": c.get("evidence_count"),
         "primary_error_type": primary,
-        "is_multi_type": len(c.get("error_types") or []) >= 2,
+        "is_multi_type": len(error_types) >= 2,
+        "affected_rows": affected_rows,
+        "verdict": verdict,
+        "discovery_strategies": discovery_strategies,
+        "cluster_budget_exhausted": cluster_budget_exhausted,
+        "max_groups_per_source": max_groups_per_source,
     }
 
 

@@ -50,23 +50,36 @@ logger = logging.getLogger("compare_runs")
 
 
 # ---------------------------------------------------------------------------
-# Bucketing: collapse the LLM's 20-type taxonomy onto the smaller set
-# of categories every heuristic actually targets. Anything not in this
-# map keeps its raw error_type and ends up in a per-type bucket the
-# heuristics can't touch (cross-table, semantic, business-rule, ...).
+# Bucketing: collapse the LLM's 13-type taxonomy onto buckets the
+# compare-runs panel can usefully diff. Most types map to themselves;
+# the only deliberate fold is ``number_format_inconsistency`` ->
+# ``pattern_inconsistency`` because the heuristics treat them as one
+# class (numeric format mismatches are a special case of pattern
+# minorities). Anything not in this map keeps its raw ``error_type``
+# string and ends up in a per-type bucket the heuristics cannot
+# produce - which is fine; we just want every error_type the
+# detectors can emit to be VISIBLE in the bucket overlap table.
 # ---------------------------------------------------------------------------
 
 
 ERROR_TYPE_BUCKETS = {
+    # ---- single-column ---------------------------------------------
     "typo": "typo",
     "text_inconsistency": "text_inconsistency",
     "casing_inconsistency": "casing_inconsistency",
     "pattern_inconsistency": "pattern_inconsistency",
     "punctuation_inconsistency": "punctuation_inconsistency",
     "number_format_inconsistency": "pattern_inconsistency",
+    "semantic_incompatible": "semantic_incompatible",
     "numeric_outlier": "numeric_outlier",
+    # ---- multi-column (intra-row) ----------------------------------
     "fd_violation": "fd_violation",
-    "cross_column_inconsistency": "fd_violation",
+    "row_calculation_inconsistency": "row_calculation_inconsistency",
+    "string_calculation_inconsistency": "string_calculation_inconsistency",
+    # ---- multi-row (intra-table) -----------------------------------
+    "row_duplication": "row_duplication",
+    # ---- multi-table -----------------------------------------------
+    "inter_table_inconsistency": "inter_table_inconsistency",
 }
 
 
@@ -74,12 +87,16 @@ def _bucket(error_type: str) -> str:
     return ERROR_TYPE_BUCKETS.get(error_type, error_type or "unknown")
 
 
-# Error-type buckets that at least one heuristic targets. Buckets
-# outside this set get an ``n/a`` recall row in the report.
+# Error-type buckets that at least one heuristic targets. Used by the
+# LLM-vs-heuristic ``compare`` (recall + FN-floor) report; buckets
+# outside this set get an ``n/a`` recall row in the markdown table.
+# Keep this in sync with the detectors under ``src/heuristics/`` and
+# ``src/core/row_duplication_detector.py``.
 HEURISTIC_BUCKETS = {
     "typo", "text_inconsistency", "casing_inconsistency",
     "pattern_inconsistency", "punctuation_inconsistency",
     "numeric_outlier", "fd_violation",
+    "row_duplication",
 }
 
 
@@ -88,14 +105,7 @@ HEURISTIC_BUCKETS = {
 # ---------------------------------------------------------------------------
 
 
-def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
-    with path.open("r", encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if line:
-                out.append(json.loads(line))
-    return out
+from src.core.jsonl_io import read_jsonl as _read_jsonl  # noqa: E402
 
 
 def _load_run_issues(run_dir: Path) -> List[Dict[str, Any]]:
@@ -117,6 +127,15 @@ def _load_run_issues(run_dir: Path) -> List[Dict[str, Any]]:
 
 
 CellKey = Tuple[str, int, str]  # (source, row, folded_column)
+
+# Sentinel column key for whole-row issues (e.g. ``row_duplication``).
+# row-level issues have ``columns: []`` in ``issues.jsonl``; rather
+# than dropping them silently, we slot each into a virtual cell so
+# the per-bucket overlap table and the diff list can show them. The
+# label is intentionally non-empty + non-numeric so it never
+# collides with a real column header (``_fold_col`` keeps the
+# parentheses, which no real column header carries).
+WHOLE_ROW_COL = "(whole row)"
 
 
 def _fold_col(col: str) -> str:
@@ -159,14 +178,23 @@ def _index_cells(
         if not isinstance(row, int):
             continue
         cols = it.get("columns") or []
+        bucket_key = _bucket(str(it.get("error_type", "") or ""))
         if not cols:
-            # Skip whole-row issues (rare; they don't align with the
-            # per-cell heuristics).
+            # Whole-row issue (e.g. row_duplication). Slot under a
+            # sentinel column so the per-bucket overlap and diff list
+            # surface it instead of silently dropping. ``row`` is the
+            # primary row for this issue; the duplicate group as a
+            # whole gets one entry per row in ``affected_rows`` (each
+            # of which is emitted as its own issue by the detector,
+            # so we don't need to re-expand here).
+            key = (source, int(row), _fold_col(WHOLE_ROW_COL))
+            out[key][bucket_key].append(it)
+            display.setdefault(key, WHOLE_ROW_COL)
             continue
         for col in cols:
             col_s = str(col)
             key = (source, int(row), _fold_col(col_s))
-            out[key][_bucket(str(it.get("error_type", "") or ""))].append(it)
+            out[key][bucket_key].append(it)
             display.setdefault(key, col_s)
     return out, display
 

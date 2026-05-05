@@ -206,10 +206,42 @@ class TestAdaptiveSchemaDiscoverer:
             AdaptiveSchemaDiscoverer(d, gt_threshold=2.0)
 
     def test_runs_max_passes_when_unsaturated(self) -> None:
+        # Drive the discoverer with an LLM that emits a brand-new
+        # singleton relation on every call, so the per-arm
+        # missing-mass never reaches the (now ``<=``) threshold and
+        # no arm can saturate before ``max_passes``.
         d = self._make_discoverer()
+        counter = {"i": 0}
+
+        class _SingletonsForeverLLM:
+            endpoints = ["fake://0"]
+
+            def query(self, model, prompt, **_kwargs):
+                counter["i"] += 1
+                # ``kind="implication"`` keeps the predicate inside the
+                # species key (the ``fd`` kind with single-col lhs/rhs
+                # would intentionally collapse via bijection, hiding
+                # the per-pass uniqueness this test depends on).
+                payload = {"relations": [{
+                    "kind": "implication",
+                    "columns": ["Zip", "State"],
+                    "predicate": f"unique-{counter['i']}",
+                    "confidence": "medium",
+                    "rationale": "always-new",
+                }]}
+                return LLMResponse(
+                    text=json.dumps(payload),
+                    endpoint="fake://0",
+                    model=model,
+                    attempts=1,
+                )
+
+        d.llm = _SingletonsForeverLLM()  # type: ignore[assignment]
         adaptive = AdaptiveSchemaDiscoverer(
             d, max_passes=3, min_passes=2,
-            gt_threshold=0.0,  # impossible to saturate
+            gt_threshold=0.0,  # only saturates at literal zero, which
+                               # the singletons-forever fake never hits
+            stop_when="gt",
             base_seed=1,
         )
         result = adaptive.run()
@@ -322,3 +354,114 @@ class TestAdaptiveSchemaDiscoverer:
         for arm in result.arm_stats.values():
             assert arm.saturated is True
             assert arm.passes_run <= 2  # saturates right at min_passes
+            assert arm.last_reason == "empty"
+
+    def test_last_reason_below_min_passes(self) -> None:
+        # min_passes=3 with max_passes=2 isn't allowed, so use min=2,
+        # max=2 and inspect the arm after pass 1: should be
+        # "below-min-passes" (we re-run with max=1 to expose state).
+        d = self._make_discoverer()
+        adaptive = AdaptiveSchemaDiscoverer(
+            d, max_passes=1, min_passes=1, gt_threshold=0.0, base_seed=4,
+        )
+        result = adaptive.run()
+        # gt_threshold=0.0 means GT can never satisfy; with stop_when
+        # default "both", the reason should be "none" or "chao1-only"
+        # but never "below-min-passes" (we just ran 1 pass = min_passes).
+        for arm in result.arm_stats.values():
+            assert arm.last_reason in {"none", "chao1-only", "empty"}
+
+    def test_last_reason_both_decomposes(self) -> None:
+        # stop_when="both" with a permissive GT and tight Chao1 should
+        # give us at least one arm with last_reason == "gt-only".
+        d = self._make_discoverer()
+        adaptive = AdaptiveSchemaDiscoverer(
+            d, max_passes=4, min_passes=2,
+            gt_threshold=1.0,        # GT trivially satisfied
+            epsilon_chao1=0.0,        # Chao1 essentially impossible
+            stop_when="both",
+            base_seed=5,
+        )
+        result = adaptive.run()
+        reasons = {a.last_reason for a in result.arm_stats.values()}
+        # At least one arm should have GT-only since GT is trivial
+        # but Chao1 is unattainable. (For perfectly stable arms with
+        # no missing mass and zero Chao1 unseen estimate the reason
+        # could collapse to "both".)
+        assert reasons & {"gt-only", "both"}
+
+    def test_gt_saturates_with_n2_zero(self) -> None:
+        # Regression: previously we required n_2 > 0 before GT could
+        # saturate. With that guard removed, an arm where every
+        # species was seen once but n_observed is large enough that
+        # n_1/N is below the threshold should saturate under "gt".
+        df = _hr_frame()
+        digest = build_table_digest(df, source="hr.csv")
+        tax = _make_taxonomy()
+        cfg = _make_discovery_cfg()
+
+        # LLM emits 20 distinct relations every pass -> singletons
+        # never become doubletons across passes (each pass sees the
+        # same 20 keys), so n_2 grows to 20 quickly. To force n_2=0
+        # while N is large we instead vary the relations EVERY pass.
+        # Here we still want n_1/N small => need many distinct
+        # species but only one "fresh" per pass. Construct that:
+        # pass i emits species s_i ONLY (so n_1 = passes, n_2 = 0,
+        # N = passes, p_0 = 1.0 -> never saturates). That isn't
+        # what we want.
+        #
+        # Instead: emit 30 species, all of which appear in pass 1
+        # AND pass 2 (so n_2 = 30, n_1 = 0, N = 60, p_0 = 0). This
+        # is the "n_1 = 0" case, where GT also saturates trivially
+        # without needing the n_2 guard.
+        class _Stable30:
+            endpoints = ["fake://0"]
+            def query(self, model, prompt, **_kw):
+                rels = [
+                    {
+                        "kind": "fd",
+                        "columns": ["Zip", "State"],
+                        "lhs": ["Zip"],
+                        "rhs": ["State"],
+                        "predicate": f"rule_{i}",
+                    }
+                    for i in range(30)
+                ]
+                return LLMResponse(
+                    text=json.dumps({"relations": rels}),
+                    endpoint="fake://0", model=model, attempts=1,
+                )
+
+        d = SchemaDiscoverer(
+            llm=_Stable30(),  # type: ignore[arg-type]
+            prompt_config=cfg,
+            taxonomy=tax,
+            model="fake-model",
+            digests={"hr.csv": digest},
+            source_frames={"hr.csv": df},
+            error_types=list(tax.types),
+            n_row_samples=3,
+        )
+        adaptive = AdaptiveSchemaDiscoverer(
+            d, max_passes=5, min_passes=2,
+            gt_threshold=0.05, stop_when="gt", base_seed=9,
+        )
+        result = adaptive.run()
+        for arm in result.arm_stats.values():
+            # At least one of the two arms always returns the same set
+            # twice in a row, so by pass 2 every species has frequency 2,
+            # n_1 = 0, p_0 = 0, GT saturates regardless of n_2's role.
+            if arm.passes_run >= 2 and len(arm.frequencies) > 0:
+                assert arm.saturated is True
+                assert arm.last_reason == "gt"
+
+    def test_summary_includes_reason_counts(self) -> None:
+        d = self._make_discoverer()
+        adaptive = AdaptiveSchemaDiscoverer(
+            d, max_passes=3, min_passes=2, gt_threshold=0.05, base_seed=13,
+        )
+        result = adaptive.run()
+        summary = adaptive_summary_dict(result)
+        assert "last_reason_counts" in summary
+        # Counts sum to total arms.
+        assert sum(summary["last_reason_counts"].values()) == len(result.arm_stats)

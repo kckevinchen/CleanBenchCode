@@ -1,54 +1,34 @@
-"""End-to-end Verifier loop tests with a stubbed LLM and StubWebSearch.
+"""End-to-end Verifier loop tests with a StubAgentBackend.
 
 Covers the contract:
   * confirmed_error verdicts pass through with canonical_value + evidence
-  * fabricated URLs (not in the snippets we showed the model) are dropped
+  * fabricated URLs (not in the runtime's url_citation set) are dropped
   * confirmed_error w/o surviving evidence is downgraded to ambiguous
   * false_positive / ambiguous verdicts pass through cleanly
+  * the system prompt from verify_entity.yaml reaches the backend
   * persistence (write_verifications -> load_verifications) round-trips
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List
 
 import pytest
 
-from src.core.llm_client import LLMResponse
-from src.verifier import Verifier, VerifierConfig
-from src.verifier.gate import EntityKind, GateConfig
+from src.verifier import (
+    AgentVerdict,
+    Citation,
+    StubAgentBackend,
+    Verifier,
+    VerifierConfig,
+)
+from src.verifier.gate import EntityKind
 from src.verifier.verify import load_verifications, write_verifications
-from src.verifier.web_tool import SearchHit, SearchResult, StubWebSearch
 
 
 PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "verify_entity.yaml"
-
-
-@dataclass
-class StubLLM:
-    """LLMClient stand-in: returns a canned text per call.
-
-    Mirrors the public ``query()`` signature of :class:`LLMClient` so
-    :class:`Verifier` cannot tell the difference. Tracks every call on
-    ``calls`` for assertions.
-    """
-
-    responses: List[str]
-    calls: List[Dict] = None  # type: ignore[assignment]
-    endpoints: List[str] = None  # type: ignore[assignment]
-
-    def __post_init__(self):
-        self.calls = []
-        self.endpoints = ["https://stub/"]
-
-    def query(self, model, prompt, *, reasoning_effort="medium",
-              reasoning_summary="detailed", system_prompt=""):
-        self.calls.append({"model": model, "prompt": prompt, "system": system_prompt})
-        text = self.responses.pop(0) if self.responses else "{}"
-        return LLMResponse(text=text, endpoint="https://stub/", model=model, attempts=1)
 
 
 def _make_cell_lookup(values: Dict[tuple, str]):
@@ -74,24 +54,22 @@ def _cluster(cid="c1", source="x.csv", row=0, columns=("Vendor",),
     return c
 
 
+def _verdict(text: str, urls: List[tuple[str, str]] = None,
+             bing_urls: List[str] = None, n_calls: int = 1) -> AgentVerdict:
+    return AgentVerdict(
+        text=text,
+        citations=[Citation(url=u, title=t) for (u, t) in (urls or [])],
+        bing_query_urls=list(bing_urls or []),
+        n_search_calls=n_calls,
+    )
+
+
 # ---------------------------------------------------------------------------
 
 
 def test_confirmed_error_with_evidence_passes_through():
     cluster = _cluster(suggested_fix="Acme Corp")
-    web = StubWebSearch(fixtures={
-        '"AcmeCo" official site': SearchResult(query="q", hits=[
-            SearchHit(title="Acme Corp - Home",
-                      url="https://acme.example.com",
-                      snippet="Acme Corp is a global supplier ..."),
-        ]),
-        '"Acme Corp" official site': SearchResult(query="q", hits=[
-            SearchHit(title="Acme Corp",
-                      url="https://acme.example.com",
-                      snippet="Welcome to Acme Corp"),
-        ]),
-    })
-    llm = StubLLM(responses=[json.dumps({
+    payload = json.dumps({
         "verdict": "confirmed_error",
         "canonical_value": "Acme Corp",
         "confidence": 0.92,
@@ -100,11 +78,19 @@ def test_confirmed_error_with_evidence_passes_through():
             "title": "Acme Corp - Home",
             "quote": "Acme Corp is a global supplier",
         }],
-        "reasoning": "Both queries surface the same official-site hit.",
-    })])
+        "reasoning": "Both web hits surface the same official-site result.",
+    })
+    agent = StubAgentBackend(
+        default=_verdict(
+            payload,
+            urls=[("https://acme.example.com", "Acme Corp - Home")],
+            bing_urls=["https://www.bing.com/search?q=Acme+Corp"],
+            n_calls=2,
+        ),
+    )
 
     verifier = Verifier(
-        llm=llm, web=web,
+        agent=agent,
         cell_lookup=_make_cell_lookup({("x.csv", 0, "Vendor"): "AcmeCo"}),
         column_samples=_make_column_samples({}),
         cfg=VerifierConfig(prompt_path=PROMPT_PATH, concurrency=1),
@@ -119,33 +105,33 @@ def test_confirmed_error_with_evidence_passes_through():
     assert v.evidence[0].url == "https://acme.example.com"
     assert v.suspect_value == "AcmeCo"
     assert v.entity_kind == EntityKind.ORG.value
-    assert v.queries == ['"AcmeCo" official site', '"Acme Corp" official site']
+    assert v.queries == ["https://www.bing.com/search?q=Acme+Corp"]
+    assert v.n_results == 2
+    assert v.n_unique_urls == 1
 
 
 def test_fabricated_url_is_dropped():
-    """The LLM cited a URL that was NOT in the snippets we showed it.
-    Anti-hallucination filter must drop that citation. With no
-    surviving evidence the verdict downgrades to ambiguous."""
+    """The agent JSON cited a URL that was NOT in the url_citation
+    annotations the runtime recorded. Anti-hallucination filter must
+    drop that citation. With no surviving evidence the verdict
+    downgrades to ambiguous."""
     cluster = _cluster()
-    web = StubWebSearch(fixtures={
-        '"AcmeCo" official site': SearchResult(query="q", hits=[
-            SearchHit(title="Acme Corp", url="https://real.example.com",
-                      snippet="..."),
-        ]),
-    })
-    llm = StubLLM(responses=[json.dumps({
+    payload = json.dumps({
         "verdict": "confirmed_error",
         "canonical_value": "Acme Corp",
         "confidence": 0.95,
         "evidence": [{
-            "url": "https://hallucinated.example.com",  # not in snippets
+            "url": "https://hallucinated.example.com",  # not in citations
             "title": "Made up",
             "quote": "...",
         }],
         "reasoning": "see citation",
-    })])
+    })
+    agent = StubAgentBackend(default=_verdict(
+        payload, urls=[("https://real.example.com", "Acme Corp")],
+    ))
     verifier = Verifier(
-        llm=llm, web=web,
+        agent=agent,
         cell_lookup=_make_cell_lookup({("x.csv", 0, "Vendor"): "AcmeCo"}),
         column_samples=_make_column_samples({}),
         cfg=VerifierConfig(prompt_path=PROMPT_PATH, concurrency=1),
@@ -159,13 +145,7 @@ def test_fabricated_url_is_dropped():
 
 def test_false_positive_passes_through():
     cluster = _cluster()
-    web = StubWebSearch(fixtures={
-        '"AcmeCo" official site': SearchResult(query="q", hits=[
-            SearchHit(title="AcmeCo Inc.", url="https://acmeco.example.com",
-                      snippet="AcmeCo Inc. is the official name."),
-        ]),
-    })
-    llm = StubLLM(responses=[json.dumps({
+    payload = json.dumps({
         "verdict": "false_positive",
         "canonical_value": None,
         "confidence": 0.85,
@@ -175,9 +155,12 @@ def test_false_positive_passes_through():
             "quote": "AcmeCo Inc. is the official name",
         }],
         "reasoning": "Web confirms AcmeCo is the canonical spelling.",
-    })])
+    })
+    agent = StubAgentBackend(default=_verdict(
+        payload, urls=[("https://acmeco.example.com", "AcmeCo Inc.")],
+    ))
     verifier = Verifier(
-        llm=llm, web=web,
+        agent=agent,
         cell_lookup=_make_cell_lookup({("x.csv", 0, "Vendor"): "AcmeCo"}),
         column_samples=_make_column_samples({}),
         cfg=VerifierConfig(prompt_path=PROMPT_PATH, concurrency=1),
@@ -190,16 +173,16 @@ def test_false_positive_passes_through():
 
 def test_ambiguous_verdict_passes_through():
     cluster = _cluster()
-    web = StubWebSearch()  # no fixtures -> empty results
-    llm = StubLLM(responses=[json.dumps({
+    payload = json.dumps({
         "verdict": "ambiguous",
         "canonical_value": None,
         "confidence": 0.2,
         "evidence": [],
         "reasoning": "Web search returned nothing useful.",
-    })])
+    })
+    agent = StubAgentBackend(default=_verdict(payload, urls=[], n_calls=0))
     verifier = Verifier(
-        llm=llm, web=web,
+        agent=agent,
         cell_lookup=_make_cell_lookup({("x.csv", 0, "Vendor"): "AcmeCo"}),
         column_samples=_make_column_samples({}),
         cfg=VerifierConfig(prompt_path=PROMPT_PATH, concurrency=1),
@@ -209,39 +192,67 @@ def test_ambiguous_verdict_passes_through():
     assert v.evidence == []
 
 
-def test_missing_cell_value_records_error_no_llm_call():
+def test_missing_cell_value_records_error_no_agent_call():
     cluster = _cluster()
-    llm = StubLLM(responses=[])   # MUST NOT be called.
-    web = StubWebSearch()
+    agent = StubAgentBackend()  # no fixtures -> would error if called
     verifier = Verifier(
-        llm=llm, web=web,
-        # Empty lookup -> None -> error.
-        cell_lookup=_make_cell_lookup({}),
+        agent=agent,
+        cell_lookup=_make_cell_lookup({}),  # empty -> None -> error
         column_samples=_make_column_samples({}),
         cfg=VerifierConfig(prompt_path=PROMPT_PATH, concurrency=1),
     )
     v = verifier.run([cluster])[0]
     assert v.error == "suspect cell value unavailable"
-    assert llm.calls == []
-    assert web.calls == []
+    assert agent.calls == []
+
+
+def test_agent_error_propagates_to_verification():
+    cluster = _cluster()
+    agent = StubAgentBackend(default=AgentVerdict(error="agent run failed"))
+    verifier = Verifier(
+        agent=agent,
+        cell_lookup=_make_cell_lookup({("x.csv", 0, "Vendor"): "AcmeCo"}),
+        column_samples=_make_column_samples({}),
+        cfg=VerifierConfig(prompt_path=PROMPT_PATH, concurrency=1),
+    )
+    v = verifier.run([cluster])[0]
+    assert v.error == "agent run failed"
+    assert v.verdict == "ambiguous"  # default
+    assert v.evidence == []
+
+
+def test_system_prompt_reaches_backend():
+    """The verifier must plumb the YAML system prompt onto the backend
+    so the agent run uses the right ``instructions`` override."""
+    cluster = _cluster()
+    payload = json.dumps({
+        "verdict": "ambiguous", "canonical_value": None,
+        "confidence": 0.3, "evidence": [], "reasoning": "ok",
+    })
+    agent = StubAgentBackend(default=_verdict(payload))
+    Verifier(
+        agent=agent,
+        cell_lookup=_make_cell_lookup({("x.csv", 0, "Vendor"): "AcmeCo"}),
+        column_samples=_make_column_samples({}),
+        cfg=VerifierConfig(prompt_path=PROMPT_PATH, concurrency=1),
+    ).run([cluster])
+    assert agent.system_prompts and "data-quality reviewer" in agent.system_prompts[0]
 
 
 def test_persistence_round_trip(tmp_path: Path):
     cluster = _cluster()
-    web = StubWebSearch(fixtures={
-        '"AcmeCo" official site': SearchResult(query="q", hits=[
-            SearchHit(title="t", url="https://u.example.com", snippet="x"),
-        ]),
-    })
-    llm = StubLLM(responses=[json.dumps({
+    payload = json.dumps({
         "verdict": "confirmed_error",
         "canonical_value": "Acme Corp",
         "confidence": 0.7,
         "evidence": [{"url": "https://u.example.com", "title": "t", "quote": "x"}],
         "reasoning": "ok",
-    })])
+    })
+    agent = StubAgentBackend(default=_verdict(
+        payload, urls=[("https://u.example.com", "t")],
+    ))
     verifier = Verifier(
-        llm=llm, web=web,
+        agent=agent,
         cell_lookup=_make_cell_lookup({("x.csv", 0, "Vendor"): "AcmeCo"}),
         column_samples=_make_column_samples({}),
         cfg=VerifierConfig(prompt_path=PROMPT_PATH, concurrency=1),
@@ -260,19 +271,15 @@ def test_persistence_round_trip(tmp_path: Path):
 
 
 def test_row_context_passed_into_prompt():
-    """The full row (column -> value) should reach the LLM prompt
+    """The full row (column -> value) should reach the agent prompt
     when ``row_lookup`` is supplied. The flagged column must be
-    marked with ' *' so the model knows which value is suspect."""
+    marked with ' *'."""
     cluster = _cluster()
-    web = StubWebSearch(fixtures={
-        '"AcmeCo" official site': SearchResult(query="q", hits=[
-            SearchHit(title="t", url="https://u.example.com", snippet="x"),
-        ]),
-    })
-    llm = StubLLM(responses=[json.dumps({
+    payload = json.dumps({
         "verdict": "ambiguous", "canonical_value": None,
         "confidence": 0.3, "evidence": [], "reasoning": "ok",
-    })])
+    })
+    agent = StubAgentBackend(default=_verdict(payload))
 
     rows = {
         ("x.csv", 0): {
@@ -286,63 +293,60 @@ def test_row_context_passed_into_prompt():
     def row_lookup(source, row):
         return rows.get((source, row), {})
 
-    verifier = Verifier(
-        llm=llm, web=web,
+    Verifier(
+        agent=agent,
         cell_lookup=_make_cell_lookup({("x.csv", 0, "Vendor"): "AcmeCo"}),
         column_samples=_make_column_samples({}),
         row_lookup=row_lookup,
         cfg=VerifierConfig(prompt_path=PROMPT_PATH, concurrency=1),
-    )
-    verifier.run([cluster])
-    assert len(llm.calls) == 1
-    prompt = llm.calls[0]["prompt"]
-    # Suspect column flagged with " *".
+    ).run([cluster])
+    assert len(agent.calls) == 1
+    prompt = agent.calls[0]["prompt"]
     assert "Vendor *: AcmeCo" in prompt
-    # Other columns present (verbatim values).
     assert "Website" in prompt and "https://acme.example.com" in prompt
     assert "City" in prompt and "Springfield" in prompt
     assert "Phone" in prompt and "555-0100" in prompt
 
 
 def test_row_context_optional_back_compat():
-    """Verifier without ``row_lookup`` still works (existing
-    callers don't have to migrate). The prompt's row_context block
-    just reads '(unavailable)'."""
+    """Verifier without ``row_lookup`` still works.
+
+    With no row_lookup the verifier falls back to a 1-record snapshot
+    that contains just the suspect column / value (so the agent at
+    least sees the cell it's supposed to verify), and the rest of the
+    row context is silently absent.
+    """
     cluster = _cluster()
-    web = StubWebSearch(fixtures={
-        '"AcmeCo" official site': SearchResult(query="q", hits=[
-            SearchHit(title="t", url="https://u.example.com", snippet="x"),
-        ]),
-    })
-    llm = StubLLM(responses=[json.dumps({
+    payload = json.dumps({
         "verdict": "ambiguous", "canonical_value": None,
         "confidence": 0.3, "evidence": [], "reasoning": "ok",
-    })])
-    verifier = Verifier(
-        llm=llm, web=web,
+    })
+    agent = StubAgentBackend(default=_verdict(payload))
+    Verifier(
+        agent=agent,
         cell_lookup=_make_cell_lookup({("x.csv", 0, "Vendor"): "AcmeCo"}),
         column_samples=_make_column_samples({}),
         cfg=VerifierConfig(prompt_path=PROMPT_PATH, concurrency=1),
-    )
-    verifier.run([cluster])
-    assert "(unavailable)" in llm.calls[0]["prompt"]
+    ).run([cluster])
+    prompt = agent.calls[0]["prompt"]
+    # Suspect cell still rendered in the RECORDS UNDER REVIEW block.
+    assert "Vendor *: AcmeCo" in prompt
+    # No extra column context (only the suspect column appears).
+    assert "Website" not in prompt
+    assert "City" not in prompt
 
 
 def test_concurrency_runs_all_clusters():
     """Smoke: with concurrency=4 every cluster gets a verification record."""
     n = 10
     clusters = [_cluster(cid=f"c{i}") for i in range(n)]
-    web = StubWebSearch(fixtures={
-        '"AcmeCo" official site': SearchResult(query="q", hits=[
-            SearchHit(title="t", url="https://u.example.com", snippet="x"),
-        ]),
-    })
-    llm = StubLLM(responses=[json.dumps({
+    payload = json.dumps({
         "verdict": "ambiguous", "canonical_value": None,
         "confidence": 0.3, "evidence": [], "reasoning": "",
-    })] * n)
+    })
+    agent = StubAgentBackend(default=_verdict(payload))
     verifier = Verifier(
-        llm=llm, web=web,
+        agent=agent,
         cell_lookup=_make_cell_lookup(
             {("x.csv", 0, "Vendor"): "AcmeCo"}
         ),
@@ -351,5 +355,4 @@ def test_concurrency_runs_all_clusters():
     )
     out = verifier.run(clusters)
     assert len(out) == n
-    # All ids present, sorted.
     assert [v.cluster_id for v in out] == sorted(c["cluster_id"] for c in clusters)

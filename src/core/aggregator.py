@@ -64,6 +64,29 @@ class ClusterDetection:
     explanation: str
     suggested_fix: Optional[str]
     columns: List[str]
+    # Sibling rows the detector claimed are part of the same logical
+    # incident (e.g. members of a row_duplication group). Preserved
+    # verbatim from the flat issue so the labelling UI can bucket
+    # clusters that share a duplicate-group key. Empty for
+    # cell-/row-local error types.
+    affected_rows: List[int] = field(default_factory=list)
+    # Tri-state verdict for row_duplication detections. ``"duplicate"``
+    # when the detector is confident the rows are interchangeable;
+    # ``"near_duplicate"`` when they likely refer to the same entity
+    # but a human should review. Empty / unset for non-duplication
+    # detections (the UI ignores it for those).
+    verdict: str = ""
+    # Which clusterer surfaced this detection (e.g. ``"key_collision"``,
+    # ``"blocking"``, ``"minhash_lsh"``). Empty for non-duplication
+    # detections.
+    discovery_strategy: str = ""
+    # True when the per-source clustering budget was hit while
+    # producing this detection's source - i.e. some duplicate
+    # candidates may have been silently dropped. The UI surfaces a
+    # warning so the operator can rerun with a larger cap.
+    cluster_budget_exhausted: bool = False
+    # The cap that was hit, copied through for UI display.
+    max_groups_per_source: int = 0
 
 
 @dataclass
@@ -274,6 +297,13 @@ def _build_cluster(
 
     detections: List[ClusterDetection] = []
     for issue in issues:
+        ar_raw = issue.get("affected_rows") or ()
+        ar_clean: List[int] = []
+        for r in ar_raw:
+            try:
+                ar_clean.append(int(r))
+            except (TypeError, ValueError):
+                continue
         detections.append(
             ClusterDetection(
                 issue_id=str(issue.get("id", "")),
@@ -288,6 +318,15 @@ def _build_cluster(
                 explanation=str(issue.get("explanation", "") or ""),
                 suggested_fix=issue.get("suggested_fix"),
                 columns=list(issue.get("columns") or []),
+                affected_rows=ar_clean,
+                verdict=str(issue.get("verdict", "") or ""),
+                discovery_strategy=str(issue.get("discovery_strategy", "") or ""),
+                cluster_budget_exhausted=bool(
+                    issue.get("cluster_budget_exhausted", False)
+                ),
+                max_groups_per_source=int(
+                    issue.get("max_groups_per_source") or 0
+                ),
             )
         )
 
@@ -550,8 +589,7 @@ def render_synthesis_prompt(
         ) from exc
 
 
-_JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
-_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+from .jsonl_io import JSON_FENCE_RE as _JSON_FENCE_RE, extract_json_payloads
 
 
 def _parse_synthesis_json(text: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
@@ -563,9 +601,9 @@ def _parse_synthesis_json(text: str) -> Tuple[Optional[Dict[str, Any]], Optional
     stripped = text.strip()
     if stripped:
         candidates.append(stripped)
-    m = _JSON_OBJECT_RE.search(text)
-    if m:
-        candidates.append(m.group(0))
+    # Bracket-balanced fallback handles concatenated objects /
+    # objects with prose around them in the same response.
+    candidates.extend(extract_json_payloads(text))
 
     for candidate in candidates:
         candidate = candidate.strip()

@@ -3,6 +3,7 @@ data/
 datasets/
 outputs/
 checkpoints/
+notebooks/
 logs/
 runs/
 wandb/

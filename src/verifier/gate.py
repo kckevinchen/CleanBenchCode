@@ -78,15 +78,42 @@ _COLUMN_PATTERNS: dict[EntityKind, re.Pattern[str]] = {
 
 
 # Default error_type whitelist (keys from prompts/error_types.yaml).
-# ``typo`` and ``text_inconsistency`` are the prime targets; we keep a
-# small set so we don't flood the verifier with formatting nits.
+# Web verification is useful for any error_type whose ground truth
+# can plausibly be looked up online (entity names, addresses, FD
+# relationships, cross-table consistency). We deliberately exclude
+# pure-formatting / pure-arithmetic types - the web cannot adjudicate
+# whether a column should use ``%`` vs decimal, or whether a row's
+# Total = Item1 + Item2 holds.
 DEFAULT_ERROR_TYPES: frozenset[str] = frozenset({
+    # Single-cell: classic entity-name / address corrections.
     "typo",
     "text_inconsistency",
     "casing_inconsistency",
     "pattern_inconsistency",
-    "cross_record_inconsistency",
-    "cross_source_naming_conflict",
+    "semantic_incompatible",
+    # Multi-row: web can confirm whether two records are really the
+    # same real-world entity (or distinct entities that happen to share
+    # a key field).
+    "row_duplication",
+    # Multi-column: web can verify functional-dependency relationships
+    # (license -> business name -> address, etc.) for a single row.
+    "fd_violation",
+    # Multi-table: web confirms which source carries the correct
+    # value when two sources disagree.
+    "inter_table_inconsistency",
+})
+
+
+# Error types that are NEVER worth a web round-trip - their ground
+# truth is computable from the row/column itself, not from external
+# evidence. The gate hard-rejects clusters whose ONLY error_types
+# come from this set, regardless of the operator's whitelist.
+NON_WEB_VERIFIABLE_TYPES: frozenset[str] = frozenset({
+    "row_calculation_inconsistency",
+    "string_calculation_inconsistency",
+    "number_format_inconsistency",
+    "punctuation_inconsistency",
+    "numeric_outlier",
 })
 
 
@@ -99,6 +126,16 @@ class GateConfig:
     min_value_chars: int = 2
     # Person verification is OFF by default to avoid PII fishing.
     verify_person: bool = False
+    # Multi-row caps: skip clusters with fewer than this many distinct
+    # rows (a 1-row "multi-row" cluster is just a single_cell), and
+    # cap the number of records we send to the agent for a given
+    # multi-row check.
+    multi_row_min: int = 2
+    multi_row_cap: int = 6
+    # Multi-column caps: skip clusters with fewer than this many
+    # columns under review, and cap how many we render in the prompt.
+    multi_col_min: int = 2
+    multi_col_cap: int = 8
 
 
 def _classify_column(header: str) -> EntityKind:
@@ -137,6 +174,63 @@ def _value_eligible(value: str, cfg: GateConfig) -> bool:
     if not _LETTER_RE.search(s):
         return False
     return True
+
+
+def cluster_shape(cluster: Mapping[str, object]) -> dict:
+    """Classify a cluster's spatial layout for verification routing.
+
+    Returns a dict with three keys:
+
+    * ``pattern`` - one of ``"single_cell"`` | ``"multi_row"`` |
+      ``"multi_column"`` | ``"composite"``.
+    * ``rows`` - sorted unique list of row indices the cluster spans.
+      Built from ``cluster.row`` plus the union of
+      ``detections[*].affected_rows``.
+    * ``columns`` - the cluster's ``columns`` list, unmodified.
+
+    The function is read-only and never raises; malformed inputs
+    degrade to ``single_cell`` with whatever the caller passed in.
+    """
+    columns: List[str] = []
+    raw_cols = cluster.get("columns") or []
+    if isinstance(raw_cols, list):
+        columns = [str(c) for c in raw_cols if c is not None]
+
+    rows: List[int] = []
+    seen: set[int] = set()
+    primary = cluster.get("row")
+    if isinstance(primary, int):
+        rows.append(primary)
+        seen.add(primary)
+    elif isinstance(primary, float) and not (primary != primary):  # not NaN
+        ri = int(primary)
+        rows.append(ri)
+        seen.add(ri)
+    for d in cluster.get("detections") or []:
+        if not isinstance(d, Mapping):
+            continue
+        for r in d.get("affected_rows") or []:
+            try:
+                ri = int(r)
+            except (TypeError, ValueError):
+                continue
+            if ri in seen:
+                continue
+            seen.add(ri)
+            rows.append(ri)
+    rows.sort()
+
+    multi_row = len(rows) >= 2
+    multi_col = len(columns) >= 2
+    if multi_row and multi_col:
+        pattern = "composite"
+    elif multi_row:
+        pattern = "multi_row"
+    elif multi_col:
+        pattern = "multi_column"
+    else:
+        pattern = "single_cell"
+    return {"pattern": pattern, "rows": rows, "columns": columns}
 
 
 def classify_cluster(
@@ -201,8 +295,41 @@ def should_verify(
     et_list = cluster.get("error_types") or []
     if not isinstance(et_list, list):
         et_list = [et_list]
-    et_match = any(t in cfg.error_types for t in et_list)
 
+    # Hard reject error_types that are not adjudicable on the web.
+    # If a cluster has at least one web-verifiable type alongside a
+    # non-web one, we still proceed (the agent will focus on the web
+    # angle); the rejection only triggers when ALL listed types are
+    # in the non-web set.
+    if et_list and all(t in NON_WEB_VERIFIABLE_TYPES for t in et_list):
+        return False
+
+    et_match = any(t in cfg.error_types for t in et_list)
+    shape = cluster_shape(cluster)
+    pattern = shape["pattern"]
+
+    if pattern == "multi_row":
+        # Multi-row: at least N rows + an error_type that can be
+        # adjudicated by checking whether the records refer to the
+        # same real-world entity.
+        if len(shape["rows"]) < cfg.multi_row_min:
+            return False
+        return et_match or "row_duplication" in et_list
+
+    if pattern in ("multi_column", "composite"):
+        # Multi-column: need >=2 columns and an error_type that
+        # speaks to inter-column consistency.
+        if len(shape["columns"]) < cfg.multi_col_min:
+            return False
+        multicol_ok = {
+            "fd_violation",
+            "inter_table_inconsistency",
+            "text_inconsistency",
+            "semantic_incompatible",
+        }
+        return et_match or any(t in multicol_ok for t in et_list)
+
+    # ---- single_cell (existing semantics) -------------------------
     kind = classify_cluster(cluster, cfg=cfg)
     column_match = kind not in (EntityKind.NONE,)
 
@@ -243,7 +370,9 @@ __all__ = [
     "EntityKind",
     "GateConfig",
     "DEFAULT_ERROR_TYPES",
+    "NON_WEB_VERIFIABLE_TYPES",
     "classify_cluster",
+    "cluster_shape",
     "should_verify",
     "filter_eligible",
 ]

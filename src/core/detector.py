@@ -33,7 +33,7 @@ from .table_digest import TableDigest
 logger = logging.getLogger(__name__)
 
 
-_JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", re.DOTALL)
+from .jsonl_io import JSON_FENCE_RE as _JSON_BLOCK_RE, extract_json_payloads
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +63,11 @@ class ChunkReport:
     error_type: str = ""
     error_type_name: str = ""
     error_type_category: str = ""
+    # Free-form per-report metadata. Populated by detectors that need
+    # to flag operational signals (e.g. ``cluster_budget_exhausted``
+    # from the row_duplication clusterer pipeline). Consumers should
+    # treat unknown keys as advisory.
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self, *, include_raw: bool = True) -> Dict[str, Any]:
         payload = asdict(self)
@@ -90,7 +95,14 @@ def _coerce_issues(payload: Any) -> List[Dict[str, Any]]:
 
 
 def parse_llm_json(text: str) -> tuple[List[Dict[str, Any]], Optional[str]]:
-    """Best-effort extraction of JSON from a model response."""
+    """Best-effort extraction of JSON from a model response.
+
+    Tries fenced blocks first (``​```json ...​```​``), then the whole
+    response stripped, then a bracket-balanced scan that pulls every
+    ``{...}`` or ``[...]`` payload out of surrounding prose. The
+    bracket scan handles the common case where the LLM forgot the
+    fence and emitted "Here are my findings: {\"issues\": [...]}".
+    """
     if not text:
         return [], "empty response"
 
@@ -98,6 +110,8 @@ def parse_llm_json(text: str) -> tuple[List[Dict[str, Any]], Optional[str]]:
     for match in _JSON_BLOCK_RE.finditer(text):
         candidates.append(match.group(1))
     candidates.append(text.strip())
+    # Bracket-balanced fallback: handles non-fenced prose+JSON.
+    candidates.extend(extract_json_payloads(text))
 
     for candidate in candidates:
         candidate = candidate.strip()

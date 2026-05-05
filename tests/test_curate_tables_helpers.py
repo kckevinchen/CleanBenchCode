@@ -308,3 +308,95 @@ class TestParseLangJson:
 
     def test_invalid_json_returns_none(self) -> None:
         assert _parse_lang_json('{"bad json') is None
+
+
+# ---------------------------------------------------------------------------
+# Lingua-based language identifier - higher accuracy than langdetect on
+# the short, header-heavy CSV samples we extract.
+# ---------------------------------------------------------------------------
+
+
+class TestLinguaEnglish:
+    """``lingua-language-detector`` is an optional dependency; tests skip
+    cleanly when it is not installed."""
+
+    @staticmethod
+    def _lingua_or_skip():
+        import pytest
+        try:
+            import lingua  # noqa: F401
+        except ImportError:
+            pytest.skip("lingua-language-detector not installed")
+
+    def test_dutch_table_rejected(self) -> None:
+        self._lingua_or_skip()
+        import pandas as pd
+        from src.data_prep.curate import _lingua_english
+        df = pd.DataFrame({
+            "Omzetverlies": ["100", "200", "300"],
+            "Klant": ["Acme", "Beta", "Gamma"],
+            "Bedrag": ["1", "2", "3"],
+            "Datum": ["2025-01", "2025-02", "2025-03"],
+        })
+        ok, detail = _lingua_english(df, min_english_prob=0.5)
+        assert not ok
+        assert detail["language"] == "DUTCH"
+        assert detail["reason"] == "non_english_dominant"
+
+    def test_french_table_rejected(self) -> None:
+        self._lingua_or_skip()
+        import pandas as pd
+        from src.data_prep.curate import _lingua_english
+        df = pd.DataFrame({
+            "Frais de gestion": ["10", "20"],
+            "Client": ["Alpha", "Beta"],
+            "Montant total": ["30", "40"],
+        })
+        ok, detail = _lingua_english(df, min_english_prob=0.5)
+        assert not ok
+        assert detail["language"] == "FRENCH"
+
+    def test_english_headers_accepted(self) -> None:
+        self._lingua_or_skip()
+        import pandas as pd
+        from src.data_prep.curate import _lingua_english
+        df = pd.DataFrame({
+            "Region": ["North", "South"],
+            "Quarter": ["Q1", "Q2"],
+            "Sales": ["100", "200"],
+            "Code": ["N1", "S1"],
+        })
+        ok, _ = _lingua_english(df, min_english_prob=0.5)
+        assert ok
+
+    def test_pure_ascii_ids_accepted(self) -> None:
+        # A table with no natural-language content (just IDs / numbers)
+        # must not be falsely rejected as non-English.
+        self._lingua_or_skip()
+        import pandas as pd
+        from src.data_prep.curate import _lingua_english
+        df = pd.DataFrame({"id": ["A", "B", "C"], "val": ["1", "2", "3"]})
+        ok, _ = _lingua_english(df, min_english_prob=0.5)
+        assert ok
+
+    def test_missing_lingua_module_treated_as_accept(self, monkeypatch) -> None:
+        # When the dependency is genuinely absent, _lingua_english must
+        # fall back to accept (avoid blocking the pipeline).
+        import pandas as pd
+        from src.data_prep import curate as mod
+        # Force the import to fail by patching builtins.__import__.
+        import builtins
+        real_import = builtins.__import__
+
+        def fake_import(name, *a, **kw):
+            if name == "lingua" or name.startswith("lingua."):
+                raise ImportError("simulated missing lingua")
+            return real_import(name, *a, **kw)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+        # Bypass the cached detector.
+        monkeypatch.setattr(mod, "_LINGUA_DETECTOR_CACHE", [])
+        df = pd.DataFrame({"x": ["1", "2"]})
+        ok, detail = mod._lingua_english(df, min_english_prob=0.5)
+        assert ok
+        assert detail.get("error") == "lingua_not_installed"

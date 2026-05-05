@@ -5,7 +5,7 @@ This module is a refactor of the standalone script
 
 * Round-robin load balancing across a pool of endpoints
 * Automatic fallback between the Responses API and the Chat Completions API
-* Bounded retries with exponential-ish backoff
+* Bounded retries with exponential backoff + jitter
 * Extraction of reasoning summaries when available
 
 The client is intentionally framework-free so it can be imported from any
@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import time
 from dataclasses import dataclass, field
 from threading import Lock
@@ -99,6 +100,17 @@ class LLMClient:
     api_version: str = DEFAULT_API_VERSION
     max_retries: int = 5
     backoff_base_seconds: float = 10.0
+    # Cap on per-attempt sleep regardless of attempt index. Prevents
+    # the exponential schedule from running away on long retry chains
+    # (e.g. attempt=5 with base=10 would otherwise sleep 160s).
+    backoff_cap_seconds: float = 60.0
+    # Per-call wall-clock timeout passed through to the OpenAI SDK.
+    # Without this, a wedged endpoint can hang a worker thread
+    # indefinitely - the retry loop only fires on RAISED exceptions,
+    # not on a never-returning request. 180s comfortably covers
+    # gpt-5 / o-series reasoning calls; raise for very long contexts
+    # via the constructor.
+    request_timeout_seconds: float = 180.0
     token_scope: str = "https://cognitiveservices.azure.com/.default"
 
     def __post_init__(self) -> None:
@@ -116,6 +128,7 @@ class LLMClient:
                 api_version=self.api_version,
                 azure_endpoint=endpoint,
                 azure_ad_token_provider=token_provider,
+                timeout=self.request_timeout_seconds,
             )
             for endpoint in self.endpoints
         ]
@@ -258,12 +271,32 @@ class LLMClient:
             except Exception as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
                 logger.warning(
-                    "LLM call failed (attempt %d/%d): %s",
+                    "LLM call failed (attempt %d/%d, endpoint=%s): %s",
                     attempt,
                     self.max_retries,
+                    endpoint,
                     last_error,
                 )
-                time.sleep(self.backoff_base_seconds * attempt)
+                # NOTE: ``_next_client`` already advances the round-robin
+                # index on every call, so the next retry naturally lands
+                # on a different endpoint. We previously bumped the
+                # index here too, which under concurrent load could skip
+                # several healthy endpoints in quick succession and
+                # hot-spot the survivors. The single advance from
+                # ``_next_client`` is enough.
+                if attempt >= self.max_retries:
+                    break
+                # Exponential backoff with jitter, capped. Mirrors
+                # Azure's retry guidance for 429/503 responses.
+                delay = min(
+                    self.backoff_cap_seconds,
+                    self.backoff_base_seconds * (2 ** (attempt - 1)),
+                )
+                # Full jitter (Brooker, AWS): uniform on [0, delay].
+                # Avoids thundering-herd when several workers retry in
+                # lockstep against a shared rate-limit window.
+                delay = random.uniform(0.0, delay)
+                time.sleep(delay)
 
         return LLMResponse(
             text="",

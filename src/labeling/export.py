@@ -29,6 +29,7 @@ record (TP outranks FN at this layer too).
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping
 
@@ -200,11 +201,18 @@ def write_benchmark(
     clusters: Iterable[Mapping[str, Any]],
     store: LabelStore,
 ) -> Path:
-    """Materialise the benchmark and write it to ``out_path`` as JSONL."""
+    """Materialise the benchmark and write it to ``out_path`` as JSONL.
+
+    Atomic: data is written to a sibling ``.tmp`` file and then
+    ``os.replace``-d into place so concurrent readers never observe a
+    truncated file.
+    """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     rows = materialize_label_benchmark(clusters, store)
-    with out_path.open("w", encoding="utf-8") as fh:
+    tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
+    with tmp_path.open("w", encoding="utf-8") as fh:
         for cell in rows:
             fh.write(json.dumps(cell.model_dump(), ensure_ascii=False) + "\n")
+    os.replace(tmp_path, out_path)
     return out_path

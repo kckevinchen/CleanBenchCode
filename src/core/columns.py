@@ -35,18 +35,22 @@ def canonicalize_columns(
 ) -> List[str]:
     """Resolve ``columns`` against ``frame_headers``.
 
-    Resolution proceeds in three deterministic tiers:
+    Each input token resolves to AT MOST ONE frame header, picked by
+    the first tier that produces a non-empty match list:
 
-    1. **exact membership** (cheap; the common case for clean runs).
-    2. **case+whitespace-folded equality** (handles only-newline
+    1. **Exact membership** (cheap; the common case for clean runs).
+    2. **Case+whitespace-folded equality** (handles only-newline
        mangling like ``"District Code"`` vs ``"District\\nCode"``).
-    3. **case+whitespace-folded prefix match**, with ambiguity broken
-       by picking the shortest header (most specific column).
-    4. **word-boundary suffix/contains match** (catches LLM tokens
+    3. **Case+whitespace-folded prefix match**.
+    4. **Word-boundary suffix/contains match** (catches LLM tokens
        like ``"Code"`` for ``"County Code"`` / ``"District Code"``).
-       Multiple matches are kept so downstream consumers can decide
-       (the labeling UI shows them all rather than silently dropping
-       one).
+
+    When tiers 3-4 surface multiple candidates we pick a single
+    deterministic winner: shortest header (most specific column),
+    ties broken by the header's position in ``frame_headers``. This
+    avoids the previous "promote N columns from one ambiguous LLM
+    token" behaviour, which inflated cluster column lists and
+    over-highlighted cells in the labelling UI.
 
     A column that doesn't resolve to any frame header is **dropped**
     rather than carried through unmatched - keeping bad strings in
@@ -61,6 +65,11 @@ def canonicalize_columns(
         return []
     header_set = set(frame_headers)
     folded = [(h, fold_header(h)) for h in frame_headers]
+    header_order = {h: i for i, h in enumerate(frame_headers)}
+
+    def _pick_one(cands: List[str]) -> str:
+        return sorted(cands, key=lambda h: (len(h), header_order.get(h, 0)))[0]
+
     resolved: List[str] = []
     for col in cols:
         if col in header_set:
@@ -70,26 +79,31 @@ def canonicalize_columns(
         f = fold_header(col)
         if not f:
             continue
+        # Tier 2: folded equality.
         hit = next((h for h, fh in folded if fh == f), None)
-        cands: List[str] = []
-        if hit is None:
-            cands = [h for h, fh in folded if fh.startswith(f) or f.startswith(fh)]
-        if hit is None and not cands:
-            tokens = f.split()
-            cands = [
-                h for h, fh in folded
-                if fh.endswith(" " + f)
-                or fh.endswith("\n" + f)
-                or all(tok in fh.split() for tok in tokens)
-            ]
-        if hit is None and cands:
-            cands.sort(key=len)
-            for h in cands:
-                if h not in resolved:
-                    resolved.append(h)
+        if hit is not None:
+            if hit not in resolved:
+                resolved.append(hit)
             continue
-        if hit is not None and hit not in resolved:
-            resolved.append(hit)
+        # Tier 3: folded prefix match (either direction).
+        cands = [h for h, fh in folded if fh.startswith(f) or f.startswith(fh)]
+        if cands:
+            chosen = _pick_one(cands)
+            if chosen not in resolved:
+                resolved.append(chosen)
+            continue
+        # Tier 4: token-set / boundary suffix match.
+        tokens = f.split()
+        cands = [
+            h for h, fh in folded
+            if fh.endswith(" " + f)
+            or fh.endswith("\n" + f)
+            or all(tok in fh.split() for tok in tokens)
+        ]
+        if cands:
+            chosen = _pick_one(cands)
+            if chosen not in resolved:
+                resolved.append(chosen)
     return resolved
 
 

@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Benchmark generation pipeline (flowchart)</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --ink: #1A1A1A;
+    --muted: #555555;
+    --rule: #B7C7D6;
+    --soft: #F4F7FB;
+    --accent: #1F4E79;
+    --accentLight: #2E75B6;
+    --accentSoft: #E8F0F8;
+    --human: #5E2D7E;
+    --humanSoft: #F1ECF5;
+    --stat: #2F6F4E;
+    --statSoft: #ECF4EF;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI",
+          Roboto, Helvetica, Arial, sans-serif;
+  }
+  body { padding: 36px 40px; }
+
+  h1 {
+    margin: 0 0 4px;
+    color: var(--accent);
+    font-size: 19px;
+    letter-spacing: -0.01em;
+  }
+  .sub { margin: 0 0 26px; color: var(--muted); font-size: 12px; }
+
+  .row {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    flex-wrap: nowrap;
+  }
+
+  .box {
+    border: 1.6px solid var(--rule);
+    border-radius: 10px;
+    padding: 12px 14px;
+    min-width: 132px;
+    text-align: center;
+    background: #fff;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+  .box .num {
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    background: var(--accent); color: #fff;
+    font-weight: 700; font-size: 12px;
+    display: inline-flex; align-items: center; justify-content: center;
+    margin: 0 auto 6px;
+  }
+  .box .title {
+    font-weight: 700;
+    font-size: 13px;
+    line-height: 1.25;
+    color: var(--ink);
+  }
+  .box .meta {
+    margin-top: 4px;
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.35;
+  }
+
+  .endpoint { background: var(--soft); min-width: 124px; }
+  .endpoint.output {
+    background: var(--accentSoft);
+    border-color: var(--accent);
+  }
+  .endpoint .label { font-weight: 700; font-size: 13px; }
+  .endpoint .desc  { color: var(--muted); font-size: 11px; margin-top: 4px; }
+
+  .stage.llm   { border-color: var(--accentLight); background: #FBFDFE; }
+  .stage.llm   .num { background: var(--accent); }
+  .stage.human { border-color: var(--human); background: var(--humanSoft); }
+  .stage.human .num { background: var(--human); }
+
+  .arrow {
+    align-self: center;
+    color: var(--accentLight);
+    font-size: 18px;
+    line-height: 1;
+    flex: 0 0 26px;
+    text-align: center;
+    font-weight: 700;
+  }
+
+  /* Sidecar */
+  .sidecar-wrap {
+    margin-top: 22px;
+    display: flex;
+    align-items: stretch;
+    gap: 12px;
+  }
+  .branch {
+    flex: 0 0 240px;
+    color: var(--muted);
+    font-size: 11px;
+    border-top: 2px dashed var(--stat);
+    padding-top: 6px;
+    margin-left: 16px;
+    text-align: left;
+  }
+  .sidecar {
+    border: 1.6px solid var(--stat);
+    background: var(--statSoft);
+    border-radius: 10px;
+    padding: 12px 14px;
+    flex: 1;
+    max-width: 760px;
+  }
+  .sidecar .head {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 4px;
+  }
+  .sidecar .pill {
+    background: var(--stat); color: #fff;
+    font-size: 10px; font-weight: 700; letter-spacing: 0.04em;
+    padding: 2px 7px; border-radius: 999px;
+  }
+  .sidecar .head .label {
+    font-weight: 700; color: var(--stat); font-size: 13px;
+  }
+  .sidecar .body {
+    color: var(--muted); font-size: 11.5px; line-height: 1.45;
+  }
+
+  .legend {
+    margin-top: 24px;
+    display: flex; gap: 22px; flex-wrap: wrap;
+    color: var(--muted); font-size: 11px;
+  }
+  .legend .swatch {
+    display: inline-block; width: 12px; height: 12px;
+    border-radius: 3px; vertical-align: middle; margin-right: 6px;
+    border: 1px solid rgba(0,0,0,0.05);
+  }
+  .swatch.llm   { background: #FBFDFE; border-color: var(--accentLight); }
+  .swatch.human { background: var(--humanSoft); border-color: var(--human); }
+  .swatch.stat  { background: var(--statSoft); border-color: var(--stat); }
+  .swatch.io    { background: var(--soft); border-color: var(--rule); }
+</style>
+</head>
+<body>
+  <h1>Benchmark generation pipeline</h1>
+  <p class="sub">Raw tables → five stages → labelled benchmark. Coverage is estimated alongside review.</p>
+
+  <div class="row">
+    <div class="box endpoint">
+      <div class="label">CSV /<br/>Spreadsheet</div>
+      <div class="desc">one or many<br/>tables</div>
+    </div>
+    <div class="arrow">▶</div>
+
+    <div class="box stage llm">
+      <div class="num">1</div>
+      <div class="title">Relation<br/>discovery</div>
+      <div class="meta">propose rules;<br/>validate per row<br/>in sandbox</div>
+    </div>
+    <div class="arrow">▶</div>
+
+    <div class="box stage llm">
+      <div class="num">2</div>
+      <div class="title">Per-type<br/>LLM scan</div>
+      <div class="meta">informed by<br/>discovered rules<br/>+ violations</div>
+    </div>
+    <div class="arrow">▶</div>
+
+    <div class="box stage llm">
+      <div class="num">3</div>
+      <div class="title">Group &amp;<br/>explain</div>
+      <div class="meta">merge overlaps;<br/>canonical fix &amp;<br/>confidence</div>
+    </div>
+    <div class="arrow">▶</div>
+
+    <div class="box stage llm">
+      <div class="num">4</div>
+      <div class="title">Web<br/>verification</div>
+      <div class="meta">search + verdict<br/>on entity values</div>
+    </div>
+    <div class="arrow">▶</div>
+
+    <div class="box stage human">
+      <div class="num">5</div>
+      <div class="title">Human<br/>review</div>
+      <div class="meta">accept / reject /<br/>annotate</div>
+    </div>
+    <div class="arrow">▶</div>
+
+    <div class="box endpoint output">
+      <div class="label">Labelled<br/>benchmark</div>
+      <div class="desc">errors + hard<br/>negatives + coverage</div>
+    </div>
+  </div>
+
+  <div class="sidecar-wrap">
+    <div class="branch">runs alongside every pass&nbsp;⤵</div>
+    <div class="sidecar">
+      <div class="head">
+        <span class="pill">SIDECAR</span>
+        <span class="label">Coverage estimate</span>
+      </div>
+      <div class="body">
+        Per (file, error type): estimated total error count with
+        <b>95% CI</b>, plus a stop rule that halts review effort on an
+        arm once the coverage gap is below threshold. Numbers are
+        comparable across datasets.
+      </div>
+    </div>
+  </div>
+
+  <div class="legend">
+    <span><span class="swatch io"></span>Input / output</span>
+    <span><span class="swatch llm"></span>LLM stage</span>
+    <span><span class="swatch human"></span>Human review</span>
+    <span><span class="swatch stat"></span>Statistical sidecar</span>
+  </div>
+</body>
+</html>

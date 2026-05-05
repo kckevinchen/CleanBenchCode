@@ -1,4 +1,4 @@
-# Per-error-type detection prompts - FINE-GRAINED 20-TYPE TAXONOMY.
+# Per-error-type detection prompts - FOCUSED 13-TYPE TAXONOMY.
 #
 # This taxonomy mirrors `error_type.csv` row-for-row: every row in the CSV
 # becomes ONE error-type key here, with its own description / examples /
@@ -19,44 +19,33 @@
 #   numeric_outlier                   - statistical extreme inside a numeric column
 #
 #   ---- Multi-Column (Scope=Multi-Column in the CSV; intra-row) ----
-#   missing_value                     - empty cell / disguised null / sentinel
-#   embedded_value_error              - one cell packs multiple atomic fields
-#   cross_column_inconsistency        - two columns factually contradict each other
 #   fd_violation                      - known functional dependency violated
-#   row_calculation_inconsistency     - within-row arithmetic does not balance
-#   business_rule_violation           - complex internal business rule broken
+#   row_calculation_inconsistency     - within-row numeric derivation does not balance
+#   string_calculation_inconsistency  - within-row string derivation/composition does not match
 #
 #   ---- Multi-Row (Scope=Multi-Row in the CSV; intra-table cross-row) ----
-#   column_aggregation_inconsistency  - column does not sum to its declared total row
 #   row_duplication                   - two+ rows are exact / near-exact duplicates
-#   cross_record_inconsistency        - same entity, conflicting descriptive values
 #
 #   ---- Multi-Table (Scope=Multi-Table in the CSV; cross-source) ----
-#   cross_table_error                 - foreign-key style reference is broken / orphan
-#   cross_source_naming_conflict      - same concept named differently across sources
-#   value_representation_conflict     - same concept encoded differently across sources
+#   inter_table_inconsistency         - the same entity/key/attribute disagrees across tables/sources
 #
 # IMPORTANT - column_mode requirements:
 #   * Single-Column types (typo, text_inconsistency, casing_inconsistency,
 #     pattern_inconsistency, punctuation_inconsistency,
 #     number_format_inconsistency, semantic_incompatible, numeric_outlier)
-#     and the two "atomicity" types (missing_value, embedded_value_error)
 #     work fine with `column_mode: single`.
-#   * Multi-Column intra-row types (cross_column_inconsistency, fd_violation,
-#     row_calculation_inconsistency, business_rule_violation) and Multi-Row
-#     types that compare descriptive columns (row_duplication,
-#     cross_record_inconsistency) require `column_mode: all`.
-#   * column_aggregation_inconsistency works in single-column mode for
-#     totals defined within one column.
-#   * Multi-Table types are RARELY visible inside a single chunk. The
-#     detectors will mostly return empty findings; only flag when evidence
-#     for cross-table / cross-source disagreement is fully visible inside
-#     the slice (e.g. two source blocks stacked in the same CSV). Expect
-#     a high FN rate and review by hand.
+#   * Multi-Column intra-row types (fd_violation,
+#     row_calculation_inconsistency, string_calculation_inconsistency) and
+#     Multi-Row row_duplication require `column_mode: all`.
+#   * inter_table_inconsistency is RARELY visible inside a single chunk.
+#     The detector will mostly return empty findings; only flag when
+#     evidence for cross-table / cross-source disagreement is fully visible
+#     inside the slice (e.g. two source blocks stacked in the same CSV).
+#     Expect a high FN rate and review by hand.
 #
 # File structure matches the generic loader in `src/error_taxonomy.py`:
 #   defaults             - optional mapping of numeric thresholds (peer_min,
-#                          dominant_pct, minority_pct, affected_rows_cap,
+#                          dominant_pct, minority_pct,
 #                          peer_min_outlier, iqr_multiple,
 #                          freetext_mean_length). Substituted into the
 #                          base prompts via ${name} (string.Template) at
@@ -80,10 +69,14 @@
 defaults:
   peer_min: 5                # R2 slice-size guard (general)
   dominant_pct: 60           # R3 dominant baseline lower bound (%)
-  minority_pct: 40           # R3 minority upper bound (%)
-  affected_rows_cap: 25      # R6 group finding cap
+  minority_pct: 20           # R3 minority upper bound (%)
   peer_min_outlier: 8        # numeric_outlier-specific peer minimum
   iqr_multiple: 5            # numeric_outlier IQR cutoff
+  # NOTE: iqr_multiple was raised from 3 to 5 on 2026-04-30 to suppress
+  # heavy-tail false positives on financial / metric columns. Keep the
+  # value here in sync with the prose in `types.numeric_outlier.notes`
+  # below; both must reference the same threshold or the variant
+  # rewriter will drift.
   freetext_mean_length: 40   # pattern_inconsistency free-text length cutoff
 
 base:
@@ -103,8 +96,16 @@ base:
     CRITICAL - "THE WHOLE COLUMN IS WRONG" IS ALMOST ALWAYS A FALSE
     POSITIVE. If a pattern covers the majority of rows in a column, that
     pattern is the column's convention, not a defect. Never produce a
-    finding whose affected rows cover (roughly) every non-empty row in a
+    finding whose affected rows cover >=80% of the non-empty rows in a
     column - the correct response in that case is an empty finding list.
+
+    EMPTY CELLS. A cell is "empty" when it is NULL/NaN, the empty
+    string ``""``, or whitespace-only (e.g. ``"   "``). Empty cells
+    are NEVER an error in their own right unless an error type's
+    APPLICABILITY NOTES explicitly say so. Exclude empty cells from
+    every peer count, dominant-baseline denominator, and
+    distributional statistic; never list an empty cell in
+    ``affected_rows``.
 
     FAST-SKIP. If, after reading the APPLICABILITY NOTES, you can
     immediately tell that the slice is ineligible for this error type
@@ -191,24 +192,22 @@ base:
          if a per-type note disagrees, follow R3.
 
     R4 - Majority guard. Never produce a finding whose `affected_rows`
-         covers (roughly) every non-empty row of a column. If a
-         pattern covers the majority, that pattern IS the column's
-         convention.
+         covers >=80% of the non-empty rows of a column. If a pattern
+         covers >=80% of the column, that pattern IS the column's
+         convention - return {{"issues": []}} for findings that would
+         flag it.
 
     R5 - `columns` field. For a per-cell or multi-column intra-row
          finding, list the involved column(s). For a pure ROW-LEVEL
-         finding (e.g. row_duplication of an entire row,
-         business_rule_violation that spans the whole row), set
+         finding (e.g. row_duplication of an entire row), set
          `columns: []`.
 
-    R6 - `affected_rows` cap. Group-level findings list AT MOST
-         ${affected_rows_cap} row numbers (smallest-first). If
-         `affected_rows` ends up with EXACTLY ${affected_rows_cap}
-         entries, you MUST also emit `affected_rows_total` set to the
-         TRUE total count (>= ${affected_rows_cap}). Downstream
-         pipelines rely on this to know whether more matches exist
-         beyond the cap. If the true count is strictly less than
-         ${affected_rows_cap}, omit `affected_rows_total`.
+    R6 - `affected_rows` completeness. Group-level findings MUST list
+         EVERY affected row number in `affected_rows`, sorted
+         smallest-first. Do NOT truncate. The goal is to capture all
+         data errors; an incomplete list manufactures false negatives
+         downstream. Set `affected_rows_total` equal to
+         len(`affected_rows`).
 
     R7 - Stay in your lane. Defects that look like they belong to a
          sibling type are skipped here - their dedicated detector
@@ -225,7 +224,7 @@ base:
                   smallest affected row number>,
           "columns": [<string column name>, ...],   // [] for pure row-level findings (R5)
           "affected_rows": [<int>, ...],            // optional; for group-level findings only
-          "affected_rows_total": <int>,             // REQUIRED whenever affected_rows has exactly ${affected_rows_cap} entries (R6); else omit
+          "affected_rows_total": <int>,             // equal to len(affected_rows); see R6
           "observed": "<short verbatim snippet(s) of the problematic
                         value(s); for groups, list the distinct variants>",
           "explanation": "<1-2 sentence justification naming the
@@ -316,8 +315,8 @@ types:
           - `row`: the smallest MINORITY row
           - `columns`: the single affected column
           - `affected_rows`: ONLY the minority rows that deviate from
-            the dominant variant (capped at 25 by the base rules).
-            Do NOT list the dominant-variant rows.
+            the dominant variant (list ALL of them per R6; do NOT
+            truncate). Do NOT list the dominant-variant rows.
           - `observed`: "dominant: '<dominant variant>'; minority:
             '<variant A>', '<variant B>'".
           - `suggested_fix`: rewrite the minority values to the
@@ -431,7 +430,8 @@ types:
       * DOMINANT-BASELINE REQUIREMENT: the dominant pattern must cover
         >=60% of non-empty rows AND deviating rows must together cover
         <=40%. Otherwise return {{"issues": []}}.
-      * FLAG ONLY THE MINORITY in `affected_rows` (cap 25).
+      * FLAG ONLY THE MINORITY in `affected_rows` (list ALL minority
+        rows per R6; do NOT truncate).
       * SINGLETON RULE: a deviating pattern backed by exactly one row
         is more likely a typo / corrupt row -> route to `typo` or
         `semantic_incompatible`, skip here.
@@ -447,7 +447,6 @@ types:
       * Pure casing differences -> `casing_inconsistency`.
       * Spelling mistakes -> `typo`.
       * Out-of-domain values -> `semantic_incompatible`.
-      * Missing / placeholder cells -> `missing_value`.
 
   punctuation_inconsistency:
     name: "Punctuation Inconsistency"
@@ -491,13 +490,17 @@ types:
     name: "Number Format Inconsistency"
     category: "Single-Column / Inconsistency"
     description: >
-      Within a single NUMERIC column, values use mixed numeric
-      encodings - percentages mixed with decimals, comma thousands-
-      separators mixed with bare digits, currency symbols inconsistently
-      attached, parentheses for negatives mixed with leading minus,
-      scientific notation mixed with fixed-point, and so on. Each value
-      is individually a valid number; the defect is that the column
-      uses multiple encodings for the same kind of measurement.
+      Within a single column that MEASURES A QUANTITY (a count,
+      amount, percentage, currency, ratio, or other magnitude), values
+      use mixed numeric encodings - percentages mixed with decimals,
+      comma thousands-separators mixed with bare digits, currency
+      symbols inconsistently attached, parentheses for negatives mixed
+      with leading minus, scientific notation mixed with fixed-point,
+      and so on. Each value is individually a valid number; the defect
+      is that the column uses multiple encodings for the SAME KIND of
+      measurement, such that the numeric meaning is preserved when you
+      rewrite one form to the other (e.g. 15% == 0.15, 10,000 ==
+      10000).
     example: |
       * "15%" mixed with "0.15" in the same percentage column.
       * "10,000" mixed with "10000" in a count column.
@@ -505,13 +508,43 @@ types:
       * "(50)" mixed with "-50" for negatives.
       * "1.2e6" mixed with "1200000".
     notes: |
-      WHAT TO FLAG
-      * The column must be NUMERIC in spirit (counts, amounts,
-        percentages, currencies, ratios). For free-text or identifier
-        columns, return {{"issues": []}}.
-      * Identify the dominant encoding (e.g. >=60% of non-empty rows
-        use bare integers without commas). Emit a group-level finding
-        listing ONLY the minority rows that use a different encoding.
+      QUANTITATIVE-COLUMN GATE (read this FIRST)
+      * Apply this type ONLY when the column measures a QUANTITY:
+        a count, amount, percentage, currency, ratio, rate, score,
+        magnitude, duration, etc. The arithmetic value of the cell
+        must be what the column is reporting.
+      * If the column holds CODES or IDENTIFIERS - values whose
+        digits are categorical labels rather than magnitudes - return
+        exactly {{"issues": []}}. Examples that are NOT quantitative
+        and MUST be skipped here:
+          - postal/zip/FIPS/area/country/state/county/town codes
+          - product codes, SKUs, account numbers, license numbers
+          - phone numbers, SSNs, route numbers, classification codes
+          - any column where leading zeros, fixed widths, or
+            alphanumeric mixing carry semantic meaning
+        For these columns, '01' is NOT numerically equivalent to '1';
+        rewriting one to the other LOSES information. Length / padding
+        differences in code columns are a `pattern_inconsistency`
+        question (and only when lengths actually mix), never a NFI
+        question.
+      * Heuristics that the column is a CODE, not a quantity:
+          - column name contains 'code', 'id', 'number' as a label
+            (zip, FIPS, postal, route, account), or all values share a
+            short fixed width (2-5 digits) with leading zeros;
+          - values are never aggregated, averaged, or compared
+            arithmetically in any plausible downstream use;
+          - the dominant 'inconsistency' you would flag is JUST a
+            difference in zero-padding or string length.
+        If any of these apply, FAST-SKIP with {{"issues": []}}.
+
+      WHAT TO FLAG (after passing the gate above)
+      * Identify the dominant encoding (>=60% of non-empty rows use
+        the same encoding). Emit a group-level finding listing EVERY
+        minority row that uses a different encoding. Do not cap or
+        sample the list (R6).
+      * The dominant and minority forms must denote the SAME numeric
+        value when normalised. If they don't (e.g. one is a code,
+        one is a quantity), this is not NFI.
       * `observed`: "dominant encoding: <kind> ('<sample>'); minority:
         <kind> ('<sample>')". Include enough context that downstream
         review can see both forms side-by-side.
@@ -520,6 +553,8 @@ types:
         thousands separators").
 
       WHAT NOT TO FLAG
+      * Code / identifier columns (see gate above).
+      * Zero-padding differences in fixed-width code columns.
       * Non-numeric pattern differences (date layouts, code shapes) ->
         `pattern_inconsistency`.
       * Punctuation-only quirks that don't change the numeric value
@@ -528,7 +563,7 @@ types:
       * A single outlier number whose magnitude is wildly off ->
         `numeric_outlier` or `semantic_incompatible`.
       * Currency mismatches across SOURCES (USD vs EUR) when the data
-        is merged from multiple systems -> `value_representation_conflict`.
+        is merged from multiple systems -> `inter_table_inconsistency`.
 
   semantic_incompatible:
     name: "Semantic Incompatible"
@@ -563,9 +598,8 @@ types:
       * Format / encoding differences where the underlying domain is
         correct -> `pattern_inconsistency` or
         `number_format_inconsistency`.
-      * Empty cells / placeholders -> `missing_value`.
-      * Cross-column logic conflicts (Country/Capital mismatch) ->
-        `cross_column_inconsistency`.
+      * Cross-column factual / FD conflicts (Country/Capital mismatch,
+        Zip/State mismatch) -> `fd_violation`.
 
   numeric_outlier:
     name: "Numeric Outlier"
@@ -611,10 +645,11 @@ types:
         * The column does not contain numeric (or numeric-like)
           values - free text, identifiers, dates, codes are not in
           scope here.
-        * Fewer than 8 peer DETAIL rows (i.e. excluding the
-          total/summary rows defined below) are visible in the chunk.
-          Tighter than the global R2 minimum of 5: distributional
-          claims need a real distribution.
+        * Fewer than ${peer_min_outlier} peer DETAIL rows (i.e.
+          excluding the total/summary rows defined below) are
+          visible in the chunk. Tighter than the global R2 minimum
+          of ${peer_min}: distributional claims need a real
+          distribution.
 
       EXCLUDE TOTAL / SUMMARY ROWS BEFORE COMPARING.
       Drop any row whose first cell, label column, or known
@@ -627,9 +662,9 @@ types:
       WHAT TO FLAG (ALL conditions must hold)
       * The column passed the HARD PRE-CHECK above.
       * Statistical gap: the value is at least an order-of-magnitude
-        away from the median, OR >=5 IQR from the median (raised
-        from 3 - be stricter). A value that is merely the largest
-        in a small sample is NOT enough.
+        away from the median, OR >=${iqr_multiple} IQR from the
+        median (raised from 3 - be stricter). A value that is merely
+        the largest in a small sample is NOT enough.
       * Plausibility check: write down what the column measures, then
         ask "could a real entity legitimately have this value?" Only
         flag if the answer is clearly NO (typo, extra digit, wrong
@@ -639,7 +674,8 @@ types:
         ~30k; this row is 10M, ~130 IQRs above median, and the role
         'Junior Analyst' makes 10M implausible."
       * Per-cell finding. For multiple outliers in the same column,
-        use a group-level finding with `affected_rows` capped at 25.
+        use a group-level finding listing ALL outlier rows in
+        `affected_rows` per R6 (do NOT truncate).
 
       WHAT NOT TO FLAG
       * HEAVY-TAILED COUNT / EVENT COLUMNS. Death tolls, case counts,
@@ -669,108 +705,6 @@ types:
   # MULTI-COLUMN (intra-row)
   # =====================================================================
 
-  missing_value:
-    name: "Missing Value"
-    category: "Multi-Column / Granularity"
-    description: >
-      A cell that should carry a value but does not. Includes both true
-      empty cells and DISGUISED nulls - placeholders such as "N/A",
-      "NA", "TBD", "unknown", "-", "?", "9999-9999", or runs of 9s used
-      as a sentinel. The cell breaks the column's expectation that
-      substantive content is present.
-    example: |
-      * A required phone number filled with "9999-999999".
-      * An empty Division cell when every other row has a division.
-      * "N/A", "TBD", "-" appearing in an otherwise numeric column.
-    notes: |
-      WHAT TO FLAG
-      * Empty cells in columns whose other rows are clearly populated
-        with substantive values.
-      * Sentinel placeholders ("N/A", "TBD", "-", "?", repeated 9s)
-        when the column otherwise expects substantive content.
-      * Per-cell finding: `observed` = the sentinel verbatim (use ""
-        for true empties); `explanation` = "missing_value (<empty |
-        sentinel>)".
-
-      WHAT NOT TO FLAG
-      * "N/A" used as a legitimate category label in a column where it
-        is clearly a deliberate value choice.
-      * Cells that pack multiple atomic values -> `embedded_value_error`.
-      * A value that is present but semantically wrong ->
-        `semantic_incompatible`.
-      * A value in the wrong format ("9,999" vs "9999") ->
-        `number_format_inconsistency` or `pattern_inconsistency`.
-
-  embedded_value_error:
-    name: "Embedded Value Error"
-    category: "Multi-Column / Granularity"
-    description: >
-      A single cell packs MULTIPLE logically independent atomic values
-      that should have been split across separate columns. The cell
-      breaks the atomicity expectation of its column.
-    example: |
-      * "J. Smith 12.02.70 New York" inside a single "Name" column
-        (name + DOB + city).
-      * "john@example.com / 555-1234" in an Email column (email +
-        phone).
-      * "Main St 123, NY 94103" in a City column (street + city + zip).
-    notes: |
-      WHAT TO FLAG
-      * Per-cell finding when a cell clearly contains 2+ atomic values
-        that fall under DIFFERENT semantic types (a date AND a name; a
-        phone AND an email).
-      * In `suggested_fix`, propose the decomposition (which parts
-        should go into which hypothetical columns).
-
-      WHAT NOT TO FLAG
-      * Free-text prose. A long Description / Notes / Address in
-        free-text form is not embedded - it is allowed to be long.
-      * A cell whose value is simply too long but semantically atomic.
-      * Multi-value structured fields where the column is explicitly a
-        list (e.g. tags separated by ";").
-      * Empty cells / sentinels -> `missing_value`.
-
-  cross_column_inconsistency:
-    name: "Cross-column Inconsistency"
-    category: "Multi-Column / Intra-Record"
-    description: >
-      Within a single row, two or more columns make claims that
-      factually CONTRADICT each other based on real-world logic or on
-      embedded data. Each column's value is individually plausible;
-      the defect is in their combination.
-
-      Requires column_mode='all'.
-    example: |
-      * Country = "France", Capital = "Berlin".
-      * StartDate = 2020-01-15, EndDate = 2019-12-31.
-      * FirstName = "Alice", LastName = "Brown", FullName = "Bob Smith".
-      * Status = "Completed" but ActualEndDate is empty.
-      * Age = 5, Occupation = "Surgeon".
-    notes: |
-      WHAT TO FLAG
-      * Scan each row's multi-column tuple for internal contradictions
-        implied by common-sense rules or by dependencies clearly
-        suggested by the headers.
-      * Per-row finding: `row` = the offending row, `columns` = ALL
-        columns involved in the contradiction, `observed` = the
-        conflicting values verbatim ("Country=France, Capital=Berlin").
-      * `explanation` should state the rule being violated.
-
-      WHAT NOT TO FLAG
-      * KNOWN strict dependencies (Zip -> State, ProductCode -> Category)
-        -> `fd_violation`.
-      * Numeric derivation failures (price*qty != total) ->
-        `row_calculation_inconsistency`.
-      * Complex internal business rules ("equal-rank employees must
-        earn the same") -> `business_rule_violation`.
-      * Single-column oddities -> `semantic_incompatible` /
-        `numeric_outlier`.
-      * Cross-row entity duplication / conflict -> `row_duplication` /
-        `cross_record_inconsistency`.
-      * Speculative rules the data does not clearly support.
-      * If only one column is visible (column_mode=single) and you
-        cannot cross-reference, return {{"issues": []}}.
-
   fd_violation:
     name: "FD (Functional Dependency) Violation"
     category: "Multi-Column / Intra-Record"
@@ -787,6 +721,7 @@ types:
       * Same ProductCode appears with two different ProductCategory
         values.
       * Same EmployeeID appears with two different Departments.
+      * Country = "France" implies Capital = "Paris" (within-row FD).
     notes: |
       WHAT TO FLAG
       * Identify candidate determinants: codes, IDs, postal codes,
@@ -805,26 +740,29 @@ types:
       WHAT NOT TO FLAG
       * Soft / approximate dependencies (City -> Region typically but
         with exceptions) - too easy to false-positive.
-      * General factual contradictions without a clear determinant ->
-        `cross_column_inconsistency`.
-      * Numeric derivations -> `row_calculation_inconsistency`.
-      * Two rows that are duplicates -> `row_duplication`.
-      * Two rows describing the same entity with different descriptive
-        values -> `cross_record_inconsistency`.
+      * Numeric derivations between row columns ->
+        `row_calculation_inconsistency`.
+      * String composition / concatenation rules (FullName == First +
+        " " + Last) -> `string_calculation_inconsistency`.
+      * Two rows that are exact duplicates -> `row_duplication`.
+      * Disagreements ACROSS tables / sources for the same entity ->
+        `inter_table_inconsistency`.
 
   row_calculation_inconsistency:
-    name: "Number / Calculation Inconsistency (Row-level)"
+    name: "Number / Calculation Inconsistency"
     category: "Multi-Column / Intra-Record"
     description: >
-      Within a single row, numeric fields fail to satisfy an expected
-      mathematical formula or derivation: a "derived" column does not
-      equal the algebraic combination of its components.
+      Within a single row, NUMERIC fields fail to satisfy an expected
+      mathematical formula or derivation: a "derived" numeric column
+      does not equal the algebraic combination of its component
+      numeric columns.
 
       Requires column_mode='all'.
     example: |
       * unit_price=10, quantity=3, total_price=35 (expected 30).
       * subtotal=90, tax=9, total=110 (expected 99).
       * start=100, end=120, delta=15 (expected 20).
+      * principal=1000, rate=0.05, interest=60 (expected 50).
     notes: |
       WHAT TO FLAG
       * Identify columns whose headers / typical magnitudes suggest an
@@ -840,104 +778,70 @@ types:
         noise.
 
       WHAT NOT TO FLAG
-      * A column that fails to sum to a TOTAL ROW ->
-        `column_aggregation_inconsistency`.
+      * String composition (FirstName + LastName != FullName) ->
+        `string_calculation_inconsistency`.
       * A single value numerically unusual but not an algebraic
         inconsistency -> `numeric_outlier`.
       * Mixed number formats (with/without commas) ->
         `number_format_inconsistency`.
-      * Non-arithmetic contradictions (Zip vs State) ->
-        `cross_column_inconsistency` / `fd_violation`.
+      * Non-arithmetic determinant/dependent disagreements (Zip vs
+        State, ProductCode vs Category) -> `fd_violation`.
       * Relations you cannot confidently derive from the headers
         alone - this detector should be conservative.
 
-  business_rule_violation:
-    name: "Business Rule Violation"
+  string_calculation_inconsistency:
+    name: "String / Calculation Inconsistency"
     category: "Multi-Column / Intra-Record"
     description: >
-      Data that breaches an EXPLICIT, COMPLEX internal business rule
-      rather than a structural / arithmetic / cross-column factual
-      constraint. The rule must be inferable from the headers and the
-      observed data; do not invent rules.
+      Within a single row, STRING-valued fields fail to satisfy an
+      expected derivation, concatenation, or composition rule across
+      columns: a "composed" string column does not match the
+      deterministic combination of its component string columns.
 
       Requires column_mode='all'.
     example: |
-      * Two employees with identical Title and Location earning very
-        different amounts when strict internal rules forbid it.
-      * A Discount > 100% of UnitPrice in a row where business policy
-        caps discounts.
-      * A Status of "Approved" with no Approver name in a column that
-        is otherwise always populated for approved rows.
+      * FirstName="Alice", LastName="Brown", FullName="Bob Smith"
+        (FullName should equal "Alice Brown").
+      * City="Paris", Country="France", Location="Berlin, Germany"
+        (Location should be "Paris, France").
+      * Street="123 Main St", City="NY", Zip="10001",
+        Address="456 Oak Ave, NY 10001" (Address does not include
+        the row's Street value).
+      * Domain="example.com", User="alice", Email="bob@example.com"
+        (Email should be "alice@example.com").
     notes: |
       WHAT TO FLAG
-      * Only flag when the rule is OBVIOUS from the headers and the
-        observed data (e.g. a clearly mandatory column being empty
-        only in violating rows).
-      * Per-row or group-level finding; `explanation` must NAME the
-        rule being violated.
-      * Be very conservative: rules you cannot pin to visible data are
-        speculation.
+      * Identify columns whose headers strongly suggest a string
+        composition rule (FullName from First+Last; Address from
+        Street+City+Zip; Email from User+Domain; URL from Scheme+Host
+        +Path; SKU from Brand+Code).
+      * Check each row; flag rows where the composed column does not
+        match the deterministic combination of the components after
+        reasonable normalisation (case-folding, whitespace
+        collapsing, separator tolerance: " ", ", ", " - ").
+      * Per-row finding: `columns` = every component plus the composed
+        column; `observed` = the actual vs expected string;
+        `explanation` names the composition rule.
+      * Be conservative on natural-language fields where ordering or
+        wording is genuinely flexible (e.g. "Smith, Alice" vs
+        "Alice Smith" may both be acceptable representations of the
+        same name).
 
       WHAT NOT TO FLAG
-      * Pure factual contradictions between two columns ->
-        `cross_column_inconsistency`.
-      * Strict known FDs (Zip->State) -> `fd_violation`.
       * Numeric derivations -> `row_calculation_inconsistency`.
-      * Single-column oddities -> `semantic_incompatible` /
-        `numeric_outlier`.
+      * Strict identifier-based FDs (Zip->State, ProductCode->Name)
+        -> `fd_violation`.
+      * Pure casing / spelling / formatting differences on a single
+        column -> `casing_inconsistency` / `typo` /
+        `pattern_inconsistency`.
+      * Free-text Notes / Description columns where no deterministic
+        composition is expected.
+      * Composition rules you cannot confidently derive from the
+        headers alone - this detector should be conservative.
 
   # =====================================================================
   # MULTI-ROW (intra-table cross-row)
   # =====================================================================
-
-  column_aggregation_inconsistency:
-    name: "Number / Calculation Inconsistency (Column-level)"
-    category: "Multi-Row / Inter-Record"
-    description: >
-      Numerical fields fail to satisfy an expected MATHEMATICAL
-      AGGREGATION down a column: the values in a column do not sum to
-      the value printed in an explicit Total / Subtotal / Grand Total
-      row, or a percentage column fails to sum to 100 within a group
-      that should be exhaustive.
-    example: |
-      * Rows 3..18 hold per-region sales; row 19 is labelled "Total"
-        but does not equal the sum of rows 3..18.
-      * Rows labelled "Q1", "Q2", "Q3", "Q4" sum to a value different
-        from the row labelled "FY".
-      * A percentage column whose values for an exhaustive group sum
-        to 97% or 103% rather than 100%.
-    notes: |
-      RECOGNISING TOTAL ROWS.
-      A row qualifies as a Total / Subtotal row when ANY of these
-      cues match (apply to the first cell, the row label column, or
-      a leading identifier column - case-insensitive):
-        * Exact match of: total, totals, subtotal, sub-total,
-          grand total, sum, sums, summary, fy, year-to-date, ytd.
-        * Starts with "Total " (e.g. "Total Sales", "Total Revenue").
-        * Contains a regex hit on
-          /\b(total|subtotal|grand[- ]?total|sum|aggregate|fy|ytd)\b/.
-      If no row in the chunk satisfies this and no obvious "should-
-      sum-to-100%" group is present, return {{"issues": []}}.
-
-      WHAT TO FLAG
-      * Group-level finding:
-          - `row`: the total row
-          - `affected_rows`: every contributing row plus the total row
-          - `observed`: "reported=<value>, computed=<value>"
-          - `explanation`: "<Total label> does not equal sum of
-            <range>"
-      * Use rounding tolerance >= 0.01 of the expected value.
-
-      WHAT NOT TO FLAG
-      * Within-row arithmetic failures ->
-        `row_calculation_inconsistency`.
-      * Number-encoding mismatches ->
-        `number_format_inconsistency`.
-      * Single-column statistical outliers ->
-        `numeric_outlier`.
-      * Implicit aggregations you have to GUESS (e.g. "these rows
-        probably should sum to that one"). Only flag explicit total
-        rows.
 
   row_duplication:
     name: "Row Duplication Error"
@@ -946,6 +850,8 @@ types:
       Two or more rows that refer to the IDENTICAL real-world entity
       with identical (or near-identical) attribute values - typically
       caused by repeated ingestion or a join gone wrong.
+
+      Requires column_mode='all' for reliable detection.
     example: |
       * Two rows where every visible column has identical values,
         representing the same transaction recorded twice.
@@ -965,161 +871,86 @@ types:
         semantics and exact repeats are clearly defects.
 
       WHAT NOT TO FLAG
-      * Two rows that share IDENTITY columns but differ on descriptive
-        columns -> `cross_record_inconsistency`.
       * Near-duplicates caused only by formatting differences on
         structured columns - first apply `pattern_inconsistency` /
         `number_format_inconsistency`; only flag here if, after a
         mental normalisation, the rows are genuine duplicates.
       * Distinct entities that merely look similar.
 
-  cross_record_inconsistency:
-    name: "Cross-record Inconsistency"
-    category: "Multi-Row / Inter-Record"
-    description: >
-      The same real-world entity is described by CONFLICTING values
-      across multiple rows: rows agree on identity-like columns
-      (employee id, name + DOB, transaction id) but disagree on
-      descriptive columns (address, birthdate, salary, spelling).
-
-      Best with column_mode='all'.
-    example: |
-      * Two rows with the same EmployeeID but different DateOfBirth.
-      * Two rows with the same (FirstName, LastName, DOB) but
-        different Address and different Salary.
-      * Two rows with the same TransactionID but different Amount.
-    notes: |
-      WHAT TO FLAG
-      * Identify columns that look like IDENTITY: anything *_id, an
-        email column, a composite key implied by Name+DOB, etc.
-      * Group rows by identity; flag groups that disagree on at least
-        one descriptive column.
-      * Group-level finding:
-          - `row`: smallest affected row
-          - `columns`: the disagreeing descriptive column(s)
-          - `affected_rows`: every row in the conflicting group
-          - `observed`: e.g. "DOB: 1990-01-01 vs 1990-06-03"
-          - `explanation`: "cross_record_inconsistency: identity={...}"
-
-      WHAT NOT TO FLAG
-      * Exact duplicate rows -> `row_duplication`.
-      * Single-row internal contradictions ->
-        `cross_column_inconsistency` / `fd_violation`.
-      * Near-duplicates explained by formatting / casing / spelling
-        differences alone -> route to the corresponding type first.
-
   # =====================================================================
   # MULTI-TABLE (cross-source)
   # =====================================================================
   #
-  # The chunk typically shows a single table; evidence for these types
+  # The chunk typically shows a single table; evidence for this type
   # mostly lives OUTSIDE the slice. Findings will be RARE. Only flag
   # when the slice itself contains the disagreeing pieces (e.g. two
-  # source blocks stacked in the same CSV) or when an FK-like value is
+  # source blocks stacked in the same CSV, an FK-like value that is
   # self-evidently malformed against the controlled set visible in the
-  # slice.
+  # slice, or two parts of a workbook coexisting with mismatched
+  # encodings).
 
-  cross_table_error:
-    name: "Cross Table Errors"
+  inter_table_inconsistency:
+    name: "Inter-table Inconsistency"
     category: "Multi-Table / Relational"
     description: >
-      A foreign-key-style reference whose target does not exist in
-      the parent table, breaking referential integrity. In single-
-      table chunks, only the cases where the FK value is OBVIOUSLY
-      invalid against the controlled vocabulary visible in the chunk
-      can be flagged.
+      Conflicting or incompatible values describing the same
+      real-world entity, key, or attribute across multiple tables or
+      sources. This umbrella covers (a) referential-integrity breaks
+      (a key value in a child table has no match in the parent),
+      (b) cross-source attribute disagreements (the same entity has
+      different addresses / amounts / statuses in two tables), and
+      (c) representation mismatches across sources (different units,
+      scales, or encodings used for the same concept; same header
+      naming different concepts or different headers naming the same
+      concept).
     example: |
-      * A row assigned to "Dept 127" when other rows show Dept codes
-        that are clearly bounded 1-20.
-      * A ProjectCode "FJ-XYZ" that does not match any of the project
-        codes seen elsewhere in the chunk.
+      * A row references "Dept 127" but no Dept 127 exists in the
+        parent Departments table.
+      * Customer "C001" has address "1 Main St" in the Customers
+        table but address "9 Oak Ave" in the Orders table for the
+        same period.
+      * Sales recorded in USD in one source block and EUR in another
+        with no currency column to disambiguate.
+      * Gender coded as 0/1 in block A and M/F in block B for the
+        same population.
+      * Block A uses header "CustomerID"; block B uses
+        "ClientNumber" for what is clearly the same join key.
     notes: |
       DEFAULT BEHAVIOUR.
-      The slice is almost always a single table with no parent
-      visible. Unless the chunk contains the disagreeing controlled
-      set itself, return {{"issues": []}}. Do NOT speculate from
-      column names alone.
+      The slice is almost always a single table with no sibling
+      table visible. Unless the chunk itself contains the
+      disagreeing pieces, return {{"issues": []}}. Do NOT speculate
+      from column names alone.
 
-      WHAT TO FLAG
+      WHAT TO FLAG (only when the disagreement is fully visible
+      inside the slice)
       * Per-cell finding when an FK-like column carries a value that
         falls clearly outside the observed controlled set in the
         slice.
-      * `explanation`: "cross_table_orphan: <column> value '<v>'
-        not in observed set {{<...>}}".
-
-      WHAT NOT TO FLAG
-      * Missing / empty FK cells -> `missing_value`.
-      * Format-only differences on identifier columns ->
-        `pattern_inconsistency` or `casing_inconsistency`.
-      * Anything that requires evidence from a parent table not visible
-        in the chunk. Return {{"issues": []}} rather than speculating.
-
-  cross_source_naming_conflict:
-    name: "Cross-source Naming Conflicts"
-    category: "Multi-Table / Relational"
-    description: >
-      The same concept is HEADER-NAMED differently across data sources
-      (synonyms), or the same name is used for different concepts
-      across sources (homonyms). Visible inside a chunk only when two
-      source blocks are stacked together with disagreeing header
-      conventions.
-    example: |
-      * Block A uses CustomerID; block B uses ClientNumber for the
-        same join key.
-      * Two source blocks both have a column named "Region" but mean
-        different geographic groupings.
-    notes: |
-      DEFAULT BEHAVIOUR.
-      Single-source slices (the common case) cannot exhibit this
-      defect: return {{"issues": []}}. Only proceed when the chunk
-      visibly stacks two source blocks with their own headers.
-
-      WHAT TO FLAG
-      * Group-level finding when two sub-blocks of the slice use
-        different header names for what is clearly the same concept,
-        or the same header name for clearly different concepts.
-        Set `columns` to the offending header(s).
-      * `explanation`: "naming_conflict: <synonym|homonym> ..."
-
-      WHAT NOT TO FLAG
-      * Single-source datasets - return {{"issues": []}}.
-      * Differences that are pure casing / abbreviation in cell values
-        -> `casing_inconsistency` / `text_inconsistency`.
-      * Anything that requires inspecting another file or schema not
-        visible in the chunk.
-
-  value_representation_conflict:
-    name: "Value Representation Conflicts"
-    category: "Multi-Table / Relational"
-    description: >
-      The same conceptual value is encoded with different
-      REPRESENTATIONS, scales, units, or coding schemes across
-      sources being merged. Visible inside a chunk only when two
-      source blocks coexist with disagreeing encodings.
-    example: |
-      * Sales recorded in USD in one block and EUR in another with no
-        currency column.
-      * Gender coded as 0/1 in one block and M/F in another.
-      * Temperature in Celsius in one block and Fahrenheit in another.
-      * Lengths in meters in one block and feet in another.
-    notes: |
-      DEFAULT BEHAVIOUR.
-      Single-source slices cannot exhibit this defect: return
-      {{"issues": []}}. Only proceed when the chunk visibly contains
-      two source blocks coexisting with their own data.
-
-      WHAT TO FLAG
+        `explanation`: "inter_table_orphan: <column> value '<v>' not
+        in observed set {{<...>}}".
+      * Group-level finding when two sub-blocks of the slice describe
+        the same identity but disagree on a descriptive attribute.
+        `explanation`: "inter_table_attribute_conflict: <identity>
+        differs on <column>".
       * Group-level finding when a column appears in two visible
         source blocks with clearly different encodings, scales, or
-        units, AND there is no metadata column that disambiguates.
-        `affected_rows` lists rows from each block; `observed`
-        captures both encodings ("block A: USD; block B: EUR").
-      * `explanation`: "value_representation_conflict: <unit / scale /
+        units, AND no metadata column disambiguates.
+        `explanation`: "inter_table_representation: <unit / scale /
         coding>".
+      * Group-level finding when two visible source blocks use
+        different header names for the same concept, or the same
+        header name for clearly different concepts.
+        `explanation`: "inter_table_naming: <synonym|homonym>".
 
       WHAT NOT TO FLAG
-      * A single-source column whose values use mixed encodings ->
-        `number_format_inconsistency`.
-      * Single-table chunks - return {{"issues": []}}.
-      * Anything requiring a metadata file / schema not visible in the
-        slice.
+      * Within-table FD violations -> `fd_violation`.
+      * Within-table duplicate rows -> `row_duplication`.
+      * Single-source columns whose values use mixed encodings ->
+        `number_format_inconsistency` or `pattern_inconsistency`.
+      * Format-only differences on identifier columns ->
+        `pattern_inconsistency` or `casing_inconsistency`.
+      * Anything that requires evidence from a parent table or
+        sibling source not visible in the chunk - return
+        {{"issues": []}} rather than speculating.
+

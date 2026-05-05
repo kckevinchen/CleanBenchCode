@@ -5,10 +5,20 @@ entity-gate (:mod:`src.verifier.gate`), then runs every eligible
 cluster through :class:`src.verifier.verify.Verifier` and writes the
 results to ``outputs/<run_id>/web_verifications.json``.
 
+The verifier delegates web search to a Microsoft Foundry agent that
+has the Web Search tool attached. Auth uses ``AzureCliCredential`` -
+run ``az login`` once and set ``AZURE_AGENTS_ENDPOINT`` +
+``AZURE_AGENTS_VERIFIER_AGENT_ID`` (or pass them via flags).
+
 Usage::
 
-    # default config + Tavily provider (TAVILY_API_KEY in env):
+    # default (env vars provide endpoint + agent id):
     python -m experiments.run_web_verify --run-id 20260428T120000Z_gpt-5.2
+
+    # explicit overrides:
+    python -m experiments.run_web_verify --run-id <id> \
+        --agent-endpoint https://<rsrc>.services.ai.azure.com/api/projects/<proj> \
+        --agent-id asst_xxxxxxxxxxxxxx
 
     # dry-run gate only (prints which clusters would be verified):
     python -m experiments.run_web_verify --run-id <id> --dry-run
@@ -33,13 +43,13 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.core.data_loader import load_csv  # noqa: E402
-from src.core.llm_client import LLMClient  # noqa: E402
 from src.verifier import (  # noqa: E402
+    AzureAgentBackend,
     GateConfig,
     Verifier,
     VerifierConfig,
-    build_web_search_tool,
     classify_cluster,
+    cluster_shape,
     should_verify,
 )
 from src.verifier.verify import (  # noqa: E402
@@ -66,9 +76,19 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         default=PROJECT_ROOT / "outputs",
         help="Root outputs directory (default: outputs/).",
     )
-    p.add_argument("--provider", default="tavily", help="Web search provider (tavily | stub).")
-    p.add_argument("--api-key", default=None, help="Override TAVILY_API_KEY (otherwise read from env).")
-    p.add_argument("--model", default="gpt-5.2", help="LLM model name.")
+    p.add_argument(
+        "--agent-endpoint", default=None,
+        help="Foundry project endpoint URL. Falls back to "
+             "AZURE_AGENTS_ENDPOINT.",
+    )
+    p.add_argument(
+        "--agent-id", default=None,
+        help="Foundry agent id (asst_...). Falls back to "
+             "AZURE_AGENTS_VERIFIER_AGENT_ID.",
+    )
+    p.add_argument("--model", default="gpt-5.2",
+                   help="Stamped on each Verification record for traceability; "
+                        "the actual model is configured on the Foundry agent.")
     p.add_argument("--reasoning-effort", default="medium")
     p.add_argument("--concurrency", type=int, default=4)
     p.add_argument("--max-clusters", type=int, default=None,
@@ -76,7 +96,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--include-person", action="store_true",
                    help="Also verify person-name columns (off by default for privacy).")
     p.add_argument("--dry-run", action="store_true",
-                   help="Print gate verdict and exit without making web/LLM calls.")
+                   help="Print gate verdict and exit without making web/agent calls.")
     p.add_argument("--force", action="store_true",
                    help="Ignore on-disk web cache + existing web_verifications.json.")
     p.add_argument("--verbose", "-v", action="store_true")
@@ -181,9 +201,9 @@ class VerifyError(Exception):
     be verified for a deterministic reason (gate-rejected, missing
     cell value, already verified, etc.). Callers - particularly the
     HTTP endpoint - map ``code`` to the right status. Transient
-    failures (LLM 5xx, Tavily down) are NOT raised here; they end up
-    as a normal :class:`Verification` record with ``error`` set, just
-    like in batch mode.
+    failures (agent 5xx, Foundry timeouts) are NOT raised here; they
+    end up as a normal :class:`Verification` record with ``error`` set,
+    just like in batch mode.
     """
 
     def __init__(self, code: str, message: str):
@@ -196,8 +216,8 @@ def verify_single_cluster(
     run_dir: Path,
     cluster_id: str,
     *,
-    provider: str = "tavily",
-    api_key: Optional[str] = None,
+    agent_endpoint: Optional[str] = None,
+    agent_id: Optional[str] = None,
     model: str = "gpt-5.2",
     reasoning_effort: str = "medium",
     include_person: bool = False,
@@ -210,8 +230,8 @@ def verify_single_cluster(
     didn't pick up. Reuses the same gate / prompt / parsing path as
     :func:`verify_run` so verdicts are identical to a full re-run.
     Raises :class:`VerifyError` for non-transient problems; transient
-    LLM/web errors surface as a :class:`Verification` whose ``.error``
-    is set (exactly as in batch mode).\n
+    agent errors surface as a :class:`Verification` whose ``.error``
+    is set (exactly as in batch mode).
     """
     from src.verifier.verify import (  # noqa: WPS433  (local import)
         Verification,
@@ -253,16 +273,24 @@ def verify_single_cluster(
 
     # Run the same gate the batch flow uses so behaviour is consistent.
     gate_cfg = GateConfig(verify_person=include_person)
-    cols = cluster.get("columns") or []
-    col = cols[0] if isinstance(cols, list) and cols else ""
+    shape = cluster_shape(cluster)
+    pattern = shape["pattern"]
+    cols = shape["columns"]
+    col = cols[0] if cols else ""
     row = cluster.get("row")
     val: Optional[str] = None
-    if isinstance(row, int) and col:
+    # Cell value is only mandatory for single_cell clusters; multi-
+    # row / multi-column clusters use row_lookup instead.
+    if pattern == "single_cell" and isinstance(row, int) and col:
         val = cell_lookup(cluster.get("source", ""), row, col)
     if not should_verify(cluster, cell_value=val, cfg=gate_cfg):
         # Distinguish "no value at all" (label gate-rejected, but
-        # tell the caller why) from a generic gate reject.
-        if val is None or not str(val).strip():
+        # tell the caller why) from a generic gate reject. The
+        # "cell value unavailable" branch only applies to single-
+        # cell clusters; multi-row / multi-column clusters fail
+        # the gate for structural reasons (too few rows / columns,
+        # non-web-verifiable error type, etc.).
+        if pattern == "single_cell" and (val is None or not str(val).strip()):
             raise VerifyError(
                 "gate_rejected",
                 "Cell value unavailable - cannot verify on the web.",
@@ -271,14 +299,18 @@ def verify_single_cluster(
             "gate_rejected",
             "Cluster does not match the entity-verification gate "
             "(non-entity column / unsuitable error type / value too "
-            "long-or-numeric).",
+            "long-or-numeric / too few rows or columns for its "
+            "pattern).",
         )
 
-    # Cache + tools. Same on-disk cache as the batch path so a manual
-    # verify benefits from any previous searches.
+    # Cache + agent backend. Same on-disk cache as the batch path so a
+    # manual verify benefits from any previous searches.
     cache = WebCache(run_dir / "web_cache")
-    web = build_web_search_tool(provider, cache=cache, api_key=api_key)
-    llm = LLMClient()
+    agent = AzureAgentBackend(
+        endpoint=agent_endpoint or "",
+        agent_id=agent_id or "",
+        cache=cache,
+    )
     vcfg = VerifierConfig(
         model=model,
         reasoning_effort=reasoning_effort,
@@ -287,8 +319,7 @@ def verify_single_cluster(
         force=False,
     )
     verifier = Verifier(
-        llm=llm,
-        web=web,
+        agent=agent,
         cell_lookup=cell_lookup,
         column_samples=column_samples,
         row_lookup=row_lookup,
@@ -317,8 +348,8 @@ def verify_single_cluster(
 def verify_run(
     run_dir: Path,
     *,
-    provider: str = "tavily",
-    api_key: Optional[str] = None,
+    agent_endpoint: Optional[str] = None,
+    agent_id: Optional[str] = None,
     model: str = "gpt-5.2",
     reasoning_effort: str = "medium",
     concurrency: int = 4,
@@ -356,11 +387,12 @@ def verify_run(
     for c in clusters:
         if not isinstance(c, Mapping):
             continue
-        cols = c.get("columns") or []
-        col = cols[0] if isinstance(cols, list) and cols else ""
+        shape = cluster_shape(c)
+        cols_c = shape["columns"]
+        col = cols_c[0] if cols_c else ""
         row = c.get("row")
         val = None
-        if isinstance(row, int) and col:
+        if shape["pattern"] == "single_cell" and isinstance(row, int) and col:
             val = cell_lookup(c.get("source", ""), row, col)
         if should_verify(c, cell_value=val, cfg=gate_cfg):
             eligible.append(c)
@@ -388,8 +420,11 @@ def verify_run(
         len(eligible) - len(todo), len(todo),
     )
 
-    web = build_web_search_tool(provider, cache=cache, api_key=api_key)
-    llm = LLMClient()
+    agent = AzureAgentBackend(
+        endpoint=agent_endpoint or "",
+        agent_id=agent_id or "",
+        cache=cache,
+    )
 
     vcfg = VerifierConfig(
         model=model,
@@ -399,8 +434,7 @@ def verify_run(
         force=force,
     )
     verifier = Verifier(
-        llm=llm,
-        web=web,
+        agent=agent,
         cell_lookup=cell_lookup,
         column_samples=column_samples,
         row_lookup=row_lookup,
@@ -489,8 +523,8 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     result = verify_run(
         run_dir,
-        provider=args.provider,
-        api_key=args.api_key,
+        agent_endpoint=args.agent_endpoint,
+        agent_id=args.agent_id,
         model=args.model,
         reasoning_effort=args.reasoning_effort,
         concurrency=args.concurrency,

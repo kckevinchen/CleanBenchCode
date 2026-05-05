@@ -1,0 +1,142 @@
+# Post-discovery aggregation prompt.
+#
+# A multi-pass discovery run emits many paraphrases of the same
+# underlying rule (same columns, same logical content, different
+# wording). The species_key() canonicalization catches some of
+# this at the token level, but the LLM can rephrase a rule with
+# almost no overlapping distinctive tokens ("Dossard uniquely
+# identifies a runner" vs "Dossard (bib number) deterministically
+# determines participant attributes"), so duplicates leak through
+# and the rule list balloons.
+#
+# This pass clusters rules by (source, error_type, sorted columns)
+# and asks the LLM to partition the cluster into the smallest set
+# of CANONICAL rules that, taken together, are logically equivalent
+# to the input set. Multiple distinct canonical rules are allowed
+# and expected (one cluster ≠ one rule). Each input rule must be
+# assigned to exactly one canonical bucket.
+#
+# Originals are NEVER discarded - they remain in `relations.jsonl`.
+# Output of this pass is written to `relations_aggregated.jsonl`
+# with `aggregated_from` listing the species_keys of the originals
+# this canonical rule covers; the report UI surfaces the canonical
+# rule as the primary card with the originals tucked under expand.
+#
+# This pass runs BEFORE generalization, so the value-keyed family
+# generalizer sees clean clusters of distinct branches rather than
+# rephrasings-of-the-same-branch.
+#
+# Placeholders:
+#   source         - source filename
+#   error_type     - shared error_type tag of the cluster
+#   columns        - involved columns (verbatim)
+#   cluster_size   - N rules in the family
+#   cluster_rules  - bullet list of the original rules, 1-indexed
+#   sample_rows    - small Markdown preview of the source so the LLM
+#                    can ground the merge decision in real values
+
+system: >
+  You are deduplicating a list of data-quality rules that all
+  come from the same source, error type, and column set. The
+  rules were discovered across multiple LLM passes; many are
+  paraphrases of the same underlying logical constraint, but
+  some are genuinely distinct rules that happen to share columns.
+
+  Your job is to PARTITION the input rules into the smallest set
+  of CANONICAL rules such that, taken together, the canonical
+  rules are logically equivalent to the conjunction of all
+  inputs.
+
+  PRECISION OVER RECALL. Two rules are paraphrases ONLY if they
+  assert exactly the same constraint. Differences in phrasing,
+  word choice, or rationale do not matter - what matters is the
+  logical content (which cells are flagged as violations).
+
+  Concretely:
+    - "Dossard uniquely identifies a row" ≡
+      "Dossard (bib) deterministically determines other fields"
+      → SAME canonical rule (one FD: Dossard → others).
+    - "If Cadence is 'Monthly' then Period is a month abbrev." ≢
+      "If Cadence is 'Quarterly' then Period is a quarter code."
+      → TWO canonical rules (different antecedents).
+    - "Cadence is 'Monthly' iff Period is a month abbrev." ≡
+      conjunction of both implications above
+      → typically ONE canonical rule subsumes the two implications.
+
+  When in doubt, KEEP RULES SEPARATE. A wrong merge erases a
+  real rule; a missed merge just leaves a duplicate.
+
+  EVERY input rule MUST be assigned to exactly one canonical
+  bucket via the `covers` field (1-indexed input positions). The
+  union of all `covers` arrays must be {1, 2, ..., N} with no
+  overlaps and no gaps.
+
+  YOU MUST NOT invent column names. Only the columns listed in the
+  cluster header may be referenced in canonical rules.
+
+  Each canonical rule should pick the CLEAREST predicate phrasing
+  from its source rules (or write a tighter one yourself), and the
+  HIGHEST confidence reported by any of its sources.
+
+  If no merging is possible (all N rules are genuinely distinct),
+  return {"canonical": null, "reason": "..."} and the originals
+  are kept as-is. Do NOT return N canonical rules each covering
+  one input - that's the same as declining.
+
+  Respond with strictly valid JSON, no markdown fences.
+
+user_template: |
+  You are given a CLUSTER of {cluster_size} rules from the same
+  source ({source}) and the same error type ({error_type}), all
+  referencing the SAME columns:
+
+  COLUMNS:
+  {columns}
+
+  CLUSTER RULES (verbatim, 1-indexed):
+  {cluster_rules}
+
+  A small sample of the source's rows for grounding (the first
+  column `__row__` is the 0-indexed source row number):
+
+  {sample_rows}
+
+  TASK
+  ----
+  Partition the {cluster_size} rules above into the smallest set
+  of canonical rules whose conjunction is logically equivalent to
+  the conjunction of all inputs. Multiple canonical rules are
+  expected when the inputs assert genuinely different constraints
+  (different antecedents, different columns implicated, different
+  logical direction).
+
+  Every input rule must appear in exactly one `covers` array.
+
+  OUTPUT FORMAT
+  -------------
+  Respond with one of:
+
+  Aggregation possible (the common case - at least one merge made):
+  {{
+    "canonical": [
+      {{
+        "kind":       "<a valid kind for {error_type}>",
+        "columns":    ["<col>", ...],
+        "lhs":        ["<col>", ...] | null,
+        "rhs":        ["<col>", ...] | null,
+        "predicate":  "<clearest phrasing>",
+        "executable": "<expression>" | null,
+        "confidence": "high"|"medium"|"low",
+        "rationale":  "<short>",
+        "covers":     [<1-indexed input positions this canonical rule subsumes>]
+      }},
+      ...
+    ],
+    "reason": "<short summary of which inputs were merged and why>"
+  }}
+
+  No merging possible (rare - all inputs are already distinct):
+  {{
+    "canonical": null,
+    "reason": "<short justification>"
+  }}

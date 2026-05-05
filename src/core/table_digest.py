@@ -72,10 +72,20 @@ class ColumnDigest:
     n_distinct: int
     dtype_kind: str  # "numeric" | "text" | "empty"
     top_values: List[Tuple[str, int]] = field(default_factory=list)
-    numeric_summary: Optional[Dict[str, float]] = None  # min/max/median/mean
+    numeric_summary: Optional[Dict[str, float]] = None
+    """For numeric columns: ``min, p25, median, mean, p75, max, n_zeros,
+    n_negatives``. ``None`` for text/empty columns."""
     sample_values: List[str] = field(default_factory=list)
     is_identity_candidate: bool = False
     mean_length: float = 0.0
+    length_summary: Optional[Dict[str, int]] = None
+    """For text columns: ``min, median, max`` cell-character lengths.
+    Lets the LLM detect free-text vs short-code columns and reason
+    about whether outlier rows have unusually long/short cells."""
+    rare_values: List[str] = field(default_factory=list)
+    """Up to N values from the long tail (frequency 1) - useful when
+    `top_values` is uninformative (every value appears once) or the
+    column has a fat head and a long tail of one-offs."""
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +168,21 @@ class TableDigest:
                     f"{fd['n_groups']} groups, "
                     f"{fd['n_rows']} rows)"
                 )
+                # Surface up to 3 counter-examples for approximate
+                # FDs (support < 100%). The LLM should decide whether
+                # the FD is real and the violators are defects, OR
+                # the FD is spurious and should be rejected.
+                examples = fd.get("violation_examples") or []
+                if examples and fd["support"] < 1.0:
+                    for ex in examples[:3]:
+                        lines.append(
+                            f"        violation at row {ex['row']}: "
+                            f"{fd['lhs']}={_trunc(str(ex['lhs_value']))!r} "
+                            f"-> {fd['rhs']}="
+                            f"{_trunc(str(ex['rhs_value']))!r} "
+                            f"(modal mapping says "
+                            f"{_trunc(str(ex['expected_rhs']))!r})"
+                        )
 
         lines.append("  per-column summary:")
         for name in self.headers:
@@ -173,11 +198,37 @@ class TableDigest:
             lines.append(head)
             if col.dtype_kind == "numeric" and col.numeric_summary:
                 ns = col.numeric_summary
+                # Five-number summary for shape, plus zero / negative
+                # counts so the LLM can reason about implicit
+                # constraints (a count column with n_negatives=0 IS a
+                # bound; a percentage column staying inside [0,100]
+                # might be definitional).
+                p25 = ns.get("p25")
+                p75 = ns.get("p75")
+                quart_part = (
+                    f" p25={p25:g} p75={p75:g}"
+                    if p25 is not None and p75 is not None
+                    else ""
+                )
                 lines.append(
-                    f"        numeric: min={ns['min']:g} "
-                    f"median={ns['median']:g} "
-                    f"mean={ns['mean']:g} "
-                    f"max={ns['max']:g}"
+                    f"        numeric: min={ns['min']:g}"
+                    f"{quart_part} median={ns['median']:g} "
+                    f"mean={ns['mean']:g} max={ns['max']:g}"
+                )
+                n_zeros = ns.get("n_zeros")
+                n_negatives = ns.get("n_negatives")
+                tags: List[str] = []
+                if n_zeros:
+                    tags.append(f"zeros={n_zeros}")
+                if n_negatives:
+                    tags.append(f"negatives={n_negatives}")
+                if tags:
+                    lines.append(f"        numeric flags: {', '.join(tags)}")
+            if col.length_summary:
+                ls = col.length_summary
+                lines.append(
+                    f"        cell length (chars): "
+                    f"min={ls['min']} median={ls['median']} max={ls['max']}"
                 )
             if col.top_values:
                 top = ", ".join(
@@ -190,6 +241,12 @@ class TableDigest:
                     repr(_trunc(v)) for v in col.sample_values[:max_sample_values]
                 )
                 lines.append(f"        samples: {samples}")
+            # Rare values - up to 3 from the long tail. Shown only
+            # when the head + tail together carry signal: distinct
+            # count exceeds top_values length.
+            if col.rare_values and col.n_distinct > len(col.top_values):
+                rare = ", ".join(repr(_trunc(v)) for v in col.rare_values[:3])
+                lines.append(f"        rare values (long tail): {rare}")
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
@@ -221,6 +278,9 @@ class TableDigest:
                 "sample_values": list(col.sample_values[:8]),
                 "numeric_summary": dict(col.numeric_summary)
                 if col.numeric_summary else None,
+                "length_summary": dict(col.length_summary)
+                if col.length_summary else None,
+                "rare_values": list(col.rare_values[:3]),
             }
 
         return {
@@ -252,24 +312,61 @@ def _classify_dtype(values: pd.Series) -> str:
 
 
 def _to_float(v: str) -> Optional[float]:
-    """Best-effort coercion for numeric_summary stats."""
+    """Best-effort coercion for numeric_summary stats.
+
+    Mirrors the surface forms accepted by :data:`_NUMERIC_RE` so the
+    dtype classifier and the per-cell coercion stay in sync (otherwise
+    a column could classify as numeric and still leave its
+    ``numeric_summary`` empty because every cell rejected the parse).
+    Accepts: optional leading ``+``/``-``, accounting-style
+    parenthesised negatives ``(50)``, currency prefix
+    (``$``/``\u20ac``/``\u00a3``/``\u00a5``) -- with the sign allowed BEFORE or
+    AFTER the symbol -- thousand separators (``1,000``), decimals,
+    and a trailing ``%``.
+    """
     if not isinstance(v, str) or not v.strip():
         return None
     s = v.strip()
-    # Strip currency / percent / whitespace, keep sign.
-    s = s.replace(",", "")
+
+    # Accounting-style negative: "(50)" or "(1,234.5)" \u2192 -50, -1234.5.
+    paren_negative = False
+    if len(s) >= 2 and s[0] == "(" and s[-1] == ")":
+        paren_negative = True
+        s = s[1:-1].strip()
+
+    # Trailing "%" \u2192 divide by 100 at the end.
     has_pct = s.endswith("%")
     if has_pct:
-        s = s[:-1]
+        s = s[:-1].strip()
+
+    # Sign may appear before OR after the currency symbol
+    # ("-$100" and "$-100" both occur in the wild).
+    sign = 1
+    if s.startswith("+"):
+        s = s[1:].strip()
+    elif s.startswith("-"):
+        sign = -1
+        s = s[1:].strip()
     for sym in ("$", "\u20ac", "\u00a3", "\u00a5"):
         if s.startswith(sym):
-            s = s[1:]
+            s = s[1:].strip()
             break
-    s = s.strip()
+    if s.startswith("+"):
+        s = s[1:].strip()
+    elif s.startswith("-"):
+        sign = -sign
+        s = s[1:].strip()
+
+    s = s.replace(",", "")
+    if not s:
+        return None
     try:
         x = float(s)
     except ValueError:
         return None
+    x = sign * x
+    if paren_negative:
+        x = -abs(x)
     return x / 100.0 if has_pct else x
 
 
@@ -312,10 +409,36 @@ def _build_column_digest(
             ser = pd.Series(floats, dtype=float)
             numeric_summary = {
                 "min": float(ser.min()),
-                "max": float(ser.max()),
+                "p25": float(ser.quantile(0.25)),
                 "median": float(ser.median()),
                 "mean": float(ser.mean()),
+                "p75": float(ser.quantile(0.75)),
+                "max": float(ser.max()),
+                "n_zeros": int((ser == 0).sum()),
+                "n_negatives": int((ser < 0).sum()),
             }
+
+    # Text-length summary - lets the LLM tell free-text columns from
+    # short-code columns at a glance, and gives outlier rows a
+    # reference for "this cell is unusually long/short".
+    length_summary: Optional[Dict[str, int]] = None
+    if dtype_kind == "text" and n_non_empty:
+        lens = non_empty.str.len()
+        length_summary = {
+            "min": int(lens.min()),
+            "median": int(lens.median()),
+            "max": int(lens.max()),
+        }
+
+    # Rare values: up to a few values from the long tail (frequency 1).
+    # These are *additive* to top_values - they don't replace it.
+    # Useful for fat-head/long-tail distributions where the top-K
+    # masks the diversity of the rest.
+    rare_values: List[str] = []
+    if n_non_empty:
+        vc = non_empty.value_counts()
+        singletons = [str(v) for v, c in vc.items() if c == 1]
+        rare_values = singletons[-3:]  # arbitrary 3 from the tail
 
     is_identity = (
         n_non_empty >= max(5, int(0.5 * n_rows))
@@ -336,6 +459,8 @@ def _build_column_digest(
         sample_values=sample_values,
         is_identity_candidate=is_identity,
         mean_length=mean_length,
+        length_summary=length_summary,
+        rare_values=rare_values,
     )
 
 
@@ -431,6 +556,24 @@ def _candidate_fds(
             ]
             if consistent.empty:
                 continue
+            # Counter-examples: rows that violate the modal mapping.
+            # When the FD is approximate (support < 1) these are
+            # exactly the rows the LLM should consider when deciding
+            # whether to emit the FD as a hard rule. We persist up
+            # to 3 examples in (row_idx, lhs_value, rhs_value,
+            # expected_modal_rhs) form so the prompt can ground the
+            # FD candidate in concrete conflicts.
+            violations: List[Dict[str, Any]] = []
+            modal_map = dict(zip(modals["_a"], modals["_b"]))
+            mismatches = sub_q[sub_q["_b"] != sub_q["_a"].map(modal_map)]
+            if not mismatches.empty:
+                for idx, row in mismatches.head(3).iterrows():
+                    violations.append({
+                        "row": int(idx),
+                        "lhs_value": str(row["_a"]),
+                        "rhs_value": str(row["_b"]),
+                        "expected_rhs": str(modal_map.get(row["_a"], "")),
+                    })
             candidates.append(
                 {
                     "lhs": a,
@@ -438,6 +581,7 @@ def _candidate_fds(
                     "support": modal_total / total,
                     "n_groups": int(len(qualifying)),
                     "n_rows": int(total),
+                    "violation_examples": violations,
                 }
             )
 

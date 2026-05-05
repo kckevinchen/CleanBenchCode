@@ -83,6 +83,17 @@ if [[ -f "$ROOT/venv/bin/activate" ]]; then
   source "$ROOT/venv/bin/activate"
 fi
 
+# Load secrets / Foundry Agents config from .env so the spawned
+# server inherits AZURE_AGENTS_ENDPOINT, AZURE_AGENTS_VERIFIER_AGENT_ID,
+# etc. Without this the web-grounded verifier returns
+# ``error: missing agent_id`` from the UI even when .env is populated.
+if [[ -f "$ROOT/.env" ]]; then
+  set -a
+  # shellcheck source=/dev/null
+  source "$ROOT/.env"
+  set +a
+fi
+
 # setsid + nohup: survive SSH hangup, own process group so the server
 # can be killed cleanly via the pidfile.
 nohup setsid python -m experiments.workbench "$@" \

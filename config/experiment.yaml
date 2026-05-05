@@ -22,7 +22,7 @@ experiment:
   description: >
     Per-type data-cleaning error detection: for each CSV chunk, ask a
     GPT-5 family model one question per error type in the taxonomy.
-    The taxonomy is the 20 fine-grained error types from
+    The taxonomy is the 13 fine-grained error types from
     error_type.csv, defined in prompts/error_types.yaml. Keys,
     grouped by Scope:
       Single-Column:
@@ -35,20 +35,13 @@ experiment:
         - semantic_incompatible
         - numeric_outlier
       Multi-Column (intra-row):
-        - missing_value
-        - embedded_value_error
-        - cross_column_inconsistency
         - fd_violation
         - row_calculation_inconsistency
-        - business_rule_violation
+        - string_calculation_inconsistency
       Multi-Row (intra-table cross-row):
-        - column_aggregation_inconsistency
         - row_duplication
-        - cross_record_inconsistency
       Multi-Table (cross-source):
-        - cross_table_error
-        - cross_source_naming_conflict
-        - value_representation_conflict
+        - inter_table_inconsistency
     Use prompts.error_types (or the CLI flag --error-types) to run
     only a subset; the default subset below enables the 8 single-
     column-friendly types. Per-chunk, per-type results are merged,
@@ -79,20 +72,16 @@ data:
   chunk_size: 100
   # 'all'   = each LLM call sees every CSV column for the row slice.
   #           REQUIRED for the cross-column / cross-row types:
-  #             cross_column_inconsistency, fd_violation,
-  #             row_calculation_inconsistency, business_rule_violation,
-  #             row_duplication, cross_record_inconsistency,
-  #             and the Multi-Table types
-  #             (cross_table_error, cross_source_naming_conflict,
-  #              value_representation_conflict).
+  #             fd_violation, row_calculation_inconsistency,
+  #             string_calculation_inconsistency, row_duplication,
+  #             and the Multi-Table type inter_table_inconsistency.
   # 'single'= each LLM call sees one column at a time. Use this ONLY when
   #           every selected error type is single-column-friendly, i.e.
   #           a subset of:
   #             typo, text_inconsistency, casing_inconsistency,
   #             pattern_inconsistency, punctuation_inconsistency,
   #             number_format_inconsistency, semantic_incompatible,
-  #             numeric_outlier, missing_value, embedded_value_error,
-  #             column_aggregation_inconsistency.
+  #             numeric_outlier.
   # Total detection LLM calls = chunks_per_row * (1 if all else len(columns))
   #                              * len(error_types).
   column_mode: single
@@ -114,10 +103,9 @@ data:
   # not O(rows) - so it stays affordable on tall tables.
   #
   # Mostly useful for the multi-column / multi-row error types
-  # (cross_column_inconsistency, fd_violation,
-  # row_calculation_inconsistency, business_rule_violation,
-  # column_aggregation_inconsistency, row_duplication,
-  # cross_record_inconsistency) which need global context the row
+  # (fd_violation, row_calculation_inconsistency,
+  # string_calculation_inconsistency, row_duplication,
+  # inter_table_inconsistency) which need global context the row
   # chunk alone cannot provide. Single-column types ignore it.
   # CLI override: `--no-table-digest` to disable.
   include_table_digest: true
@@ -157,14 +145,10 @@ prompts:
   #   - single-column   (typo, text/casing/pattern/punctuation/
   #                      number-format inconsistency, semantic_incompatible,
   #                      numeric_outlier)
-  #   - multi-column    (missing_value, embedded_value_error,
-  #                      cross_column_inconsistency, fd_violation,
-  #                      row_calculation_inconsistency,
-  #                      business_rule_violation)
-  #   - multi-row       (column_aggregation_inconsistency, row_duplication,
-  #                      cross_record_inconsistency)
-  #   - multi-table     (cross_table_error, cross_source_naming_conflict,
-  #                      value_representation_conflict)
+  #   - multi-column    (fd_violation, row_calculation_inconsistency,
+  #                      string_calculation_inconsistency)
+  #   - multi-row       (row_duplication)
+  #   - multi-table     (inter_table_inconsistency)
   # Combine freely: `[single-column, multi-column]`. Use `null`, an empty
   # list, or `[all]` to disable filtering. Applied AFTER `error_types`
   # subset selection. CLI override: `--scopes single-column,multi-column`.
@@ -185,20 +169,13 @@ prompts:
   #     - number_format_inconsistency
   #     - semantic_incompatible
   #     - numeric_outlier
-  #     - missing_value
-  #     - embedded_value_error
-  #     - column_aggregation_inconsistency
   #   Require column_mode=all:
-  #     - cross_column_inconsistency
   #     - fd_violation
   #     - row_calculation_inconsistency
-  #     - business_rule_violation
+  #     - string_calculation_inconsistency
   #     - row_duplication
-  #     - cross_record_inconsistency
   #   Multi-Table (rare findings; require column_mode=all):
-  #     - cross_table_error
-  #     - cross_source_naming_conflict
-  #     - value_representation_conflict
+  #     - inter_table_inconsistency
   #
   # Examples:
   #   error_types: [typo, text_inconsistency, pattern_inconsistency]
@@ -208,9 +185,117 @@ prompts:
   # Also: `python -m experiments.run_cleaning_detection --list-error-types`
   # prints every key in the currently-selected taxonomy.
   #
-  # Default null = all 20 keys; combine with `single_column_only: true`
+  # Default null = all 13 keys; combine with `single_column_only: true`
   # above to get exactly the 8 Single-Column types.
   error_types: null
+
+# Knobs specific to the row_duplication detector. Only consulted when
+# `row_duplication` is among the selected error_types.
+#
+# `collision_adjudication` is the default and recommended strategy:
+#   1. Deterministic scan of the whole table for collision groups (rows
+#      that match on a candidate identity key, with optional per-type
+#      normalisation: case-fold strings, strip punctuation, coerce
+#      numbers, parse dates).
+#   2. Optional LLM adjudication of each group asking "are these rows
+#      duplicates? exact / near / distinct?". One LLM call per group;
+#      group sizes are typically 2-5 rows so each call is tiny and
+#      independent of table size.
+#   3. Findings emitted in the same JSON shape as the per-chunk scan,
+#      so the adaptive estimator and reporting layers are unchanged.
+#
+# `legacy_chunk_scan` falls back to the original behaviour (one LLM call
+# per row chunk asking the LLM to find duplicates inside the chunk).
+# This misses any duplicate pair that straddles a chunk boundary on
+# tables larger than `chunk_size` rows; kept only for A/B comparison.
+row_duplication:
+  detection_mode: collision_adjudication  # collision_adjudication | legacy_chunk_scan | whole_table
+  # whole_table is a PoC mode that skips ALL clustering and hands the
+  # full CSV to one LLM call per source under the same Chao1/GT
+  # adaptive stop rule. Sources with more than `whole_table_max_rows`
+  # rows are skipped. Use only on small tables.
+  whole_table_max_rows: 200
+  # Identity-key search: how many candidate key subsets to consider,
+  # and how wide they may be. Single-column keys cover most real
+  # cases; pair keys catch composite identifiers like
+  # (Order_ID, Line_Item).
+  max_key_subsets: 4
+  max_key_size: 2
+  min_dup_rate: 0.0          # Skip subsets whose dup_rate is below this.
+  # Cap total adjudicator LLM calls per source. Collision groups are
+  # ranked by group size (largest first) and capped here. Set to a
+  # large number to disable the cap.
+  max_groups_per_source: 200
+  # When true, a normalisation pass (lower-case, strip punctuation,
+  # coerce numerics) is applied before the duplicate scan. Catches
+  # near-duplicates like "Acme Corp." vs "ACME CORPORATION".
+  normalize_keys: true
+  # When false, deterministic collision groups are emitted as candidates
+  # straight away with no LLM verification. Set true (default) to have
+  # the LLM confirm each group.
+  adjudicate_groups: true
+  # Per-column LLM canonicalisation pass. When true, before the
+  # collision scan we ask the LLM to bucket equivalent surface forms
+  # within each candidate key column ("US" / "USA" / "United States"
+  # -> one canonical form). The resulting value->canonical map is fed
+  # into the collision scan so semantic duplicates collide
+  # deterministically. Adds ~1 LLM call per (source, key column);
+  # On by default: combined with normalisation + adjudication, this
+  # gives the highest recall path (catches semantic equivalents like
+  # "US" / "USA" / "United States" that lexical normalisation alone
+  # would miss). Set to false only if the extra LLM call per key
+  # column is too expensive for your budget.
+  canonicalize_keys: true
+  # Skip canonicalisation for columns whose distinct non-null
+  # cardinality exceeds this cap (the prompt would be too long for
+  # one reliable LLM call).
+  canonicalize_max_cardinality: 200
+  # Path to the canonicalisation prompt template. Relative paths are
+  # resolved against the project root.
+  canonicalize_prompt_path: prompts/canonicalize_values.yaml
+  # ---- Token-signature blocking (recall-first candidate generator).
+  # On by default. Surfaces rows that share a "signature" (first
+  # token of each candidate-key column) so abbreviations like
+  # "Acme Corp" / "Acme Corporation" land in the same block even
+  # when no key matches exactly. Free; runs alongside key-collision.
+  blocking_enabled: true
+  blocking_signature: first_token  # or 'first_char'
+  blocking_min_block_size: 2
+  blocking_max_block_size: 50
+  # ---- MinHash LSH near-duplicate clusterer. On by default.
+  # Catches row-level Jaccard near-duplicates (paraphrased prose,
+  # punctuation variations, partial ordering changes). Requires
+  # ``datasketch`` to be installed (listed in requirements.txt).
+  minhash_enabled: true
+  minhash_threshold: 0.7
+  minhash_num_perm: 128
+  minhash_shingle_size: 1   # 1 for short rows, 2 for prose-like text
+  minhash_min_tokens: 3
+  minhash_max_cluster_size: 50
+  # ---- Sentence-embedding near-duplicate clusterer. On by default.
+  # Catches semantic / paraphrase near-duplicates that token-level
+  # methods miss ("Acme is the leading vendor" vs "The leading
+  # vendor is Acme"). Requires ``sentence-transformers`` to be
+  # installed (listed in requirements.txt); on first run downloads
+  # the model (~80MB for the default MiniLM). Set ``embedding_model``
+  # to ``sentence-transformers/all-mpnet-base-v2`` for higher quality
+  # at ~3x the cost.
+  embedding_enabled: true
+  embedding_threshold: 0.85
+  embedding_model: sentence-transformers/all-MiniLM-L6-v2
+  embedding_min_chars: 8
+  embedding_max_cluster_size: 50
+  # ---- Adaptive inner loop
+  # Whenever ``adjudicate_groups`` or ``canonicalize_keys`` is on,
+  # the LLM call is driven through the SAME stop rule used by the
+  # experiment-mode adaptive loop -- there is one place to control
+  # all LLM-call FN behaviour. The k_max, k_min, epsilon,
+  # epsilon_chao1, stop_when ("gt"|"chao1"|"both") and
+  # require_two_consecutive knobs all live in
+  # ``good_turing.per_arm.defaults`` below and apply uniformly. With
+  # ``k_max == 1`` the loop runs exactly once (single-shot).
+  # The recall-first union of issues / equivalence classes is
+  # returned across runs.
 
 good_turing:
   # Settings consumed when `experiment.mode=adaptive` (or `--mode adaptive`
@@ -346,7 +431,7 @@ good_turing:
       #            conservative upper end of the CI).
       #   both  -> require both criteria simultaneously (recommended
       #            for an end-to-end FN guarantee on the dataset).
-      stop_when: gt
+      stop_when: both
       # Threshold for the Chao1 criterion (only consulted when
       # `stop_when` is `chao1` or `both`). Default 0.05 = "estimated
       # missing count is at most 5% of what we've already observed".
@@ -360,8 +445,7 @@ good_turing:
     # applicability:
     #   column: [typo, casing_inconsistency, pattern_inconsistency,
     #            punctuation_inconsistency, number_format_inconsistency,
-    #            text_inconsistency, semantic_incompatible, numeric_outlier,
-    #            missing_value, embedded_value_error]
+    #            text_inconsistency, semantic_incompatible, numeric_outlier]
 
 output:
   directory: outputs

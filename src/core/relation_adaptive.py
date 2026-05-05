@@ -1,7 +1,7 @@
-"""Adaptive multi-pass schema discovery with per-arm Good-Turing stopping.
+"""Adaptive multi-pass relation discovery with per-arm Good-Turing stopping.
 
 This is the relation-level analogue of :mod:`src.adaptive.scoped_gt`,
-specialised for the schema-discovery loop:
+specialised for the relation-discovery loop:
 
 * **Species**: a discovered :class:`src.core.relations.Relation`,
   identified by its :meth:`~src.core.relations.Relation.species_key`.
@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 
 from src.adaptive._chao1 import compute_core as _compute_core
 
@@ -47,6 +47,21 @@ from .relations import DiscoveryReport, Relation, SchemaDiscoverer
 logger = logging.getLogger(__name__)
 
 ArmKey = Tuple[str, str]  # (source, error_type)
+
+StopWhen = Literal["gt", "chao1", "both"]
+"""Per-arm saturation criterion.
+
+Mirrors :data:`src.adaptive.scoped_gt.StopWhen`:
+
+* ``"gt"``    -- Good-Turing point estimate ``p_0 = n_1 / N`` is
+  below ``gt_threshold``. Bounds the *probability mass* on
+  undetected species.
+* ``"chao1"`` -- upper-95 CI on the Chao1 missing count, normalised
+  by ``S_obs``, is below ``epsilon_chao1``. Bounds the *count* of
+  undetected species (using the conservative upper end of the CI
+  because Chao1 is itself a lower bound on S).
+* ``"both"``  -- both criteria simultaneously; strictly stronger.
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -73,6 +88,18 @@ class ArmStats:
     saturated_at_pass: Optional[int] = None
     # Most recent Chao1/GT estimate for the arm.
     last_estimate: Optional[Dict[str, Any]] = None
+    # Why the most recent saturation check returned its verdict.
+    # One of:
+    #   ``None``              -- no check has run yet (passes_run < min_passes)
+    #   ``"below-min-passes"`` -- still warming up
+    #   ``"empty"``           -- no relations across any pass; arm retired
+    #   ``"gt"``              -- GT criterion satisfied (stop_when="gt")
+    #   ``"chao1"``           -- Chao1 criterion satisfied (stop_when="chao1")
+    #   ``"both"``            -- both criteria satisfied (stop_when="both")
+    #   ``"gt-only"``         -- GT ok but Chao1 not (stop_when="both", continuing)
+    #   ``"chao1-only"``      -- Chao1 ok but GT not (stop_when="both", continuing)
+    #   ``"none"``            -- neither criterion satisfied yet
+    last_reason: Optional[str] = None
 
 
 @dataclass
@@ -106,6 +133,8 @@ class AdaptiveSchemaDiscoverer:
         min_passes: int = 2,
         gt_threshold: float = 0.05,
         base_seed: int = 1000,
+        stop_when: StopWhen = "both",
+        epsilon_chao1: float = 0.05,
     ) -> None:
         if max_passes < 1:
             raise ValueError("max_passes must be >= 1")
@@ -115,11 +144,19 @@ class AdaptiveSchemaDiscoverer:
             raise ValueError("min_passes must be <= max_passes")
         if not (0.0 <= gt_threshold <= 1.0):
             raise ValueError("gt_threshold must be in [0, 1]")
+        if not (0.0 <= epsilon_chao1):
+            raise ValueError("epsilon_chao1 must be >= 0")
+        if stop_when not in ("gt", "chao1", "both"):
+            raise ValueError(
+                f"stop_when must be one of 'gt', 'chao1', 'both'; got {stop_when!r}"
+            )
         self.discoverer = discoverer
         self.max_passes = int(max_passes)
         self.min_passes = int(min_passes)
         self.gt_threshold = float(gt_threshold)
         self.base_seed = int(base_seed)
+        self.stop_when: StopWhen = stop_when
+        self.epsilon_chao1 = float(epsilon_chao1)
 
     # ------------------------------------------------------------------
 
@@ -151,6 +188,7 @@ class AdaptiveSchemaDiscoverer:
             },
             "saturated": arm.saturated,
             "saturated_at_pass": arm.saturated_at_pass,
+            "last_reason": arm.last_reason,
         }
 
     def _check_saturation(
@@ -163,27 +201,66 @@ class AdaptiveSchemaDiscoverer:
 
         Saturation requires:
 
-        * at least ``min_passes`` passes have run,
-        * Good-Turing missing mass is below ``gt_threshold``,
-        * AND either (a) the arm produced relations and at least one
-          species was seen more than once (n_2 > 0), OR (b) the arm
-          consistently produced zero relations across all passes
-          (genuine empty arm - no point hitting it again).
+        * at least ``min_passes`` passes have run, AND
+        * the configured ``stop_when`` criterion holds:
+
+          - ``gt``    -- ``p_0 = n_1 / N <= gt_threshold``. The
+            point estimate is well-defined for any ``N > 0``; no
+            ``n_2 > 0`` precondition (see Good 1953; McAllester &
+            Schapire 2000 for concentration without that guard).
+          - ``chao1`` -- ``(chao1_ci_95_high - S_obs) / S_obs <= epsilon_chao1``.
+            The bias-corrected Chao1 variant in ``_chao1`` already
+            handles ``n_2 == 0`` (it is unstable for very small
+            ``n_2``, but defined).
+          - ``both``  -- both of the above hold simultaneously.
+
+        Special case: empty arm (no relations across all passes) is
+        treated as saturated under any criterion -- nothing more to
+        discover.
         """
         if arm.passes_run < self.min_passes:
+            arm.last_reason = "below-min-passes"
             return False
         core = _compute_core(arm.frequencies.values(), num_runs=arm.passes_run)
         # Empty arm: model returned nothing in every pass. Treat as saturated.
         if core.n_observed == 0:
             arm.saturated = True
             arm.saturated_at_pass = pass_index
+            arm.last_reason = "empty"
             return True
-        # Need a duplicate to trust GT (otherwise n_1/N is artificially high
-        # but uninformative); fall through if no duplicates yet.
-        n2 = core.frequency_counts.get(2, 0)
-        if n2 == 0:
-            return False
-        if core.good_turing_missing_mass < self.gt_threshold:
+
+        # Use ``<=`` to match the docstring above and the shared
+        # ``_chao1.is_saturated_by_estimate`` predicate. Using strict
+        # ``<`` would let an arm hover at exactly ``gt_threshold``
+        # without ever saturating.
+        gt_ok = core.good_turing_missing_mass <= self.gt_threshold
+
+        if core.n_observed > 0:
+            f0_upper = max(0.0, core.chao1_ci_95_high - core.n_observed)
+            chao1_ratio = f0_upper / core.n_observed
+        else:
+            chao1_ratio = float("inf")
+        chao1_ok = chao1_ratio <= self.epsilon_chao1
+
+        if self.stop_when == "gt":
+            criterion_ok = gt_ok
+            reason = "gt" if gt_ok else "none"
+        elif self.stop_when == "chao1":
+            criterion_ok = chao1_ok
+            reason = "chao1" if chao1_ok else "none"
+        else:  # "both"
+            criterion_ok = gt_ok and chao1_ok
+            if criterion_ok:
+                reason = "both"
+            elif gt_ok:
+                reason = "gt-only"
+            elif chao1_ok:
+                reason = "chao1-only"
+            else:
+                reason = "none"
+
+        arm.last_reason = reason
+        if criterion_ok:
             arm.saturated = True
             arm.saturated_at_pass = pass_index
             return True
@@ -308,6 +385,8 @@ class AdaptiveSchemaDiscoverer:
             "min_passes": self.min_passes,
             "gt_threshold": self.gt_threshold,
             "base_seed": self.base_seed,
+            "stop_when": self.stop_when,
+            "epsilon_chao1": self.epsilon_chao1,
         }
 
 
@@ -325,6 +404,14 @@ def adaptive_summary_dict(result: AdaptiveDiscoveryResult) -> Dict[str, Any]:
     for a in arms.values():
         if a.saturated and a.saturated_at_pass is not None:
             saturated_at[a.saturated_at_pass] = saturated_at.get(a.saturated_at_pass, 0) + 1
+
+    # Tally why each arm finished where it did - useful for spotting
+    # arms that hit max_passes for "gt-only"/"chao1-only" reasons
+    # (i.e. one criterion was happy but the other wasn't).
+    reason_counts: Dict[str, int] = {}
+    for a in arms.values():
+        key = a.last_reason or "unchecked"
+        reason_counts[key] = reason_counts.get(key, 0) + 1
 
     # Per-error-type aggregates.
     by_error_type: Dict[str, Dict[str, Any]] = {}
@@ -346,6 +433,7 @@ def adaptive_summary_dict(result: AdaptiveDiscoveryResult) -> Dict[str, Any]:
         "n_arms": n_arms,
         "n_saturated_arms": n_saturated,
         "saturated_arms_by_pass": {str(k): v for k, v in sorted(saturated_at.items())},
+        "last_reason_counts": reason_counts,
         "n_union_relations": len(result.union_relations),
         "by_error_type": by_error_type,
         "arms": [a.last_estimate for a in arms.values() if a.last_estimate is not None],

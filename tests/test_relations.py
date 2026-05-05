@@ -240,6 +240,13 @@ class TestRelationSpeciesKey:
             "zip   determines  state"
         )
 
+    def test_fold_predicate_nfkc_normalises(self) -> None:
+        # Full-width digits / operators and no-break spaces fold to
+        # ASCII so visually-equivalent predicates collapse.
+        # ``\uff1e`` is full-width '>'; ``\uff10\uff11`` are full-width 0,1.
+        assert _fold_predicate("a \uff1e b") == _fold_predicate("a > b")
+        assert _fold_predicate("x = \uff10\uff11") == _fold_predicate("x = 01")
+
 
 # ---------------------------------------------------------------------------
 # SchemaDiscoverer with a fake LLM
@@ -379,3 +386,192 @@ class TestSchemaDiscoverer:
         )
         reports = disc.run()
         assert all(len(r.relations) == 0 for r in reports)
+
+
+# ---------------------------------------------------------------------------
+# Value-anchor filter (drops "if X == 'literal' then ..." rules whose
+# conditioning column is high-cardinality / not a closed enum)
+# ---------------------------------------------------------------------------
+
+
+class TestValueAnchorFilter:
+    def _digest(self):
+        import pandas as pd
+        from src.core.table_digest import build_table_digest
+        df = pd.DataFrame({
+            "Description": [f"Exemption {i} MW" for i in range(1, 11)],
+            "Capacity": list(range(1000, 11000, 1000)),
+            "Status": ["Approved", "Rejected"] * 5,
+            "Approver": ["A"] * 5 + [None] * 5,
+        })
+        return df, build_table_digest(df, source="t")
+
+    def test_drops_value_keyed_implication(self) -> None:
+        from src.core.relations import _is_value_anchored
+        _, d = self._digest()
+        raw = {
+            "kind": "implication",
+            "predicate": "if Description == 'Exemption 5 MW' then Capacity <= 5000",
+            "executable": "Description != 'Exemption 5 MW' or Capacity <= 5000",
+        }
+        reason = _is_value_anchored(raw, d, ("Description", "Capacity"))
+        assert reason is not None
+        assert "value-anchored" in reason
+        assert "Exemption 5 MW" in reason
+
+    def test_keeps_closed_enum_implication(self) -> None:
+        from src.core.relations import _is_value_anchored
+        _, d = self._digest()
+        raw = {
+            "kind": "mandatory_when",
+            "predicate": "if Status == 'Approved' then Approver is non-null",
+            "executable": "Status != 'Approved' or Approver is not null",
+        }
+        # Status has only 2 distinct values - closed enum, must pass.
+        assert _is_value_anchored(raw, d, ("Status", "Approver")) is None
+
+    def test_keeps_arithmetic_with_numeric_literal(self) -> None:
+        from src.core.relations import _is_value_anchored
+        _, d = self._digest()
+        raw = {
+            "kind": "percentage",  # not in the anchor-kind set
+            "predicate": "Pct <= 100",
+            "executable": "Pct <= 100",
+        }
+        assert _is_value_anchored(raw, d, ("Pct",)) is None
+
+    def test_kind_outside_anchor_set_is_skipped(self) -> None:
+        # An FD never trips the filter even when it quotes literals.
+        from src.core.relations import _is_value_anchored
+        _, d = self._digest()
+        raw = {
+            "kind": "fd",
+            "predicate": "Description determines Capacity",
+            "executable": None,
+        }
+        assert _is_value_anchored(raw, d, ("Description", "Capacity")) is None
+
+    def test_no_digest_means_no_filter(self) -> None:
+        from src.core.relations import _is_value_anchored
+        raw = {
+            "kind": "implication",
+            "predicate": "if A == 'x' then B == 'y'",
+            "executable": "A != 'x' or B == 'y'",
+        }
+        assert _is_value_anchored(raw, None, ("A", "B")) is None
+
+
+# ---------------------------------------------------------------------------
+# Multi-table (workbook-scope) discovery
+# ---------------------------------------------------------------------------
+
+
+class TestMultiTableDiscovery:
+    def _make_taxonomy_with_table_types(self) -> ErrorTaxonomy:
+        # Reuse the row-scope types and add the unified table-scope umbrella.
+        types = list(_make_taxonomy().types) + [
+            ErrorType(
+                key="inter_table_inconsistency",
+                name="Inter-table Inconsistency",
+                category="Multi-Table / Relational",
+                description=(
+                    "Conflicting values, broken FKs, or representation "
+                    "mismatches across sibling sheets."
+                ),
+                example="Project P99 in child but not in parent.",
+                notes="...",
+            ),
+        ]
+        return ErrorTaxonomy(
+            system_prompt="sys", user_template="{type_key}", types=tuple(types),
+        )
+
+    def test_table_scope_dispatches_one_call_per_workbook(
+        self, tmp_path: Path,
+    ) -> None:
+        # Two workbooks: one with two sheets (eligible), one with one
+        # sheet (ineligible -> table-scope arms skipped).
+        a = pd.DataFrame({
+            "ProjectCode": [f"P{i:02d}" for i in range(15)],
+            "Owner": ["x"] * 15,
+        })
+        b = pd.DataFrame({
+            "ProjectCode": ["P00", "P01", "ZZ-01", "ZZ-02"] * 4,
+            "Hours": [10, 20, 30, 40] * 4,
+        })
+        c = pd.DataFrame({"only": [1, 2, 3]})
+        digest_a = build_table_digest(a, source="a.csv")
+        digest_b = build_table_digest(b, source="b.csv")
+        digest_c = build_table_digest(c, source="c.csv")
+
+        tax = self._make_taxonomy_with_table_types()
+        cfg = _make_discovery_cfg(tmp_path)
+
+        fake = _FakeLLM(responses={
+            "inter_table_inconsistency": json.dumps({"relations": [{
+                "kind": "foreign_key",
+                "columns": ["ProjectCode"],
+                "predicate": "b.ProjectCode references a.ProjectCode",
+                "confidence": "high",
+                "rationale": "FK candidate in priors block.",
+                "tables": ["a.csv", "b.csv"],
+                "column_refs": [["a.csv", "ProjectCode"], ["b.csv", "ProjectCode"]],
+            }]}),
+        })
+
+        disc = SchemaDiscoverer(
+            llm=fake,  # type: ignore[arg-type]
+            prompt_config=cfg, taxonomy=tax, model="fake-model",
+            digests={"a.csv": digest_a, "b.csv": digest_b, "c.csv": digest_c},
+            source_frames={"a.csv": a, "b.csv": b, "c.csv": c},
+            error_types=[et for et in tax.types if et.key == "inter_table_inconsistency"],
+            workbooks={"wb_multi": ["a.csv", "b.csv"], "wb_single": ["c.csv"]},
+        )
+        reports = disc.run()
+        # Exactly one call: the multi-sheet workbook.
+        assert len(reports) == 1
+        rep = reports[0]
+        assert rep.source == "wb_multi"
+        assert len(rep.relations) == 1
+        rel = rep.relations[0]
+        assert rel.tables == ("a.csv", "b.csv")
+        assert ("a.csv", "ProjectCode") in rel.column_refs
+        assert ("b.csv", "ProjectCode") in rel.column_refs
+
+    def test_no_workbooks_skips_table_scope(self, tmp_path: Path) -> None:
+        # Without ``workbooks`` arg, table-scope types are silently
+        # skipped (single-source default behaviour).
+        df = _hr_frame()
+        digest = build_table_digest(df, source="hr.csv")
+        tax = self._make_taxonomy_with_table_types()
+        cfg = _make_discovery_cfg(tmp_path)
+        fake = _FakeLLM(responses={})
+        disc = SchemaDiscoverer(
+            llm=fake,  # type: ignore[arg-type]
+            prompt_config=cfg, taxonomy=tax, model="fake-model",
+            digests={"hr.csv": digest},
+            source_frames={"hr.csv": df},
+            error_types=[
+                et for et in tax.types
+                if et.key in ("inter_table_inconsistency", "fd_violation")
+            ],
+        )
+        reports = disc.run()
+        # Only the row-scope fd_violation arm fires.
+        assert {r.error_type for r in reports} == {"fd_violation"}
+
+    def test_relation_species_key_includes_tables(self) -> None:
+        # Two relations identical except for ``tables`` should NOT
+        # collapse under species_key.
+        from src.core.relations import Relation
+        a = Relation(
+            source="wb1", error_type="inter_table_inconsistency", kind="foreign_key",
+            columns=("X",), predicate="X is FK",
+            tables=("sheet_a.csv", "sheet_b.csv"),
+        )
+        b = Relation(
+            source="wb1", error_type="inter_table_inconsistency", kind="foreign_key",
+            columns=("X",), predicate="X is FK",
+            tables=("sheet_c.csv", "sheet_d.csv"),
+        )
+        assert a.species_key() != b.species_key()

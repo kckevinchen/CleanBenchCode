@@ -21,19 +21,19 @@
     </div>
   </header>
 
-  <nav class="tabs">
-    <button class="tab active" data-tab="runs">Runs</button>
-    <button class="tab" data-tab="launch">Launch new run</button>
-    <button class="tab" data-tab="relations">Discover relations</button>
-    <button class="tab" data-tab="compare">Compare runs</button>
-    <button class="tab" data-tab="dataprep">Data prep</button>
-    <button class="tab" data-tab="jobs">Jobs <span id="jobs-badge" class="badge" hidden>0</span></button>
-    <button class="tab" data-tab="pipeline">Pipeline</button>
+  <nav class="tabs" role="tablist" aria-label="Workbench sections">
+    <button class="tab active" data-tab="runs" role="tab" aria-selected="true" aria-controls="panel-runs" tabindex="0">Runs</button>
+    <button class="tab" data-tab="launch" role="tab" aria-selected="false" aria-controls="panel-launch" tabindex="-1">Launch new run</button>
+    <button class="tab" data-tab="relations" role="tab" aria-selected="false" aria-controls="panel-relations" tabindex="-1">Discover relations</button>
+    <button class="tab" data-tab="compare" role="tab" aria-selected="false" aria-controls="panel-compare" tabindex="-1">Compare runs</button>
+    <button class="tab" data-tab="dataprep" role="tab" aria-selected="false" aria-controls="panel-dataprep" tabindex="-1">Data prep</button>
+    <button class="tab" data-tab="jobs" role="tab" aria-selected="false" aria-controls="panel-jobs" tabindex="-1">Jobs <span id="jobs-badge" class="badge" hidden>0</span></button>
+    <button class="tab" data-tab="pipeline" role="tab" aria-selected="false" aria-controls="panel-pipeline" tabindex="-1">Pipeline</button>
   </nav>
 
   <main class="runs-main">
     <!-- ========== Runs tab ========== -->
-    <section class="panel" data-panel="runs">
+    <section class="panel" data-panel="runs" id="panel-runs" role="tabpanel" aria-label="Runs">
       <div class="panel-head">
         <h2>Runs <span class="muted" id="runs-count"></span></h2>
         <button id="refresh-runs">Refresh</button>
@@ -42,7 +42,7 @@
     </section>
 
     <!-- ========== Launch tab ========== -->
-    <section class="panel hidden" data-panel="launch">
+    <section class="panel hidden" data-panel="launch" id="panel-launch" role="tabpanel" aria-label="Launch new run" aria-hidden="true">
       <div class="panel-head">
         <h2>Launch new detection run</h2>
         <div class="muted" style="font-size: 11.5px;">Values loaded from <code>config/experiment.yaml</code> — edit any field to override</div>
@@ -72,6 +72,7 @@
             <span>Column mode</span>
             <select id="column-mode">
               <option value="">(default)</option>
+              <option value="auto">auto (per error-type scope)</option>
               <option value="single">single</option>
               <option value="all">all</option>
             </select>
@@ -166,15 +167,16 @@
 
         <!-- Stopping rule -->
         <fieldset id="gt-block" class="gt-block">
-          <legend>Stopping rule <span class="muted" style="font-weight: normal;">(adaptive only)</span></legend>
+          <legend>Stopping rule</legend>
           <p class="muted" style="grid-column: 1 / -1; margin: 0 0 4px 0; font-size: 12px;">
-            The loop treats each
-            <code>(stop_scope, error_type)</code> as an independent
-            arm. Per arm, it requires <strong>num runs</strong> as a
-            ceiling, <strong>min runs</strong> as a floor, and stops
-            when the Good-Turing missing mass falls at or below
-            <strong>target missing mass</strong>. The whole run halts
-            once every error_type's arms have all saturated.
+            Used by the adaptive experiment loop <em>and</em> by the
+            row-duplication adaptive inner loops (cluster adjudication
+            / canonicalisation) when those toggles are on &mdash; one
+            place to control all LLM-call FN behaviour. Each
+            <code>(stop_scope, error_type)</code> arm requires
+            <strong>num runs</strong> as a ceiling, <strong>min
+            runs</strong> as a floor, and stops per the
+            <strong>stop criterion</strong> below.
           </p>
           <label>
             <span>Num runs <span class="muted">(per-arm k_max)</span></span>
@@ -187,6 +189,18 @@
           <label>
             <span>Target missing mass <span class="muted">(per-arm &epsilon;)</span></span>
             <input id="gt-target-missing-mass" type="number" step="0.01" min="0" max="1" placeholder="0.05" />
+          </label>
+          <label>
+            <span>
+              Stop criterion
+              <span class="muted">(gt / chao1 / both)</span>
+            </span>
+            <select id="gt-per-arm-stop-when">
+              <option value="">(default: gt)</option>
+              <option value="gt">gt&nbsp;&mdash; Good-Turing mass (p&#8320; &le; &epsilon;)</option>
+              <option value="chao1">chao1&nbsp;&mdash; Chao1 upper-95 missing count</option>
+              <option value="both">both&nbsp;&mdash; conjunction (strongest FN guarantee)</option>
+            </select>
           </label>
           <label>
             <span>Stop scope <span class="muted">(what's an arm?)</span></span>
@@ -217,18 +231,6 @@
                   <option value="">(default)</option>
                   <option value="true">require</option>
                   <option value="false">allow single pass</option>
-                </select>
-              </label>
-              <label>
-                <span>
-                  Stop criterion
-                  <span class="muted">(which estimator gates saturation)</span>
-                </span>
-                <select id="gt-per-arm-stop-when">
-                  <option value="">(default)</option>
-                  <option value="gt">gt&nbsp;&mdash; Good-Turing mass (p&#8320; &le; &epsilon;)</option>
-                  <option value="chao1">chao1&nbsp;&mdash; Chao1 upper-95 missing count</option>
-                  <option value="both">both&nbsp;&mdash; conjunction (strongest FN guarantee)</option>
                 </select>
               </label>
               <label>
@@ -289,6 +291,40 @@
           </label>
         </fieldset>
 
+        <!-- Row-duplication detector (only relevant when row_duplication is selected) -->
+        <fieldset id="row-dup-block" class="row-dup-block" hidden>
+          <legend>Row duplication <span class="muted" style="font-weight: normal;">(only relevant when <code>row_duplication</code> is selected)</span></legend>
+          <p class="muted" style="grid-column: 1 / -1; margin: 0 0 4px 0; font-size: 12px;">
+            Whole-table recall-first pipeline: key-collision +
+            normalisation + LLM canonicalisation + token-signature
+            blocking + MinHash + sentence embeddings, all unioned and
+            adjudicated by the LLM. Defaults configured in
+            <code>config/experiment.yaml</code>; the only knobs exposed
+            here are the operational dials below.
+          </p>
+          <label>
+            <span>Strategy</span>
+            <select id="row-dup-detection-mode">
+              <option value="">(default: collision_adjudication)</option>
+              <option value="collision_adjudication">collision_adjudication&nbsp;&mdash; whole-table scan + per-group LLM</option>
+              <option value="legacy_chunk_scan">legacy_chunk_scan&nbsp;&mdash; original per-chunk scan (A/B only)</option>
+              <option value="whole_table">whole_table&nbsp;&mdash; PoC: feed full CSV to LLM (no clustering)</option>
+            </select>
+          </label>
+          <label>
+            <span>Max groups per source <span class="muted">(cap on LLM calls)</span></span>
+            <input id="row-dup-max-groups" type="number" min="1" placeholder="200" />
+          </label>
+          <p class="muted" style="font-size:0.85em;margin:0.4em 0 0">
+            Cluster adjudication and per-column canonicalisation
+            (when their toggles above are on) are driven through the
+            shared <strong>Stopping rule</strong> above. With
+            K<sub>max</sub>=1 each LLM call runs once; with
+            K<sub>max</sub>&gt;1 calls are repeated under the
+            Good-Turing/Chao1 stop rule and unioned recall-first.
+          </p>
+        </fieldset>
+
         <!-- Dry-run preview + submit -->
         <div class="form-actions">
           <button type="button" id="show-cmd">Preview command</button>
@@ -299,7 +335,7 @@
     </section>
 
     <!-- ========== Discover relations tab ========== -->
-    <section class="panel hidden" data-panel="relations">
+    <section class="panel hidden" data-panel="relations" id="panel-relations" role="tabpanel" aria-label="Discover relations" aria-hidden="true">
       <div class="panel-head">
         <h2>Discover relations <span class="muted">multi-column · multi-row · multi-table</span></h2>
         <div class="muted" style="font-size: 11.5px; max-width: 760px;">
@@ -344,7 +380,7 @@
               <option value="">(default)</option>
               <option value="low">low</option>
               <option value="medium">medium</option>
-              <option value="high">high</option>
+              <option value="high" selected>high</option>
             </select>
           </label>
           <label>
@@ -384,12 +420,114 @@
             <input id="rel-min-passes" type="number" min="1" placeholder="2" />
           </label>
           <label>
+            <span>Stop when <span class="muted">(criterion)</span></span>
+            <select id="rel-stop-when">
+              <option value="">(default: both)</option>
+              <option value="gt">gt &mdash; Good-Turing missing-mass</option>
+              <option value="chao1">chao1 &mdash; Chao1 upper-95 CI / S_obs</option>
+              <option value="both">both &mdash; require both criteria</option>
+            </select>
+          </label>
+          <label>
             <span>GT threshold <span class="muted">(per-arm &epsilon;)</span></span>
             <input id="rel-gt-threshold" type="number" step="0.01" min="0" max="1" placeholder="0.05" />
           </label>
           <label>
+            <span>Chao1 threshold <span class="muted">(&epsilon;<sub>chao1</sub>)</span></span>
+            <input id="rel-epsilon-chao1" type="number" step="0.01" min="0" placeholder="0.05" />
+          </label>
+          <label>
             <span>Base seed</span>
             <input id="rel-base-seed" type="number" placeholder="1000" />
+          </label>
+        </fieldset>
+
+        <!-- Aggregation pass (paraphrase merge) -->
+        <fieldset id="rel-aggregate-block" class="gt-block">
+          <legend>Aggregation pass <span class="muted" style="font-weight: normal; font-size: 11px;">(merge paraphrases)</span></legend>
+          <p class="muted" style="grid-column: 1 / -1; margin: 0 0 4px 0; font-size: 12px;">
+            After discovery, cluster rules by
+            <code>(source, error_type, columns)</code> and ask the LLM
+            to partition each cluster into the smallest set of
+            canonical rules. Multiple canonicals per cluster are
+            supported - this only collapses paraphrases of the same
+            constraint, never genuinely distinct rules. Originals are
+            preserved in <code>relations.jsonl</code>.
+          </p>
+          <label class="checkbox" style="grid-column: 1 / -1;">
+            <input id="rel-aggregate" type="checkbox" checked />
+            <span>Run aggregation pass</span>
+          </label>
+          <label>
+            <span>Min cluster size <span class="muted">(skip arms with fewer rules)</span></span>
+            <input id="rel-aggregate-min-cluster" type="number" min="2" placeholder="2" />
+          </label>
+        </fieldset>
+
+        <!-- Generalization pass (parametric rewrite) -->
+        <fieldset id="rel-generalize-block" class="gt-block">
+          <legend>Generalization pass <span class="muted" style="font-weight: normal; font-size: 11px;">(parametric rewrite)</span></legend>
+          <p class="muted" style="grid-column: 1 / -1; margin: 0 0 4px 0; font-size: 12px;">
+            After aggregation, cluster value-keyed rule families (one
+            rule per literal cell value of a column) and ask the LLM
+            to rewrite each family as one parametric rule using
+            pseudo-functions like
+            <code>regex_extract</code> / <code>parse_int</code>.
+            Originals stay in <code>relations.jsonl</code> and surface
+            under expand on the parametric card.
+          </p>
+          <label class="checkbox" style="grid-column: 1 / -1;">
+            <input id="rel-generalize" type="checkbox" checked />
+            <span>Run generalization pass</span>
+          </label>
+          <label>
+            <span>Min cluster size <span class="muted">(skip families with fewer rules)</span></span>
+            <input id="rel-generalize-min-cluster" type="number" min="2" placeholder="2" />
+          </label>
+        </fieldset>
+
+        <fieldset id="rel-validate-block" class="gt-block">
+          <legend>Validation pass <span class="muted" style="font-weight: normal; font-size: 11px;">(empirical pass-rates)</span></legend>
+          <p class="muted" style="grid-column: 1 / -1; margin: 0 0 4px 0; font-size: 12px;">
+            After aggregation/generalization, ask the LLM to write a
+            <code>check(df) -> Series</code> function for each rule
+            (or refuse when not code-verifiable). Functions run in a
+            restricted sandbox; per-rule pass-rates and sample
+            violations land in <code>relation_verifications.jsonl</code>
+            and surface as colored badges on each report card.
+          </p>
+          <label class="checkbox" style="grid-column: 1 / -1;">
+            <input id="rel-validate" type="checkbox" checked />
+            <span>Run validation pass</span>
+          </label>
+          <label>
+            <span>Layer <span class="muted">(which rules to score)</span></span>
+            <select id="rel-validate-layer">
+              <option value="auto" selected>auto (highest available)</option>
+              <option value="generalized">generalized</option>
+              <option value="aggregated">aggregated</option>
+              <option value="originals">originals</option>
+            </select>
+          </label>
+          <label>
+            <span>Limit <span class="muted">(cap relations validated; blank = no cap)</span></span>
+            <input id="rel-validate-limit" type="number" min="1" placeholder="(no cap)" />
+          </label>
+          <label>
+            <span>Sample rows <span class="muted">(rows shown to the LLM when writing <code>check()</code>)</span></span>
+            <input id="rel-validate-sample-rows" type="number" min="1" placeholder="30" />
+          </label>
+          <label>
+            <span>Timeout <span class="muted">(seconds per <code>check()</code> execution)</span></span>
+            <input id="rel-validate-timeout" type="number" min="0.1" step="0.1" placeholder="8.0" />
+          </label>
+          <label>
+            <span>Max violation samples <span class="muted">(failing rows to retain per rule)</span></span>
+            <input id="rel-validate-max-violations" type="number" min="0" placeholder="5" />
+          </label>
+          <label>
+            <span>Prompt <span class="muted">(path to validation YAML)</span></span>
+            <input id="rel-validate-prompt" type="text" placeholder="prompts/validate_relation.yaml" />
           </label>
         </fieldset>
 
@@ -411,7 +549,7 @@
     </section>
 
     <!-- ========== Compare runs tab ========== -->
-    <section class="panel hidden" data-panel="compare">
+    <section class="panel hidden" data-panel="compare" id="panel-compare" role="tabpanel" aria-label="Compare runs" aria-hidden="true">
       <div class="panel-head">
         <h2>Compare two runs</h2>
         <div class="muted" style="font-size: 11.5px;">Cell-level bucket diff. Focus is on cells where exactly one run flagged.</div>
@@ -506,7 +644,7 @@
     </aside>
 
     <!-- ========== Data prep tab ========== -->
-    <section class="panel hidden" data-panel="dataprep">
+    <section class="panel hidden" data-panel="dataprep" id="panel-dataprep" role="tabpanel" aria-label="Data prep" aria-hidden="true">
       <div class="panel-head">
         <h2>Generate curated data</h2>
         <div class="muted" style="font-size: 11.5px;">Produces English-only, human-auditable CSVs under <code>data/&lt;output-dir&gt;/</code></div>
@@ -567,10 +705,11 @@
           <label>
             <span>Language check</span>
             <select id="cu-language-check">
-              <option value="">(default: langdetect)</option>
+              <option value="">(default: lingua)</option>
               <option value="off">off</option>
               <option value="script">script</option>
               <option value="langdetect">langdetect</option>
+              <option value="lingua">lingua (recommended)</option>
               <option value="llm">llm</option>
             </select>
           </label>
@@ -592,7 +731,7 @@
     </section>
 
     <!-- ========== Jobs tab ========== -->
-    <section class="panel hidden" data-panel="jobs">
+    <section class="panel hidden" data-panel="jobs" id="panel-jobs" role="tabpanel" aria-label="Jobs" aria-hidden="true">
       <div class="panel-head">
         <h2>Jobs</h2>
         <button id="refresh-jobs">Refresh</button>
@@ -612,7 +751,7 @@
     </section>
 
     <!-- ========== Pipeline tab ========== -->
-    <section class="panel hidden" data-panel="pipeline">
+    <section class="panel hidden" data-panel="pipeline" id="panel-pipeline" role="tabpanel" aria-label="Pipeline" aria-hidden="true">
       <div class="panel-head">
         <h2>How the pipeline works</h2>
         <a class="btn" href="/api/docs" target="_blank" rel="noopener">API docs →</a>
@@ -692,7 +831,7 @@
 
           <article class="concept-card">
             <h4><code>column_mode</code></h4>
-            <p><code>single</code>: one call per (chunk, column, error_type). Cheap; required by the 8 single-column types.<br /><code>all</code>: one call sees every column; required for multi-column / multi-row / multi-table types.</p>
+            <p><code>auto</code>: dispatcher splits selected error types by scope &mdash; single-column types run with one call per (chunk, column), multi-column / multi-row / multi-table types run with the whole row visible per call.<br /><code>single</code>: one call per (chunk, column, error_type). Cheap; required by the single-column types.<br /><code>all</code>: one call sees every column; required for multi-column / multi-row / multi-table types.</p>
           </article>
 
           <article class="concept-card">

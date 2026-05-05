@@ -180,8 +180,8 @@ def test_mtime_reload_picks_up_new_writes(tmp_path: Path):
 
 # ---------------------------------------------------------------------------
 # POST /clusters/{cid}/web-verification - on-demand single-cluster verify.
-# We monkeypatch ``verify_single_cluster`` so tests don't make real HTTP
-# calls to Tavily / Azure OpenAI.
+# We monkeypatch ``verify_single_cluster`` so tests don't make real
+# Foundry Agents calls.
 # ---------------------------------------------------------------------------
 
 

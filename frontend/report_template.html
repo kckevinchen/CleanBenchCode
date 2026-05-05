@@ -48,6 +48,23 @@
       line-height: 1.45;
     }
     a { color: var(--accent); text-decoration: none; }
+    /* Keyboard-focus rings: visible to keyboard users without affecting
+       mouse interactions (uses :focus-visible). Mirrors --accent so the
+       ring is consistent with the rest of the dark palette. */
+    :focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      border-radius: 4px;
+    }
+    button:focus-visible,
+    input:focus-visible,
+    select:focus-visible,
+    textarea:focus-visible,
+    [tabindex]:focus-visible,
+    summary:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
     header {
       padding: 20px 28px;
       border-bottom: 1px solid var(--border);
@@ -252,6 +269,71 @@
     .card[title] { cursor: help; }
     #view-gt .issues th[title] { cursor: help; border-bottom-style: dotted; }
 
+    /* ---- Good-Turing progression charts (SVG) ---- */
+    .gt-charts {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+      gap: 16px;
+      margin-bottom: 18px;
+    }
+    .gt-chart-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 16px;
+    }
+    .gt-chart-card h3 {
+      margin: 0 0 4px 0;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+    }
+    .gt-chart-card .gt-chart-sub {
+      font-size: 11.5px;
+      color: var(--muted);
+      margin-bottom: 8px;
+      line-height: 1.4;
+    }
+    .gt-chart-card svg { display: block; width: 100%; height: auto; }
+    .gt-chart-card .gt-axis-line { stroke: var(--border); stroke-width: 1; }
+    .gt-chart-card .gt-axis-text { fill: var(--muted); font-size: 10px; }
+    .gt-chart-card .gt-grid-line { stroke: var(--border); stroke-width: 1; stroke-dasharray: 2 3; opacity: 0.55; }
+    .gt-chart-card .gt-target-line { stroke: #f59e0b; stroke-width: 1.5; stroke-dasharray: 4 3; }
+    .gt-chart-card .gt-target-label { fill: #f59e0b; font-size: 10px; }
+    .gt-chart-card .gt-line { fill: none; stroke-width: 2; }
+    .gt-chart-card .gt-line.gt-missing { stroke: #60a5fa; }
+    .gt-chart-card .gt-line.gt-sobs { stroke: #34d399; }
+    .gt-chart-card .gt-line.gt-chao1 { stroke: #c084fc; stroke-dasharray: 4 3; }
+    .gt-chart-card .gt-area-ci { fill: #c084fc; opacity: 0.18; stroke: none; }
+    .gt-chart-card .gt-dot { stroke: var(--panel); stroke-width: 1.5; }
+    .gt-chart-card .gt-dot.gt-missing { fill: #60a5fa; }
+    .gt-chart-card .gt-dot.gt-sobs { fill: #34d399; }
+    .gt-chart-card .gt-dot.gt-chao1 { fill: #c084fc; }
+    .gt-chart-card .gt-bar { fill: #60a5fa; }
+    .gt-chart-card .gt-bar.gt-bar-singleton { fill: #f87171; }
+    .gt-chart-card .gt-bar-label { fill: var(--fg); font-size: 10px; }
+    .gt-chart-card .gt-min-runs-line { stroke: #94a3b8; stroke-width: 1; stroke-dasharray: 2 4; opacity: 0.7; }
+    .gt-chart-card .gt-min-runs-label { fill: #94a3b8; font-size: 9.5px; }
+    .gt-chart-card .gt-stop-marker { fill: #f59e0b; stroke: var(--panel); stroke-width: 1.5; }
+    .gt-chart-card .gt-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 14px;
+      margin-top: 6px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+    .gt-chart-card .gt-legend .gt-swatch {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      border-radius: 2px;
+      margin-right: 5px;
+      vertical-align: -2px;
+    }
+
     .gt-variant-list {
       display: flex;
       flex-direction: column;
@@ -452,6 +534,14 @@
     .pill.sev-medium { background: rgba(245, 158, 11, 0.12); color: #fcd34d; border: 1px solid rgba(245,158,11,0.4); }
     .pill.sev-low { background: rgba(16, 185, 129, 0.12); color: #6ee7b7; border: 1px solid rgba(16,185,129,0.4); }
     .pill.sev-unknown { background: rgba(148,163,184,0.12); color: #cbd5e1; border: 1px solid rgba(148,163,184,0.35); }
+    /* CVD-friendly differentiation: severity is also encoded with a
+       distinct glyph prefix so red/green-blind reviewers don't have to
+       rely on color alone. The glyph is decorative; an aria-label is
+       added on the pill so screen readers announce the severity. */
+    .pill.sev-high::before { content: "\25CF "; }    /* black circle */
+    .pill.sev-medium::before { content: "\25A0 "; }  /* black square */
+    .pill.sev-low::before { content: "\25C6 "; }     /* black diamond */
+    .pill.sev-unknown::before { content: "\25CB "; } /* white circle */
     .pill.cat {
       background: rgba(129,140,248,0.12);
       color: #c7d2fe;
@@ -1167,17 +1257,17 @@
     </div>
     <nav class="source-tabs" id="source-tabs" style="display:none" aria-label="Source CSV tabs"></nav>
 
-    <div class="view-toggle" id="view-toggle">
-      <button type="button" data-target="clusters" class="active">Clusters</button>
-      <button type="button" data-target="raw">Raw detections</button>
-      <button type="button" data-target="data" title="Inspect the raw CSV with detections highlighted - useful for finding false negatives">Source data</button>
-      <button type="button" data-target="gt" id="view-gt-btn" style="display:none" title="Adaptive-mode Good-Turing / Chao1 false-negative estimate and per-pass prompt variants">Good-Turing</button>
+    <div class="view-toggle" id="view-toggle" role="tablist" aria-label="Report views">
+      <button type="button" data-target="clusters" class="active" role="tab" aria-selected="true" aria-controls="view-clusters">Clusters</button>
+      <button type="button" data-target="raw" role="tab" aria-selected="false" aria-controls="view-raw">Raw detections</button>
+      <button type="button" data-target="data" role="tab" aria-selected="false" aria-controls="view-data" title="Inspect the raw CSV with detections highlighted - useful for finding false negatives">Source data</button>
+      <button type="button" data-target="gt" id="view-gt-btn" role="tab" aria-selected="false" aria-controls="view-gt" style="display:none" title="Adaptive-mode Good-Turing / Chao1 false-negative estimate and per-pass prompt variants">Good-Turing</button>
     </div>
 
     <!-- ============================================================ -->
     <!-- Clusters view (default)                                       -->
     <!-- ============================================================ -->
-    <section class="view active" id="view-clusters">
+    <section class="view active" id="view-clusters" role="tabpanel" aria-label="Clusters view">
       <section class="grid cards" id="cluster-cards"></section>
 
       <section class="grid charts">
@@ -1234,7 +1324,13 @@
         </thead>
         <tbody id="clusters-body"></tbody>
       </table>
-      <div id="clusters-empty" class="empty" style="display:none">No clusters match the current filters.</div>
+      <div id="clusters-empty" class="empty" style="display:none">
+        <span id="clusters-empty-msg">No clusters match the current filters.</span>
+        <button type="button" id="clusters-clear-filters" class="link-btn"
+                style="background:none;border:none;color:var(--accent);cursor:pointer;font:inherit;padding:0 0 0 6px;text-decoration:underline;">
+          Clear filters
+        </button>
+      </div>
 
       <p class="footer-note">Click any row to see the underlying per-type detections and the full source-row values.</p>
     </section>
@@ -1242,7 +1338,7 @@
     <!-- ============================================================ -->
     <!-- Raw detections view                                           -->
     <!-- ============================================================ -->
-    <section class="view" id="view-raw">
+    <section class="view" id="view-raw" role="tabpanel" aria-label="Raw detections view">
       <section class="grid cards" id="raw-cards"></section>
 
       <section class="grid charts">
@@ -1298,7 +1394,7 @@
     <!-- ============================================================ -->
     <!-- Source data view (manual false-negative review)               -->
     <!-- ============================================================ -->
-    <section class="view" id="view-data">
+    <section class="view" id="view-data" role="tabpanel" aria-label="Source data view">
       <section class="grid cards" id="data-cards"></section>
 
       <!-- Shown when no specific source is selected in the source-tab
@@ -1376,7 +1472,7 @@
     <!-- ============================================================ -->
     <!-- Good-Turing view (adaptive mode only)                         -->
     <!-- ============================================================ -->
-    <section class="view" id="view-gt">
+    <section class="view" id="view-gt" role="tabpanel" aria-label="Good-Turing view">
       <div id="gt-empty" class="empty" style="display:none">
         This run was produced in <code>mode=single</code> - no Good-Turing data to show.
       </div>
@@ -1463,6 +1559,66 @@
         </details>
 
         <section class="grid cards" id="gt-cards"></section>
+
+        <!-- ------------------------------------------------------------ -->
+        <!-- Pass-by-pass charts: GT missing mass vs target, coverage     -->
+        <!-- curve (S_obs vs Chao1 estimated total + 95% CI), and the     -->
+        <!-- frequency-of-frequencies bar chart that drives both          -->
+        <!-- estimators.                                                  -->
+        <!-- ------------------------------------------------------------ -->
+        <div class="gt-charts" id="gt-progression-charts" style="display:none;">
+          <div class="gt-chart-card" id="gt-chart-missing-card">
+            <h3>GT missing mass vs target</h3>
+            <div class="gt-chart-sub">
+              Probability that the next perturbed pass surfaces a
+              never-before-seen defect, recomputed after each pass.
+              The dashed orange line is the
+              <code>target_missing_mass</code>; the dashed grey line
+              is the <code>min_runs</code> floor (no early stop
+              before this pass). The orange dot marks the pass at
+              which adaptive mode actually stopped.
+            </div>
+            <svg id="gt-chart-missing" viewBox="0 0 480 220" preserveAspectRatio="xMidYMid meet"></svg>
+            <div class="gt-legend">
+              <span><span class="gt-swatch" style="background:#60a5fa"></span>GT missing mass</span>
+              <span><span class="gt-swatch" style="background:#f59e0b"></span>target</span>
+              <span><span class="gt-swatch" style="background:#94a3b8"></span>min_runs</span>
+            </div>
+          </div>
+          <div class="gt-chart-card" id="gt-chart-coverage-card">
+            <h3>Coverage curve: S_obs vs Chao1 total</h3>
+            <div class="gt-chart-sub">
+              Green = distinct defects observed so far
+              (<code>S_obs</code>, monotonic). Purple dashed = Chao1
+              point estimate of the TRUE total
+              (<code>S_est</code>); the shaded band is its 95% CI.
+              Coverage is saturating when the green curve flattens
+              and converges with the purple curve.
+            </div>
+            <svg id="gt-chart-coverage" viewBox="0 0 480 220" preserveAspectRatio="xMidYMid meet"></svg>
+            <div class="gt-legend">
+              <span><span class="gt-swatch" style="background:#34d399"></span>S_obs (observed)</span>
+              <span><span class="gt-swatch" style="background:#c084fc"></span>Chao1 total</span>
+              <span><span class="gt-swatch" style="background:#c084fc;opacity:0.35"></span>Chao1 95% CI</span>
+            </div>
+          </div>
+          <div class="gt-chart-card" id="gt-chart-freq-card">
+            <h3>Frequency of frequencies (overall)</h3>
+            <div class="gt-chart-sub">
+              Bar <em>r</em> = number of distinct defects seen in
+              exactly <em>r</em> of the completed passes. The
+              singleton bar (<em>r</em>=1, red) feeds GT missing
+              mass directly; together with the doubleton bar
+              (<em>r</em>=2) they drive Chao1. A long red bar that
+              dwarfs the rest means coverage is unsettled.
+            </div>
+            <svg id="gt-chart-freq" viewBox="0 0 480 220" preserveAspectRatio="xMidYMid meet"></svg>
+            <div class="gt-legend">
+              <span><span class="gt-swatch" style="background:#f87171"></span>singletons (n<sub>1</sub>)</span>
+              <span><span class="gt-swatch" style="background:#60a5fa"></span>n<sub>r</sub>, r&ge;2</span>
+            </div>
+          </div>
+        </div>
 
         <div class="chart-panel">
           <h2>Progression (recomputed after every pass)</h2>
@@ -1792,6 +1948,22 @@
         try {
           localStorage.setItem(ANNOT_KEY, JSON.stringify(annotations));
         } catch (e) {
+          // Surface quota errors to the operator: silent loss of
+          // annotations would be very surprising. We rate-limit the
+          // alert so a tight feedback loop (e.g. autosave on every
+          // keystroke) doesn't spam the user.
+          var isQuota = e && (e.name === "QuotaExceededError" ||
+            e.code === 22 || e.code === 1014);
+          if (isQuota && !saveAnnotations._warned) {
+            saveAnnotations._warned = true;
+            try {
+              window.alert(
+                "Browser storage is full \u2014 your latest annotations could not be saved.\n\n" +
+                "Click 'Export JSON' to download what you've labelled so far, " +
+                "then 'Clear all' to free space."
+              );
+            } catch (_) { /* alert() unavailable */ }
+          }
           console.warn("Could not persist annotations:", e);
         }
       }
@@ -2023,6 +2195,19 @@
 
       // ---- Meta header ---------------------------------------------------
       var metaEl = document.getElementById("meta");
+      // Format an ISO timestamp as "YYYY-MM-DD HH:MM UTC" so the meta
+      // header is unambiguous across timezones. Falls back to the raw
+      // string if parsing fails.
+      function formatGeneratedAt(iso) {
+        if (!iso) return "\u2014";
+        var s = String(iso);
+        var d = new Date(s);
+        if (isNaN(d.getTime())) return s;
+        var pad = function (n) { return n < 10 ? "0" + n : "" + n; };
+        return d.getUTCFullYear() + "-" + pad(d.getUTCMonth() + 1) + "-" +
+          pad(d.getUTCDate()) + " " +
+          pad(d.getUTCHours()) + ":" + pad(d.getUTCMinutes()) + " UTC";
+      }
       var sourceCount = (meta.sources && meta.sources.length) || 1;
       var sourceLabel = sourceCount > 1
         ? sourceCount + " files (" + meta.sources.slice(0, 3).join(", ") +
@@ -2050,7 +2235,7 @@
         ["LLM calls", summary.llm_calls],
         ["Clusters", summary.clusters_total],
         ["Synthesis", (meta.synthesis && meta.synthesis.enabled) ? "on" : "off"],
-        ["Generated", meta.generated_at]
+        ["Generated", formatGeneratedAt(meta.generated_at)]
       ].forEach(function (kv) { metaEl.appendChild(metaItem(kv[0], kv[1])); });
 
       // ---- Run parameters panel -----------------------------------------
@@ -2298,7 +2483,9 @@
       document.querySelectorAll("#view-toggle button").forEach(function (btn) {
         btn.addEventListener("click", function () {
           document.querySelectorAll("#view-toggle button").forEach(function (b) {
-            b.classList.toggle("active", b === btn);
+            var on = b === btn;
+            b.classList.toggle("active", on);
+            b.setAttribute("aria-selected", on ? "true" : "false");
           });
           var target = btn.getAttribute("data-target");
           activeView = target;
@@ -2440,6 +2627,9 @@
           ]));
         });
 
+        // ---- Pass-by-pass progression charts (SVG) ----
+        renderGoodTuringCharts(gt);
+
         // ---- Per-type saturation history ----
         // Always render when saturation_history is present; the
         // unified per-arm stop logic populates it for every run.
@@ -2566,6 +2756,418 @@
             varsContainer.appendChild(det);
           });
         }
+      }
+
+      // ------------------------------------------------------------------
+      // Good-Turing progression charts (vanilla SVG, no dep)
+      // ------------------------------------------------------------------
+      //
+      // Three side-by-side panels under the "Passes completed" cards:
+      //   1. GT missing mass over passes vs target_missing_mass and the
+      //      min_runs floor. The orange dot marks the pass that
+      //      actually triggered the adaptive stop.
+      //   2. Coverage curve - S_obs (cumulative distinct defects) vs
+      //      Chao1 estimated total with a shaded 95% CI band. When the
+      //      green and purple curves converge, coverage has saturated.
+      //   3. Frequency-of-frequencies bar chart from
+      //      overall.frequency_counts. Shows the singleton bar in red
+      //      because it directly drives both estimators.
+      // ------------------------------------------------------------------
+      function _svgEl(name, attrs) {
+        var el = document.createElementNS("http://www.w3.org/2000/svg", name);
+        if (attrs) {
+          for (var k in attrs) {
+            if (attrs[k] != null) el.setAttribute(k, attrs[k]);
+          }
+        }
+        return el;
+      }
+      function _ticks(domainMax, count) {
+        // Round-friendly ticks. Returns an ascending list including 0
+        // and a value >= domainMax. Falls back to [0,1] when the
+        // domain is degenerate (e.g. all-zero series before stop).
+        if (!isFinite(domainMax) || domainMax <= 0) return [0, 1];
+        count = count || 4;
+        var raw = domainMax / count;
+        var mag = Math.pow(10, Math.floor(Math.log10(raw)));
+        var norm = raw / mag;
+        var step;
+        if (norm < 1.5) step = 1 * mag;
+        else if (norm < 3.5) step = 2 * mag;
+        else if (norm < 7.5) step = 5 * mag;
+        else step = 10 * mag;
+        var ticks = [];
+        for (var v = 0; v <= domainMax + step * 0.5; v += step) ticks.push(v);
+        if (ticks[ticks.length - 1] < domainMax) ticks.push(domainMax);
+        return ticks;
+      }
+
+      function renderGoodTuringCharts(gt) {
+        var prog = (gt && gt.progression) || [];
+        var container = document.getElementById("gt-progression-charts");
+        if (!container) return;
+        if (!prog.length) {
+          container.style.display = "none";
+          return;
+        }
+        container.style.display = "grid";
+
+        // Shared axes / margins.
+        var W = 480, H = 220;
+        var M = { top: 14, right: 14, bottom: 30, left: 44 };
+        var iw = W - M.left - M.right;
+        var ih = H - M.top - M.bottom;
+
+        var xs = prog.map(function (p, i) { return p.runs_so_far != null ? p.runs_so_far : i + 1; });
+        var xMax = Math.max.apply(null, xs);
+        var xMin = 1;
+        function sx(x) {
+          if (xMax === xMin) return M.left + iw / 2;
+          return M.left + ((x - xMin) / (xMax - xMin)) * iw;
+        }
+        function syScale(domainMax) {
+          var safeMax = domainMax > 0 ? domainMax : 1;
+          return function (y) {
+            return M.top + ih - (y / safeMax) * ih;
+          };
+        }
+
+        // -----------------------------------------------------------
+        // Chart 1: GT missing mass vs target.
+        // -----------------------------------------------------------
+        (function drawMissingMass() {
+          var svg = document.getElementById("gt-chart-missing");
+          while (svg.firstChild) svg.removeChild(svg.firstChild);
+          svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+
+          var target = (gt.target_missing_mass != null && isFinite(gt.target_missing_mass))
+            ? gt.target_missing_mass : 0;
+          var ys = prog.map(function (p) {
+            return (p.good_turing_missing_mass != null) ? p.good_turing_missing_mass : 0;
+          });
+          var yMax = Math.max(target * 1.4, Math.max.apply(null, ys.concat([0.01])));
+          // Round up to a multiple-of-5% tick for readability.
+          yMax = Math.max(0.05, Math.ceil(yMax * 100 / 5) * 5 / 100);
+          var sy = syScale(yMax);
+
+          // Y-axis grid + labels (percent).
+          _ticks(yMax, 4).forEach(function (t) {
+            var y = sy(t);
+            svg.appendChild(_svgEl("line", {
+              class: "gt-grid-line",
+              x1: M.left, x2: M.left + iw, y1: y, y2: y
+            }));
+            var lbl = _svgEl("text", {
+              class: "gt-axis-text",
+              x: M.left - 4, y: y + 3,
+              "text-anchor": "end"
+            });
+            lbl.textContent = (t * 100).toFixed(t < 0.1 ? 1 : 0) + "%";
+            svg.appendChild(lbl);
+          });
+
+          // X-axis labels.
+          xs.forEach(function (x, i) {
+            if (xs.length > 12 && i % Math.ceil(xs.length / 8) !== 0
+                && i !== xs.length - 1) return;
+            var lx = sx(x);
+            var lbl = _svgEl("text", {
+              class: "gt-axis-text",
+              x: lx, y: M.top + ih + 14,
+              "text-anchor": "middle"
+            });
+            lbl.textContent = String(x);
+            svg.appendChild(lbl);
+          });
+          var xlabel = _svgEl("text", {
+            class: "gt-axis-text",
+            x: M.left + iw / 2, y: H - 4,
+            "text-anchor": "middle"
+          });
+          xlabel.textContent = "passes completed";
+          svg.appendChild(xlabel);
+
+          // Axes.
+          svg.appendChild(_svgEl("line", {
+            class: "gt-axis-line",
+            x1: M.left, y1: M.top + ih, x2: M.left + iw, y2: M.top + ih
+          }));
+          svg.appendChild(_svgEl("line", {
+            class: "gt-axis-line",
+            x1: M.left, y1: M.top, x2: M.left, y2: M.top + ih
+          }));
+
+          // min_runs vertical guide.
+          var minRuns = gt.min_runs;
+          if (minRuns && minRuns >= xMin && minRuns <= xMax) {
+            var mx = sx(minRuns);
+            svg.appendChild(_svgEl("line", {
+              class: "gt-min-runs-line",
+              x1: mx, y1: M.top, x2: mx, y2: M.top + ih
+            }));
+            var ml = _svgEl("text", {
+              class: "gt-min-runs-label",
+              x: mx + 3, y: M.top + 10
+            });
+            ml.textContent = "min_runs=" + minRuns;
+            svg.appendChild(ml);
+          }
+
+          // Target horizontal threshold.
+          if (target > 0) {
+            var ty = sy(target);
+            svg.appendChild(_svgEl("line", {
+              class: "gt-target-line",
+              x1: M.left, y1: ty, x2: M.left + iw, y2: ty
+            }));
+            var tl = _svgEl("text", {
+              class: "gt-target-label",
+              x: M.left + iw - 2, y: ty - 3,
+              "text-anchor": "end"
+            });
+            tl.textContent = "target " + (target * 100).toFixed(target < 0.1 ? 1 : 0) + "%";
+            svg.appendChild(tl);
+          }
+
+          // Line + dots.
+          var d = prog.map(function (p, i) {
+            return (i ? "L" : "M") + sx(xs[i]) + "," + sy(ys[i]);
+          }).join(" ");
+          svg.appendChild(_svgEl("path", { class: "gt-line gt-missing", d: d }));
+          prog.forEach(function (p, i) {
+            svg.appendChild(_svgEl("circle", {
+              class: "gt-dot gt-missing",
+              cx: sx(xs[i]), cy: sy(ys[i]), r: 3.5
+            }));
+          });
+
+          // Stop marker: largest pass at or below target after min_runs.
+          var stopIdx = -1;
+          for (var i = 0; i < prog.length; i++) {
+            var passed = (minRuns ? xs[i] >= minRuns : true);
+            if (passed && ys[i] <= target && target > 0) { stopIdx = i; break; }
+          }
+          // If gt_mode==fixed or no early stop, mark the last point.
+          if (stopIdx < 0 && gt.stop_reason && gt.stop_reason.indexOf("max") >= 0) {
+            stopIdx = prog.length - 1;
+          }
+          if (stopIdx >= 0) {
+            svg.appendChild(_svgEl("circle", {
+              class: "gt-stop-marker",
+              cx: sx(xs[stopIdx]), cy: sy(ys[stopIdx]), r: 5.5
+            }));
+          }
+        })();
+
+        // -----------------------------------------------------------
+        // Chart 2: Coverage curve (S_obs and Chao1 total + 95% CI).
+        // -----------------------------------------------------------
+        (function drawCoverage() {
+          var svg = document.getElementById("gt-chart-coverage");
+          while (svg.firstChild) svg.removeChild(svg.firstChild);
+          svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+
+          var sobs = prog.map(function (p) { return p.n_observed != null ? p.n_observed : 0; });
+          var ctot = prog.map(function (p) { return p.chao1_estimated_total != null ? p.chao1_estimated_total : null; });
+          var chigh = prog.map(function (p) { return p.chao1_ci_95_high != null ? p.chao1_ci_95_high : null; });
+          var clow = prog.map(function (p) { return p.chao1_ci_95_low != null ? p.chao1_ci_95_low : null; });
+
+          var maxYs = sobs.slice();
+          ctot.forEach(function (v) { if (v != null) maxYs.push(v); });
+          chigh.forEach(function (v) { if (v != null) maxYs.push(v); });
+          var yMax = Math.max.apply(null, maxYs.concat([1]));
+          // Pad 8% headroom.
+          yMax = Math.ceil(yMax * 1.08);
+          var sy = syScale(yMax);
+
+          // Y grid + labels (counts).
+          _ticks(yMax, 4).forEach(function (t) {
+            var y = sy(t);
+            svg.appendChild(_svgEl("line", {
+              class: "gt-grid-line",
+              x1: M.left, x2: M.left + iw, y1: y, y2: y
+            }));
+            var lbl = _svgEl("text", {
+              class: "gt-axis-text",
+              x: M.left - 4, y: y + 3,
+              "text-anchor": "end"
+            });
+            lbl.textContent = num1(t);
+            svg.appendChild(lbl);
+          });
+          xs.forEach(function (x, i) {
+            if (xs.length > 12 && i % Math.ceil(xs.length / 8) !== 0
+                && i !== xs.length - 1) return;
+            var lx = sx(x);
+            var lbl = _svgEl("text", {
+              class: "gt-axis-text",
+              x: lx, y: M.top + ih + 14,
+              "text-anchor": "middle"
+            });
+            lbl.textContent = String(x);
+            svg.appendChild(lbl);
+          });
+          var xlabel2 = _svgEl("text", {
+            class: "gt-axis-text",
+            x: M.left + iw / 2, y: H - 4,
+            "text-anchor": "middle"
+          });
+          xlabel2.textContent = "passes completed";
+          svg.appendChild(xlabel2);
+
+          svg.appendChild(_svgEl("line", {
+            class: "gt-axis-line",
+            x1: M.left, y1: M.top + ih, x2: M.left + iw, y2: M.top + ih
+          }));
+          svg.appendChild(_svgEl("line", {
+            class: "gt-axis-line",
+            x1: M.left, y1: M.top, x2: M.left, y2: M.top + ih
+          }));
+
+          // Chao1 95% CI band: only render when we have at least one
+          // pair of valid (low, high) endpoints. Polygon goes
+          // along the upper boundary forward then back along the
+          // lower boundary.
+          var bandPath = [];
+          var hadAny = false;
+          for (var i = 0; i < prog.length; i++) {
+            if (chigh[i] != null) {
+              bandPath.push((hadAny ? "L" : "M") + sx(xs[i]) + "," + sy(chigh[i]));
+              hadAny = true;
+            }
+          }
+          for (var j = prog.length - 1; j >= 0; j--) {
+            if (clow[j] != null) {
+              bandPath.push("L" + sx(xs[j]) + "," + sy(clow[j]));
+            }
+          }
+          if (hadAny && bandPath.length > 1) {
+            bandPath.push("Z");
+            svg.appendChild(_svgEl("path", {
+              class: "gt-area-ci", d: bandPath.join(" ")
+            }));
+          }
+
+          // S_obs line.
+          var dSobs = prog.map(function (p, i) {
+            return (i ? "L" : "M") + sx(xs[i]) + "," + sy(sobs[i]);
+          }).join(" ");
+          svg.appendChild(_svgEl("path", { class: "gt-line gt-sobs", d: dSobs }));
+          prog.forEach(function (p, i) {
+            svg.appendChild(_svgEl("circle", {
+              class: "gt-dot gt-sobs",
+              cx: sx(xs[i]), cy: sy(sobs[i]), r: 3
+            }));
+          });
+
+          // Chao1 line - dashed, only across non-null segments.
+          var dChao = "";
+          var pen = false;
+          for (var k = 0; k < prog.length; k++) {
+            if (ctot[k] == null) { pen = false; continue; }
+            dChao += (pen ? "L" : "M") + sx(xs[k]) + "," + sy(ctot[k]) + " ";
+            pen = true;
+          }
+          if (dChao.trim()) {
+            svg.appendChild(_svgEl("path", { class: "gt-line gt-chao1", d: dChao.trim() }));
+          }
+          prog.forEach(function (p, i) {
+            if (ctot[i] != null) {
+              svg.appendChild(_svgEl("circle", {
+                class: "gt-dot gt-chao1",
+                cx: sx(xs[i]), cy: sy(ctot[i]), r: 3
+              }));
+            }
+          });
+        })();
+
+        // -----------------------------------------------------------
+        // Chart 3: Frequency of frequencies bar chart.
+        // -----------------------------------------------------------
+        (function drawFreq() {
+          var svg = document.getElementById("gt-chart-freq");
+          while (svg.firstChild) svg.removeChild(svg.firstChild);
+          svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+
+          var overall = (gt && gt.overall) || {};
+          var fc = overall.frequency_counts || {};
+          var rs = Object.keys(fc).map(Number)
+            .filter(function (n) { return isFinite(n) && n >= 1; })
+            .sort(function (a, b) { return a - b; });
+          if (!rs.length) {
+            var none = _svgEl("text", {
+              class: "gt-axis-text",
+              x: W / 2, y: H / 2, "text-anchor": "middle"
+            });
+            none.textContent = "(no frequency-of-frequencies data)";
+            svg.appendChild(none);
+            return;
+          }
+          var counts = rs.map(function (r) { return fc[r] || 0; });
+          var yMax = Math.max.apply(null, counts.concat([1]));
+          yMax = Math.ceil(yMax * 1.1);
+          var sy = syScale(yMax);
+
+          var n = rs.length;
+          var bandW = iw / n;
+          var barW = Math.max(8, Math.min(48, bandW * 0.7));
+
+          _ticks(yMax, 4).forEach(function (t) {
+            var y = sy(t);
+            svg.appendChild(_svgEl("line", {
+              class: "gt-grid-line",
+              x1: M.left, x2: M.left + iw, y1: y, y2: y
+            }));
+            var lbl = _svgEl("text", {
+              class: "gt-axis-text",
+              x: M.left - 4, y: y + 3,
+              "text-anchor": "end"
+            });
+            lbl.textContent = num1(t);
+            svg.appendChild(lbl);
+          });
+
+          rs.forEach(function (r, i) {
+            var cx = M.left + (i + 0.5) * bandW;
+            var by = sy(counts[i]);
+            svg.appendChild(_svgEl("rect", {
+              class: "gt-bar" + (r === 1 ? " gt-bar-singleton" : ""),
+              x: cx - barW / 2, y: by,
+              width: barW, height: M.top + ih - by
+            }));
+            var rl = _svgEl("text", {
+              class: "gt-axis-text",
+              x: cx, y: M.top + ih + 14,
+              "text-anchor": "middle"
+            });
+            rl.textContent = "r=" + r;
+            svg.appendChild(rl);
+            // Count label above each bar.
+            var cl = _svgEl("text", {
+              class: "gt-bar-label",
+              x: cx, y: by - 3,
+              "text-anchor": "middle"
+            });
+            cl.textContent = String(counts[i]);
+            svg.appendChild(cl);
+          });
+
+          svg.appendChild(_svgEl("line", {
+            class: "gt-axis-line",
+            x1: M.left, y1: M.top + ih, x2: M.left + iw, y2: M.top + ih
+          }));
+          svg.appendChild(_svgEl("line", {
+            class: "gt-axis-line",
+            x1: M.left, y1: M.top, x2: M.left, y2: M.top + ih
+          }));
+          var xlabel3 = _svgEl("text", {
+            class: "gt-axis-text",
+            x: M.left + iw / 2, y: H - 4,
+            "text-anchor": "middle"
+          });
+          xlabel3.textContent = "seen in r passes";
+          svg.appendChild(xlabel3);
+        })();
       }
 
       function renderPerArmTable(perArm) {
@@ -2894,10 +3496,20 @@
       }
       function cCmp(a, b, key) {
         var va = cSortVal(a, key), vb = cSortVal(b, key);
-        if (typeof va === "number" && typeof vb === "number") return va - vb;
-        if (va == null) return -1;
-        if (vb == null) return 1;
-        return String(va).localeCompare(String(vb));
+        var primary;
+        if (typeof va === "number" && typeof vb === "number") primary = va - vb;
+        else if (va == null) primary = -1;
+        else if (vb == null) primary = 1;
+        else primary = String(va).localeCompare(String(vb));
+        if (primary !== 0) return primary;
+        // Stable tiebreaker: cluster_id (lexicographic). Without this,
+        // ties on the sort key would land in undefined relative order
+        // (depends on the JS engine's Array.prototype.sort), which made
+        // "Source data" / Clusters tabs reshuffle on every re-render
+        // and confused operators tracking a specific cluster.
+        var ka = a && a.cluster_id ? String(a.cluster_id) : "";
+        var kb = b && b.cluster_id ? String(b.cluster_id) : "";
+        return ka.localeCompare(kb);
       }
 
       function applyClusterFilters() {
@@ -3040,6 +3652,34 @@
           return h("div", { class: "muted", text: "No synthesis available." });
         }
         var lines = [];
+        // Duplicate-group summary: for row_duplication clusters,
+        // surface the union of all detections' affected_rows so the
+        // report reader can see the whole group, not just the
+        // canonical row.
+        var etypes = cluster.error_types || [];
+        if (etypes.indexOf("row_duplication") !== -1) {
+          var dupRows = {};
+          if (cluster.row !== null && cluster.row !== undefined) {
+            dupRows[Number(cluster.row)] = true;
+          }
+          (cluster.detections || []).forEach(function (d) {
+            (d.affected_rows || []).forEach(function (r) {
+              var n = Number(r);
+              if (!isNaN(n)) dupRows[n] = true;
+            });
+          });
+          var sorted = Object.keys(dupRows)
+            .map(Number)
+            .sort(function (a, b) { return a - b; });
+          if (sorted.length > 1) {
+            lines.push(h("div", { class: "row-line" }, [
+              h("span", { class: "k", text: "Duplicate group" }),
+              document.createTextNode(
+                sorted.length + " rows: " + sorted.join(", ")
+              )
+            ]));
+          }
+        }
         if (syn.error) {
           lines.push(h("div", { class: "row-line error-line" }, [
             h("span", { class: "k", text: "LLM error" }),
@@ -3106,6 +3746,22 @@
         cBody.innerHTML = "";
         if (!rows.length) {
           cEmpty.style.display = "";
+          // Distinguish "report has no clusters at all" from "filters
+          // hide everything" - the action the operator can take is
+          // very different in each case.
+          var msgEl = document.getElementById("clusters-empty-msg");
+          var clearBtn = document.getElementById("clusters-clear-filters");
+          if (msgEl) {
+            if (clusters.length === 0) {
+              msgEl.textContent =
+                "This run produced no detections. The data may be clean, " +
+                "or the configured error types did not match anything.";
+              if (clearBtn) clearBtn.style.display = "none";
+            } else {
+              msgEl.textContent = "No clusters match the current filters.";
+              if (clearBtn) clearBtn.style.display = "";
+            }
+          }
           cCountLabel.textContent = "0 of " + clusters.length + " clusters";
           return;
         }
@@ -3227,6 +3883,39 @@
         if (!el) return;
         el.addEventListener(el.tagName === "SELECT" ? "change" : "input", applyClusterFilters);
       });
+
+      // Inline "Clear filters" button on the empty-state. Resets every
+      // cluster-view filter (search box, dropdowns, source tab) to its
+      // default and re-runs the filter pass. We deliberately do not
+      // touch the active source TAB unless filters resulted in an
+      // empty view because of the active source - the user may have
+      // navigated explicitly to one source.
+      var clustersClearBtn = document.getElementById("clusters-clear-filters");
+      if (clustersClearBtn) {
+        clustersClearBtn.addEventListener("click", function () {
+          if (cQ) cQ.value = "";
+          [cPrimaryEl, cConfEl, cFpEl, cEvEl].forEach(function (sel) {
+            if (sel) sel.value = "";
+          });
+          if (cSourceEl) cSourceEl.value = "";
+          // Switch back to the "All sources" tab so users see every
+          // cluster, not just the currently-scoped source.
+          activeSource = "";
+          var tabsEl = document.getElementById("source-tabs");
+          if (tabsEl) {
+            tabsEl.querySelectorAll("button").forEach(function (b) {
+              b.classList.toggle("active", !b.getAttribute("data-source"));
+            });
+            [cSourceEl, srcEl].forEach(function (sel) {
+              if (!sel) return;
+              sel.disabled = false;
+              sel.style.opacity = "1";
+            });
+          }
+          if (typeof refreshMetrics === "function") refreshMetrics();
+          else applyClusterFilters();
+        });
+      }
 
       // ==================================================================
       // Raw detections view

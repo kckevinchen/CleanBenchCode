@@ -1,93 +1,130 @@
 # Web-grounded verification prompt.
 #
-# Used by src.verifier.verify.Verifier. One LLM call per gate-eligible
-# cluster. The model is given (a) the suspect cell value, (b) the
-# detector's suggested fix (if any), (c) sibling values from the same
-# column, and (d) the top web-search snippets we retrieved for the
-# value and for the suggested fix.
+# Used by src.verifier.verify.Verifier. One agent call per gate-eligible
+# cluster. The agent has the Microsoft Foundry **Web Search** tool
+# attached and is responsible for issuing its own Bing queries; we do
+# NOT pre-fetch snippets.
 #
-# It must respond with strictly valid JSON; the verdict is one of
-# {confirmed_error, false_positive, ambiguous}. ``canonical_value`` is
-# the corrected value if and only if verdict==confirmed_error.
+# The verifier supports four cluster shapes (selected automatically by
+# src.verifier.gate.cluster_shape, materialised through the {pattern}
+# placeholder below):
 #
-# Placeholders the verifier fills in (Python str.format, single braces
-# for placeholders, double braces escape literal braces in the JSON
-# example):
+#   * single_cell   - one row, one suspect column. Classic typo /
+#                     casing / pattern correction.
+#   * multi_row     - the same column flagged across N rows that the
+#                     detector thinks may be duplicate records of one
+#                     real-world entity (e.g. row_duplication).
+#   * multi_column  - one row with N columns under review whose values
+#                     are suspected to be mutually inconsistent
+#                     (e.g. fd_violation: license -> name -> address).
+#   * composite     - N rows + N columns: a duplicate-group with
+#                     attribute disagreements.
+#
+# The verifier composes a pattern-specific TASK block in code and
+# slots it into ``{task_block}`` below; the YAML stays a single
+# template that handles every pattern. The agent must respond with
+# strictly valid JSON; the verdict is one of {confirmed_error,
+# false_positive, ambiguous}. Cited URLs MUST come from the Web
+# Search tool's results - the verifier rejects any citation URL
+# that wasn't surfaced as a ``url_citation`` annotation by the
+# agent runtime.
+#
+# Placeholders (Python str.format, single braces for placeholders,
+# double braces escape literal braces in the JSON example):
 #   source            - CSV file basename
-#   column            - flagged column header
-#   row               - row index (integer)
-#   entity_kind       - "org" | "address" | "phone" | "url" | "person" | "other"
-#   suspect_value     - the cell value the LLM flagged
+#   pattern           - "single_cell" | "multi_row" |
+#                       "multi_column" | "composite"
+#   column            - primary suspect column (single_cell) or
+#                       first cluster column otherwise
+#   columns           - all columns under review (or "(none)")
+#   row               - primary row index, or "n/a"
+#   rows              - all affected rows joined with ", " (or "n/a")
+#   n_records         - number of records in the RECORDS UNDER REVIEW
+#                       block (1 for single_cell / multi_column,
+#                       >=2 for multi_row / composite)
+#   entity_kind       - "org" | "address" | "phone" | "url" |
+#                       "person" | "other"
+#   suspect_value     - the cell value the LLM flagged (single_cell)
+#                       or "(see RECORDS UNDER REVIEW)" otherwise
 #   suggested_fix     - detector's suggested correction, or "(none)"
-#   error_types       - comma-separated keys (e.g. "typo, text_inconsistency")
-#   sibling_values    - bullet list of other distinct non-empty values
-#                       from the same column (helps in-corpus disambiguation)
-#   row_context       - bullet list of every column in the SAME row
-#                       (column: value), with the flagged column marked
-#                       with " *" so the model can cross-reference
-#                       (e.g. confirm a county name against a district)
-#   evidence_block    - search results, one block per query, formatted
-#                       as "[idx] title - url\n    snippet"
+#   error_types       - comma-separated detector error_type keys
+#   sibling_values    - bullet list of distinct non-empty values from
+#                       the suspect column (single_cell only; empty
+#                       block for the other patterns)
+#   records_block     - "RECORDS UNDER REVIEW" body. One bullet block
+#                       per record; columns under review are marked
+#                       with " *" so the agent knows which fields
+#                       the detector suspects.
+#   task_block        - pattern-specific task instructions composed
+#                       in src.verifier.verify._format_task_block.
 
 system: >
-  You are a careful data-quality reviewer. Your job is to decide whether a
-  cell value flagged as a possible error really is wrong, using ONLY the
-  web evidence and corpus context provided. Never invent facts. Quote
-  evidence verbatim from the snippets you are given. If the evidence is
-  insufficient or contradictory, say so by returning verdict="ambiguous"
-  - do NOT guess. Respond with strictly valid JSON, no markdown fences,
-  no prose outside the JSON payload.
+  You are a careful data-quality reviewer. Your job is to decide
+  whether one or more cell values flagged as a possible error really
+  are wrong - and, when the detector flags multiple records or
+  multiple columns at once, whether they are mutually consistent
+  with authoritative web evidence. You have a Web Search tool
+  available; use it to gather evidence whenever you need to confirm
+  a claim. You may call the tool multiple times. Never invent facts
+  and never cite a URL you did not actually retrieve. Quote evidence
+  verbatim from the pages the tool returns. If the evidence is
+  insufficient or contradictory, say so by returning
+  verdict="ambiguous" - do NOT guess. Respond with strictly valid
+  JSON, no markdown fences, no prose outside the JSON payload.
 
 user_template: |
   CONTEXT
   -------
   source:        {source}
-  column:        {column}
-  row:           {row}
+  pattern:       {pattern}
+  primary row:   {row}
+  rows:          {rows}
+  primary col:   {column}
+  columns:       {columns}
   entity_kind:   {entity_kind}
   error_types:   {error_types}
   suspect_value: {suspect_value}
   suggested_fix: {suggested_fix}
 
-  FULL ROW (every column in the same record; the flagged column is
-  marked with " *". Use related fields to cross-check the suspect
-  value - for example, a county name should be consistent with the
-  district / address columns; an org name should be consistent with
-  any URL / website / contact-name in the same row.):
-  {row_context}
+  RECORDS UNDER REVIEW ({n_records} record(s); columns marked with
+  " *" are flagged by the detector and are the focus of this check.
+  Use the unmarked columns as cross-reference context only):
+  {records_block}
 
-  OTHER VALUES IN THIS COLUMN (up to 8 distinct samples, for context):
+  OTHER VALUES IN THIS COLUMN (single_cell only, up to 8 distinct
+  samples for context; empty for multi-row / multi-column):
   {sibling_values}
-
-  WEB EVIDENCE
-  ------------
-  {evidence_block}
 
   TASK
   ----
-  Decide which verdict best fits, using ONLY the evidence above:
-
-  * "confirmed_error" - the evidence shows the suspect value is wrong
-    AND a single canonical alternative is supported by at least one
-    quoted snippet. Provide that alternative as ``canonical_value``.
-  * "false_positive" - the evidence shows the suspect value is in
-    fact correct (e.g. it is the official name / address). Set
-    ``canonical_value`` to null.
-  * "ambiguous" - the evidence is missing, contradictory, or only
-    weakly suggestive. Set ``canonical_value`` to null. Use this
-    liberally; it is far better than guessing.
+  {task_block}
 
   EVIDENCE QUALITY GATE
   ---------------------
-  * For "confirmed_error" you MUST cite at least one snippet whose
-    text contains a near-verbatim occurrence of ``canonical_value``.
-    The ``evidence`` array MUST therefore be NON-EMPTY when verdict
-    is "confirmed_error".
+  * For "confirmed_error" you MUST cite at least one URL whose page
+    text contains a near-verbatim occurrence of the canonical value
+    (or, for multi-row / composite patterns, of the canonical entity
+    name). The ``evidence`` array MUST therefore be NON-EMPTY when
+    verdict is "confirmed_error".
   * "Near-verbatim" means the cited snippet contains the canonical
-    value as a contiguous substring (case- and punctuation-tolerant);
-    paraphrases or summaries of the snippet do NOT count.
-  * The cited URL must be present in the WEB EVIDENCE above; do not
-    invent URLs.
+    value as a contiguous substring, allowing ONLY:
+      - case differences ("New York" matches "new york"),
+      - whitespace normalisation ("New  York" matches "New York"),
+      - ASCII-punctuation differences ("U.S.A." matches "USA"),
+      - Unicode NFKC normalisation (full-width / smart quotes /
+        curly apostrophes).
+    The following do NOT count as near-verbatim and are NEVER
+    acceptable as evidence:
+      - abbreviation expansion ("FBI" does not match
+        "Federal Bureau of Investigation"),
+      - synonym substitution ("Big Apple" does not match "New York"),
+      - paraphrase or summarisation,
+      - partial-prefix matches ("New" alone does not match "New York").
+    If the only way to bridge the snippet and the canonical value is
+    one of the disallowed transforms, the snippet is NOT evidence.
+  * Cite the URL exactly as the Web Search tool returned it; do not
+    invent or paraphrase URLs. The verifier rejects any citation
+    whose URL the runtime did not record as a Web Search source.
   * Confidence calibration:
       Verdict = "confirmed_error" (your certainty the suspect is wrong):
         0.9 - 1.0  multiple independent authoritative sources agree
@@ -109,12 +146,24 @@ user_template: |
   {{
     "verdict": "confirmed_error | false_positive | ambiguous",
     "canonical_value": "<string, or null>",
+    "canonical_record": {{
+      "<column_name>": "<corrected_value>"
+    }},                                  // OPTIONAL. Populate only for
+                                         // multi_column / composite
+                                         // patterns where you are
+                                         // correcting >=1 specific
+                                         // columns. For single_cell /
+                                         // multi_row, omit this field
+                                         // (or set to null). Keys MUST
+                                         // be column names that
+                                         // appeared in RECORDS UNDER
+                                         // REVIEW.
     "confidence": 0.0,
     "evidence": [
       {{
-        "url": "<exact URL from WEB EVIDENCE>",
-        "title": "<title from WEB EVIDENCE>",
-        "quote": "<<=200 char near-verbatim snippet from that result>"
+        "url": "<exact URL surfaced by Web Search>",
+        "title": "<page title>",
+        "quote": "<<=200 char near-verbatim snippet from that page>"
       }}
     ],                                  // MUST contain >=1 entry when verdict is "confirmed_error"; may be [] for "false_positive" / "ambiguous"
     "reasoning": "<one to three sentences justifying the verdict>"

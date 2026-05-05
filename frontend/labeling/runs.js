@@ -38,8 +38,17 @@ function escape(s) {
 // --------------------------------------------------------- tabs
 
 function showTab(name) {
-  $$(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
-  $$(".panel").forEach((p) => p.classList.toggle("hidden", p.dataset.panel !== name));
+  $$(".tab").forEach((t) => {
+    const on = t.dataset.tab === name;
+    t.classList.toggle("active", on);
+    t.setAttribute("aria-selected", on ? "true" : "false");
+    t.setAttribute("tabindex", on ? "0" : "-1");
+  });
+  $$(".panel").forEach((p) => {
+    const on = p.dataset.panel === name;
+    p.classList.toggle("hidden", !on);
+    p.setAttribute("aria-hidden", on ? "false" : "true");
+  });
   localStorage.setItem("dq-ws-tab", name);
 }
 $$(".tab").forEach((t) => t.addEventListener("click", () => showTab(t.dataset.tab)));
@@ -168,6 +177,27 @@ function renderRuns(runs) {
           body: JSON.stringify({ kind: "relation_report", run_id: b.dataset.run }),
         });
         toast(`relation report build started: ${job.job_id}`);
+        showTab("jobs");
+        openJob(job.job_id);
+        refreshJobs();
+      } catch (e) {
+        toast(`error: ${e.message}`, 3500);
+      }
+    });
+  });
+
+  box.querySelectorAll('[data-action="validate-relations"]').forEach((b) => {
+    b.addEventListener("click", async () => {
+      try {
+        const job = await api("/api/launcher/jobs", {
+          method: "POST",
+          body: JSON.stringify({
+            kind: "relation_validation",
+            run_id: b.dataset.run,
+            params: {},
+          }),
+        });
+        toast(`relation validation started: ${job.job_id}`);
         showTab("jobs");
         openJob(job.job_id);
         refreshJobs();
@@ -392,6 +422,7 @@ function applyConfigDefaults(defaults) {
 
   // ----- Chip pre-selection (error_types) -----
   preselectChips("error-types", prompts.error_types, state.selectedErrorTypes);
+  refreshRowDupBlock();
 }
 
 function setChecked(id, on) {
@@ -427,8 +458,21 @@ function makeChip(key, set, labelText) {
     label.classList.toggle("active", input.checked);
     if (input.checked) set.add(key);
     else set.delete(key);
+    if (set === state.selectedErrorTypes) refreshRowDupBlock();
   });
   return label;
+}
+
+// Show the row-duplication-specific fieldset only when the operator
+// has selected ``row_duplication`` (or no types at all, which means
+// "run them all"). Hidden in every other case to keep the form
+// uncluttered.
+function refreshRowDupBlock() {
+  const block = document.getElementById("row-dup-block");
+  if (!block) return;
+  const sel = state.selectedErrorTypes;
+  const relevant = sel.size === 0 || sel.has("row_duplication");
+  block.hidden = !relevant;
 }
 
 function setPlaceholder(id, v) {
@@ -469,6 +513,13 @@ function collectParams() {
   }
 
   const errorTypes = [...state.selectedErrorTypes].join(",") || null;
+  // When the operator has explicitly chosen one or more error types
+  // via the chip selector, bypass the YAML ``prompts.scopes`` filter
+  // (which would otherwise silently drop types that don't match the
+  // configured scope, e.g. row_duplication under a single-column
+  // default). When no chips are selected we leave scopes alone so
+  // the YAML default still applies.
+  const scopes = errorTypes ? "all" : null;
 
   const params = {
     csv, csv_dir,
@@ -486,8 +537,23 @@ function collectParams() {
     normalize_fold_punctuation: check("normalize-fold-punctuation") || null,
     normalize_lowercase: check("normalize-lowercase") || null,
     error_types: errorTypes,
+    scopes,
     mode: val("mode"),
   };
+
+  // ----- row_duplication overrides (only sent when the fieldset is
+  //       visible, which happens when the operator has selected
+  //       ``row_duplication`` or no types at all). The detector
+  //       falls back to config/experiment.yaml for blank fields.
+  //       The full recall-first pipeline (normalise + canonicalise +
+  //       blocking + minhash + embedding + adjudicate) is configured
+  //       in YAML; only the operational dials are exposed here.
+  const rowDupBlock = document.getElementById("row-dup-block");
+  const rowDupVisible = rowDupBlock && !rowDupBlock.hidden;
+  if (rowDupVisible) {
+    params.row_dup_detection_mode = val("row-dup-detection-mode");
+    params.row_dup_max_groups_per_source = num("row-dup-max-groups");
+  }
 
   if (params.mode === "adaptive") {
     Object.assign(params, {
@@ -532,6 +598,7 @@ function previewCommand() {
     column_mode: "--column-mode", columns: "--columns",
     reasoning_effort: "--reasoning-effort", concurrency: "--concurrency",
     error_types: "--error-types",
+    scopes: "--scopes",
     synthesis_effort: "--synthesis-effort",
     gt_mode: "--gt-mode", gt_num_runs: "--gt-num-runs",
     gt_min_runs: "--gt-min-runs", gt_target_missing_mass: "--gt-target-missing-mass",
@@ -539,6 +606,8 @@ function previewCommand() {
     gt_base_seed: "--gt-base-seed", gt_variant_effort: "--gt-variant-effort",
     gt_per_arm_stop_when: "--gt-per-arm-stop-when",
     gt_per_arm_epsilon_chao1: "--gt-per-arm-epsilon-chao1",
+    row_dup_detection_mode: "--row-dup-detection-mode",
+    row_dup_max_groups_per_source: "--row-dup-max-groups-per-source",
   };
   const boolMap = {
     no_synthesis: ["--no-synthesis", null],
@@ -874,7 +943,7 @@ bootstrap().catch((e) => {
 });
 
 // =============================================================
-// Schema discovery (multi-column relations)
+// Relation discovery (multi-column relations)
 // =============================================================
 
 function renderRelationsRunRow(r) {
@@ -884,6 +953,12 @@ function renderRelationsRunRow(r) {
   const reportLink = r.has_report
     ? `<a class="primary" href="/api/runs/${encodeURIComponent(r.run_id)}/report" target="_blank" rel="noopener">View relations</a>`
     : `<button data-action="build-relation-report" data-run="${escape(r.run_id)}">Build report</button>`;
+  // Empirical-validation button. Always available alongside the
+  // report (it's safe to re-run; the script overwrites
+  // ``relation_verifications.jsonl``). The button refreshes the
+  // dashboard at the end so users don't need a separate "rebuild"
+  // step.
+  const validateBtn = `<button data-action="validate-relations" data-run="${escape(r.run_id)}" title="Run LLM-written check() code against the data and record pass-rates">Validate</button>`;
   const tag = (cls, value, title) => value
     ? `<span class="tag ${cls}"${title ? ` title="${escape(title)}"` : ""}>${escape(String(value))}</span>`
     : "";
@@ -914,6 +989,7 @@ function renderRelationsRunRow(r) {
       ${thirdStat}
       <div class="actions">
         ${reportLink}
+        ${validateBtn}
         <button class="danger" data-action="delete-run" data-run="${escape(r.run_id)}" title="Delete this run">Delete</button>
       </div>
     </div>
@@ -944,6 +1020,7 @@ function initRelationsForm() {
   // detection launcher so the styling is identical.
   state.relationsErrorTypes = state.relationsErrorTypes || new Set();
   const allowed = new Set(cfg.relations_error_types || []);
+  const scopes = cfg.relations_error_type_scopes || {};
   const etBox = $("#rel-error-types");
   if (etBox) {
     etBox.innerHTML = "";
@@ -974,7 +1051,16 @@ function initRelationsForm() {
         const chips = [];
         for (const et of items) {
           const chip = makeChip(et.key, state.relationsErrorTypes, et.name || et.key);
-          chip.title = et.key + (et.name && et.name !== et.key ? ` \u00b7 ${et.name}` : "");
+          const scope = scopes[et.key] || "row";
+          let title = et.key + (et.name && et.name !== et.key ? ` \u00b7 ${et.name}` : "");
+          if (scope === "table") {
+            title += "\nMulti-table relation: only fires on workbooks with 2+ sibling CSV sheets.";
+            chip.dataset.scope = "table";
+          } else if (scope === "group") {
+            title += "\nMulti-row relation: requires the full source frame to discover row-to-row patterns.";
+            chip.dataset.scope = "group";
+          }
+          chip.title = title;
           body.appendChild(chip);
           chips.push(chip);
         }
@@ -1023,7 +1109,10 @@ function initRelationsForm() {
   // in collectRelParams, which only emits them when adaptive=true).
   const adapt = $("#rel-adaptive");
   const block = $("#rel-adaptive-block");
-  const adaptiveFields = ["rel-max-passes", "rel-min-passes", "rel-gt-threshold", "rel-base-seed"];
+  const adaptiveFields = [
+    "rel-max-passes", "rel-min-passes", "rel-gt-threshold",
+    "rel-stop-when", "rel-epsilon-chao1", "rel-base-seed",
+  ];
   function syncAdaptive() {
     const on = !!adapt?.checked;
     block?.classList.toggle("is-on", on);
@@ -1037,6 +1126,35 @@ function initRelationsForm() {
   }
   adapt?.addEventListener("change", syncAdaptive);
   syncAdaptive();
+
+  // Aggregate / Generalize blocks: when the master checkbox is off,
+  // grey out the per-pass min-cluster input so it's clear the value
+  // won't be used.
+  function bindPostPass(checkboxId, blockId, fieldIds) {
+    const cb = document.getElementById(checkboxId);
+    const block = document.getElementById(blockId);
+    function sync() {
+      const on = !!cb?.checked;
+      block?.classList.toggle("is-on", on);
+      for (const id of fieldIds) {
+        const el = document.getElementById(id);
+        if (!el) continue;
+        el.disabled = !on;
+        const wrap = el.closest("label");
+        if (wrap) wrap.classList.toggle("field-disabled", !on);
+      }
+    }
+    cb?.addEventListener("change", sync);
+    sync();
+  }
+  bindPostPass("rel-aggregate", "rel-aggregate-block",
+               ["rel-aggregate-min-cluster"]);
+  bindPostPass("rel-generalize", "rel-generalize-block",
+               ["rel-generalize-min-cluster"]);
+  bindPostPass("rel-validate", "rel-validate-block",
+               ["rel-validate-layer", "rel-validate-limit",
+                "rel-validate-sample-rows", "rel-validate-timeout",
+                "rel-validate-max-violations", "rel-validate-prompt"]);
 }
 
 function collectRelParams() {
@@ -1057,6 +1175,15 @@ function collectRelParams() {
 
   const errorTypes = [...(state.relationsErrorTypes || [])].join(",") || null;
   const adaptive = check("rel-adaptive");
+  // Post-discovery passes. Default ON to match the CLI; user opts out
+  // by un-checking. We send explicit booleans so the backend can map
+  // them to ``--no-aggregate`` / ``--no-generalize`` cleanly.
+  const aggEl = document.getElementById("rel-aggregate");
+  const genEl = document.getElementById("rel-generalize");
+  const valEl = document.getElementById("rel-validate");
+  const aggregate = aggEl ? aggEl.checked : true;
+  const generalize = genEl ? genEl.checked : true;
+  const validate = valEl ? valEl.checked : true;
   const params = {
     csv,
     csv_dir,
@@ -1071,7 +1198,20 @@ function collectRelParams() {
     max_passes: adaptive ? num("rel-max-passes") : null,
     min_passes: adaptive ? num("rel-min-passes") : null,
     gt_threshold: adaptive ? num("rel-gt-threshold") : null,
+    stop_when: adaptive ? val("rel-stop-when") : null,
+    epsilon_chao1: adaptive ? num("rel-epsilon-chao1") : null,
     base_seed: adaptive ? num("rel-base-seed") : null,
+    aggregate: aggregate,
+    aggregate_min_cluster: aggregate ? num("rel-aggregate-min-cluster") : null,
+    generalize: generalize,
+    generalize_min_cluster: generalize ? num("rel-generalize-min-cluster") : null,
+    validate: validate,
+    validate_layer: validate ? val("rel-validate-layer") : null,
+    validate_limit: validate ? num("rel-validate-limit") : null,
+    validate_sample_rows: validate ? num("rel-validate-sample-rows") : null,
+    validate_timeout: validate ? num("rel-validate-timeout") : null,
+    validate_max_violations: validate ? num("rel-validate-max-violations") : null,
+    validate_prompt: validate ? val("rel-validate-prompt") : null,
   };
   return Object.fromEntries(
     Object.entries(params).filter(([, v]) => v !== null && v !== "")
@@ -1087,11 +1227,20 @@ function previewRelCommand() {
     error_types: "--error-types",
     max_passes: "--max-passes", min_passes: "--min-passes",
     gt_threshold: "--gt-threshold", base_seed: "--base-seed",
+    stop_when: "--stop-when", epsilon_chao1: "--epsilon-chao1",
+    aggregate_min_cluster: "--aggregate-min-cluster",
+    generalize_min_cluster: "--generalize-min-cluster",
   };
   const flags = [];
   for (const [k, v] of Object.entries(p)) {
     if (k === "adaptive" && v) flags.push("--adaptive");
     else if (k === "include_raw" && v) flags.push("--include-raw");
+    else if (k === "aggregate") {
+      if (v === false) flags.push("--no-aggregate");
+    }
+    else if (k === "generalize") {
+      if (v === false) flags.push("--no-generalize");
+    }
     else if (k in map) flags.push(`${map[k]} ${JSON.stringify(v)}`);
   }
   const el = $("#rel-cmd-preview");
@@ -1109,7 +1258,7 @@ async function onRelSubmit(e) {
       method: "POST",
       body: JSON.stringify({ kind: "relations", params }),
     });
-    toast(`schema discovery launched: ${job.job_id}`);
+    toast(`relation discovery launched: ${job.job_id}`);
     showTab("jobs");
     openJob(job.job_id);
     refreshJobs();

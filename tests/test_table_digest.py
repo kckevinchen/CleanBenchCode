@@ -129,3 +129,129 @@ class TestRenderUserPromptWithDigest:
         )
         out = tax.render_user_prompt(et, chunk, digest=build_table_digest(df, source="a"))
         assert "TYPE=typo" in out
+
+
+# ---------------------------------------------------------------------------
+# Richer evidence: extended numeric / length / rare-value summaries
+# ---------------------------------------------------------------------------
+
+
+class TestRicherEvidence:
+    def test_numeric_summary_has_quartiles_and_flags(self) -> None:
+        df = pd.DataFrame({"v": [str(x) for x in [-2, 0, 0, 1, 2, 3, 100]]})
+        d = build_table_digest(df, source="t")
+        ns = d.columns["v"].numeric_summary
+        assert ns is not None
+        assert {"min", "p25", "median", "p75", "max", "mean",
+                "n_zeros", "n_negatives"} <= set(ns)
+        assert ns["n_zeros"] == 2
+        assert ns["n_negatives"] == 1
+
+    def test_text_columns_have_length_summary(self) -> None:
+        df = pd.DataFrame({"s": ["a", "bb", "ccc", "dddd"]})
+        d = build_table_digest(df, source="t")
+        ls = d.columns["s"].length_summary
+        assert ls is not None
+        assert ls == {"min": 1, "median": 2, "max": 4}
+
+    def test_rare_values_picked_from_long_tail(self) -> None:
+        # Fat head ("A" x4) and a long tail of singletons.
+        df = pd.DataFrame({"c": ["A"] * 4 + ["x", "y", "z"]})
+        d = build_table_digest(df, source="t")
+        col = d.columns["c"]
+        assert col.rare_values, "expected long-tail values"
+        assert all(v in {"x", "y", "z"} for v in col.rare_values)
+
+    def test_fd_violation_examples_surfaced(self) -> None:
+        # Zip -> State holds for 5/6 rows. Row 5 violates.
+        df = pd.DataFrame(
+            {
+                "Zip": ["10001", "10001", "10001", "94016", "94016", "94016"],
+                "State": ["NY", "NY", "NY", "CA", "CA", "WA"],
+            }
+        )
+        d = build_table_digest(df, source="t",
+                               fd_min_support=0.5, fd_min_group_size=2,
+                               fd_rule_modal_share=0.5)
+        fds = [fd for fd in d.candidate_fds if fd["lhs"] == "Zip" and fd["rhs"] == "State"]
+        assert fds, "expected Zip -> State candidate FD"
+        fd = fds[0]
+        assert fd["support"] < 1.0
+        assert fd["violation_examples"], "expected violation row example"
+        # Violator should be index 5 (Zip=94016 -> State=WA, modal=CA).
+        ex = fd["violation_examples"][0]
+        assert ex["row"] == 5
+        assert ex["lhs_value"] == "94016"
+        assert ex["rhs_value"] == "WA"
+        assert ex["expected_rhs"] == "CA"
+
+    def test_to_prompt_block_renders_extended_fields(self) -> None:
+        df = pd.DataFrame(
+            {
+                "v": [str(x) for x in [-1, 0, 1, 2, 3, 4, 100]],
+                "s": ["short", "medium-len", "and a much longer one!", "x", "y", "z", "w"],
+            }
+        )
+        d = build_table_digest(df, source="t")
+        out = d.to_prompt_block()
+        assert "p25=" in out and "p75=" in out
+        assert "negatives=" in out
+        assert "cell length" in out
+
+    def test_to_dict_persists_new_fields(self) -> None:
+        df = pd.DataFrame({"v": [str(x) for x in [0, 0, 1, 2]]})
+        d = build_table_digest(df, source="t")
+        blob = d.to_dict()
+        col = blob["columns"]["v"]
+        assert "n_zeros" in col["numeric_summary"]
+        assert "rare_values" in col
+
+
+# ---------------------------------------------------------------------------
+# Outlier row picking
+# ---------------------------------------------------------------------------
+
+
+class TestPickOutlierIndices:
+    def test_numeric_outlier_picked(self) -> None:
+        from src.core.relations import pick_outlier_indices
+        df = pd.DataFrame({"v": [str(x) for x in [10, 11, 9, 10, 12, 1000]]})
+        d = build_table_digest(df, source="t")
+        picks = pick_outlier_indices(df, d, n=3)
+        assert 5 in picks  # row 5 is the obvious extreme
+
+    def test_total_rows_excluded(self) -> None:
+        from src.core.relations import pick_outlier_indices
+        df = pd.DataFrame({
+            "lab": ["a", "b", "c", "d", "Total"],
+            "v": ["1", "2", "3", "4", "10000"],
+        })
+        d = build_table_digest(df, source="t")
+        picks = pick_outlier_indices(df, d, n=3)
+        # Index 4 is "Total" - must NOT be picked even though it has
+        # the largest numeric deviation.
+        assert 4 not in picks
+
+    def test_rare_value_row_picked_when_no_numeric_signal(self) -> None:
+        from src.core.relations import pick_outlier_indices
+        df = pd.DataFrame({"c": ["A"] * 4 + ["unique-x"]})
+        d = build_table_digest(df, source="t")
+        picks = pick_outlier_indices(df, d, n=3)
+        assert 4 in picks
+
+
+class TestSampleRowsWithOutliers:
+    def test_outlier_section_appended(self) -> None:
+        from src.core.relations import sample_rows_for_prompt
+        df = pd.DataFrame({"x": list(range(10))})
+        out = sample_rows_for_prompt(df, n_samples=3, outlier_indices=[7])
+        assert "stratified" in out
+        assert "outliers" in out
+
+    def test_outlier_dedup_against_stratified(self) -> None:
+        from src.core.relations import sample_rows_for_prompt
+        df = pd.DataFrame({"x": list(range(10))})
+        # Index 0 is always picked by stratified -> must not appear in
+        # the outlier section.
+        out = sample_rows_for_prompt(df, n_samples=3, outlier_indices=[0])
+        assert "outliers" not in out

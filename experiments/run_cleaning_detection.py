@@ -73,14 +73,20 @@ from src.core.aggregator import (  # noqa: E402
 )
 from src.core.data_loader import (  # noqa: E402
     COLUMN_MODE_ALL,
+    COLUMN_MODE_AUTO,
     COLUMN_MODE_SINGLE,
     VALID_COLUMN_MODES,
+    VALID_DISPATCHER_COLUMN_MODES,
     CsvChunk,
     iter_chunks,
     load_csv,
 )
 from src.core.detector import PerTypeCleaningDetector  # noqa: E402
 from src.core.error_taxonomy import load_taxonomy  # noqa: E402
+from src.core.row_duplication_detector import (  # noqa: E402
+    AdjudicatorSettings,
+    RowDuplicationDetector,
+)
 from src.core.table_digest import TableDigest, build_table_digest  # noqa: E402
 from src.adaptive.cell_gt import (  # noqa: E402
     aggregate_runs,
@@ -231,7 +237,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--column-mode",
         type=str,
-        choices=sorted(VALID_COLUMN_MODES),
+        choices=sorted(VALID_DISPATCHER_COLUMN_MODES),
         help=(
             "How to split columns across LLM calls. "
             "'all' = one call sees every column for a row slice "
@@ -239,7 +245,10 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
             "'single' = one call per (row-slice, column) pair "
             "(use for single-column error types like typo, "
             "text_inconsistency, pattern_inconsistency, "
-            "semantic_incompatible). Overrides data.column_mode."
+            "semantic_incompatible). 'auto' = dispatcher picks per "
+            "error-type scope: single-column types run in 'single', "
+            "multi-column / multi-row / multi-table types run in "
+            "'all'. Overrides data.column_mode."
         ),
     )
     parser.add_argument(
@@ -256,6 +265,16 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-dir", type=Path, help="Override output.directory."
+    )
+    parser.add_argument(
+        "--run-name",
+        type=str,
+        default=None,
+        help=(
+            "Use this exact directory name (under --output-dir) for the "
+            "run instead of the auto-generated <timestamp>_<model> form. "
+            "Useful when scripting reproducible demos or CI artifacts."
+        ),
     )
     parser.add_argument(
         "--error-types",
@@ -369,6 +388,16 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="Print the loaded error-type taxonomy and exit.",
     )
     parser.add_argument(
+        "--validate-config",
+        action="store_true",
+        help=(
+            "Load + validate --config, --csv path(s) and --error-types "
+            "filter, print a summary, and exit 0 if everything resolves "
+            "(non-zero on any error). Useful in CI/demo scripts to "
+            "catch typos before kicking off an LLM run."
+        ),
+    )
+    parser.add_argument(
         "--scopes",
         type=str,
         default=None,
@@ -380,6 +409,186 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
             "'single-column,multi-column'. Applied AFTER --error-types "
             "subset selection. 'all' (or empty) disables the filter. "
             "Overrides prompts.scopes."
+        ),
+    )
+
+    # --- row_duplication detector knobs ------------------------------
+    # These override the ``row_duplication`` block in
+    # ``config/experiment.yaml`` and are only consulted when
+    # ``row_duplication`` is among the selected error types.
+    parser.add_argument(
+        "--row-dup-detection-mode",
+        choices=("collision_adjudication", "legacy_chunk_scan", "whole_table"),
+        default=None,
+        help=(
+            "Strategy for the row_duplication detector. "
+            "'collision_adjudication' (default) runs a deterministic "
+            "key-collision scan over the whole table and adjudicates "
+            "each group with one LLM call. 'legacy_chunk_scan' falls "
+            "back to the original per-chunk LLM scan (misses pairs that "
+            "straddle chunk boundaries). 'whole_table' is a PoC mode "
+            "that skips clustering entirely and hands the full CSV to "
+            "one LLM call per source under the same Chao1/GT adaptive "
+            "stop rule (capped by row_duplication.whole_table_max_rows). "
+            "Overrides row_duplication.detection_mode."
+        ),
+    )
+    parser.add_argument(
+        "--row-dup-normalize-keys",
+        dest="row_dup_normalize_keys",
+        action="store_true",
+        default=None,
+        help=(
+            "Apply case/punctuation normalisation when scanning for "
+            "duplicate keys (catches 'Acme Corp.' vs 'ACME CORP'). "
+            "Overrides row_duplication.normalize_keys."
+        ),
+    )
+    parser.add_argument(
+        "--no-row-dup-normalize-keys",
+        dest="row_dup_normalize_keys",
+        action="store_false",
+        help="Disable key normalisation (overrides the config).",
+    )
+    parser.add_argument(
+        "--row-dup-adjudicate",
+        dest="row_dup_adjudicate",
+        action="store_true",
+        default=None,
+        help=(
+            "Have the LLM adjudicate every collision group. Overrides "
+            "row_duplication.adjudicate_groups."
+        ),
+    )
+    parser.add_argument(
+        "--no-row-dup-adjudicate",
+        dest="row_dup_adjudicate",
+        action="store_false",
+        help=(
+            "Emit deterministic collision groups straight away with no "
+            "LLM verification. Overrides the config."
+        ),
+    )
+    parser.add_argument(
+        "--row-dup-max-groups-per-source",
+        type=int,
+        default=None,
+        help=(
+            "Cap on the number of collision groups adjudicated per "
+            "source. Groups are ranked by size (largest first). "
+            "Overrides row_duplication.max_groups_per_source."
+        ),
+    )
+    parser.add_argument(
+        "--row-dup-canonicalize-keys",
+        dest="row_dup_canonicalize_keys",
+        action="store_true",
+        default=None,
+        help=(
+            "Run a per-column LLM canonicalisation pass over each "
+            "candidate key column before the collision scan, so "
+            "semantically-equivalent surface forms ('US' / 'United "
+            "States') collide deterministically. One LLM call per "
+            "(source, key column). Overrides "
+            "row_duplication.canonicalize_keys."
+        ),
+    )
+    parser.add_argument(
+        "--no-row-dup-canonicalize-keys",
+        dest="row_dup_canonicalize_keys",
+        action="store_false",
+        help=(
+            "Disable per-column LLM canonicalisation (overrides the "
+            "config)."
+        ),
+    )
+    parser.add_argument(
+        "--row-dup-canonicalize-max-cardinality",
+        type=int,
+        default=None,
+        help=(
+            "Skip LLM canonicalisation for columns whose distinct "
+            "non-null value count exceeds this cap (the prompt would "
+            "be too long for a single reliable call). Overrides "
+            "row_duplication.canonicalize_max_cardinality."
+        ),
+    )
+    parser.add_argument(
+        "--row-dup-blocking",
+        dest="row_dup_blocking_enabled",
+        action="store_true",
+        default=None,
+        help=(
+            "Enable token-signature blocking: surface rows that share "
+            "a signature (first token of each candidate-key column) "
+            "as candidate duplicate clusters. Free; high recall."
+        ),
+    )
+    parser.add_argument(
+        "--no-row-dup-blocking",
+        dest="row_dup_blocking_enabled",
+        action="store_false",
+        help="Disable token-signature blocking.",
+    )
+    parser.add_argument(
+        "--row-dup-minhash",
+        dest="row_dup_minhash_enabled",
+        action="store_true",
+        default=None,
+        help=(
+            "Enable MinHash LSH near-duplicate clusterer. Requires "
+            "``datasketch`` installed. Catches row-level Jaccard "
+            "near-duplicates."
+        ),
+    )
+    parser.add_argument(
+        "--no-row-dup-minhash",
+        dest="row_dup_minhash_enabled",
+        action="store_false",
+        help="Disable MinHash LSH clusterer.",
+    )
+    parser.add_argument(
+        "--row-dup-minhash-threshold",
+        type=float,
+        default=None,
+        help=(
+            "Jaccard threshold for the MinHash LSH clusterer "
+            "(0..1). Lower = higher recall."
+        ),
+    )
+    parser.add_argument(
+        "--row-dup-embedding",
+        dest="row_dup_embedding_enabled",
+        action="store_true",
+        default=None,
+        help=(
+            "Enable sentence-embedding near-duplicate clusterer. "
+            "Requires ``sentence-transformers`` installed. Catches "
+            "semantic / paraphrase near-duplicates."
+        ),
+    )
+    parser.add_argument(
+        "--no-row-dup-embedding",
+        dest="row_dup_embedding_enabled",
+        action="store_false",
+        help="Disable embedding clusterer.",
+    )
+    parser.add_argument(
+        "--row-dup-embedding-threshold",
+        type=float,
+        default=None,
+        help=(
+            "Cosine-similarity threshold for the embedding clusterer "
+            "(0..1). Lower = higher recall."
+        ),
+    )
+    parser.add_argument(
+        "--row-dup-embedding-model",
+        default=None,
+        help=(
+            "sentence-transformers model name. Default: "
+            "all-MiniLM-L6-v2. Try all-mpnet-base-v2 for higher "
+            "quality at ~3x cost."
         ),
     )
 
@@ -594,6 +803,25 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
             "good_turing.per_arm.defaults.epsilon_chao1."
         ),
     )
+    parser.add_argument(
+        "--gt-no-stop",
+        dest="gt_no_stop",
+        action="store_true",
+        default=False,
+        help=(
+            "Force every arm to run until ``--gt-num-runs`` (k_max) "
+            "regardless of any saturation predicate. Sets epsilon and "
+            "epsilon_chao1 to 0 internally so no arm can ever satisfy "
+            "the stop predicate, and lifts k_min to k_max. Used in "
+            "conjunction with the per-pass per-arm snapshot dump for "
+            "offline hyperparameter search via "
+            "``experiments/analyze_stop_thresholds.py`` -- one full "
+            "K_max run produces a ground-truth trace against which "
+            "any (stop_when, epsilon, epsilon_chao1, k_min, "
+            "two_consec) combination can be replayed without "
+            "spending more LLM tokens."
+        ),
+    )
 
     # --- Web verification (post-pass) ---------------------------------
     parser.add_argument(
@@ -603,27 +831,29 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
             "After detection finishes, run the web-grounded verifier "
             "on eligible clusters (org / address / phone / url columns "
             "with a typo / text-inconsistency error type). Writes "
-            "<run_dir>/web_verifications.json. Requires TAVILY_API_KEY "
-            "in the environment (or --web-api-key)."
+            "<run_dir>/web_verifications.json. Requires "
+            "AZURE_AGENTS_ENDPOINT and AZURE_AGENTS_VERIFIER_AGENT_ID "
+            "in the environment (or --web-agent-endpoint / --web-agent-id)."
         ),
     )
     parser.add_argument(
-        "--web-provider",
-        type=str,
-        default="tavily",
-        help="Web search provider for --verify-web (tavily | stub).",
-    )
-    parser.add_argument(
-        "--web-api-key",
+        "--web-agent-endpoint",
         type=str,
         default=None,
-        help="Override TAVILY_API_KEY (otherwise read from env).",
+        help="Foundry project endpoint URL. Falls back to AZURE_AGENTS_ENDPOINT.",
+    )
+    parser.add_argument(
+        "--web-agent-id",
+        type=str,
+        default=None,
+        help="Foundry agent id (asst_...). Falls back to "
+             "AZURE_AGENTS_VERIFIER_AGENT_ID.",
     )
     parser.add_argument(
         "--web-concurrency",
         type=int,
         default=4,
-        help="Verifier LLM concurrency (default: 4).",
+        help="Verifier agent-call concurrency (default: 4).",
     )
     parser.add_argument(
         "--web-max-clusters",
@@ -713,6 +943,283 @@ def _prepare_chunks(
         chunks.extend(file_chunks)
         per_source[name] = len(file_chunks)
     return chunks, per_source
+
+
+def _split_error_types_by_scope(
+    column_mode: str,
+    error_types: List[Any],
+) -> List[Tuple[str, List[Any]]]:
+    """Group error types by the column-mode they should run under.
+
+    For ``column_mode=auto`` (dispatcher-only mode), split the selected
+    error types so that single-column-scope types run under
+    ``column_mode=single`` (one LLM call per (row-slice, column) pair)
+    and every other-scope type runs under ``column_mode=all`` (one
+    call per row-slice with every column visible). Other scopes
+    (multi-column / multi-row / multi-table) intrinsically need to
+    see the whole row at once, so forcing them through 'single' would
+    silently neuter them.
+
+    For non-auto modes, returns a single group preserving input
+    order so the caller's behaviour is unchanged.
+
+    Empty groups are dropped, so a returned list of length 0 means
+    nothing to scan.
+    """
+    if column_mode != COLUMN_MODE_AUTO:
+        return [(column_mode, list(error_types))] if error_types else []
+    sc: List[Any] = []
+    other: List[Any] = []
+    for et in error_types:
+        scope = _scope_of(getattr(et, "category", "") or "")
+        if scope == "single-column":
+            sc.append(et)
+        else:
+            other.append(et)
+    groups: List[Tuple[str, List[Any]]] = []
+    if sc:
+        groups.append((COLUMN_MODE_SINGLE, sc))
+    if other:
+        groups.append((COLUMN_MODE_ALL, other))
+    return groups
+
+
+def _merge_adaptive_gt_artifacts(
+    group_artifacts: List[Tuple[str, Dict[str, Any]]],
+) -> Dict[str, Any]:
+    """Combine per-scope-group adaptive ``gt_artifacts`` into one dict.
+
+    In ``column_mode=auto`` the adaptive loop runs once per non-empty
+    scope group (single-column types vs everything else). Each group
+    produces an independent Good-Turing/Chao1 estimator over its own
+    species pool; this helper stitches the per-group outputs into a
+    single artifact bundle that the existing single-pass downstream
+    code (config snapshot, ``good_turing/`` dump, HTML dashboard) can
+    consume unchanged.
+
+    Merging rules:
+
+    * Each error type belongs to exactly one group, so
+      ``per_error_type`` and ``species_records`` are simple unions.
+    * ``overall_estimate`` and ``per_source`` are RECOMPUTED from the
+      union of species records using ``num_runs = max`` across groups
+      (the per-group runs were independent, so the unioned-species
+      estimator is the appropriate combined view).
+    * Lists tracking per-pass / per-run state (``progression``,
+      ``per_run_dumps``, ``run_info``, ``per_pass_per_arm_snapshots``,
+      ``variant_records_per_run``, ``saturation_history``) are
+      concatenated with a ``group`` tag added for traceability.
+    * ``per_run_dumps[*]['run_id']`` is offset across groups so
+      downstream dump paths (``runs/run_NN/``) stay unique.
+    """
+    if len(group_artifacts) == 1:
+        return group_artifacts[0][1]
+
+    from src.adaptive.cell_gt import estimate as _estimate_overall
+
+    species_records: List[Any] = []
+    progression: List[Dict[str, Any]] = []
+    per_run_dumps: List[Dict[str, Any]] = []
+    variant_records_per_run: List[Any] = []
+    per_pass_per_arm_snapshots: List[Dict[str, Any]] = []
+    run_info: List[Any] = []
+    saturated_types: set = set()
+    saturation_history: List[Dict[str, Any]] = []
+    per_error_type: Dict[str, Any] = {}
+    runs_probed_per_type: Dict[str, int] = {}
+    variant_passes_ok_per_type: Dict[str, int] = {}
+    markdown_sections: List[str] = []
+    stop_reason_parts: List[str] = []
+    num_runs_completed = 0
+    num_runs_max = 0
+    min_runs_seen = 0
+    target_missing_mass: Optional[float] = None
+    stop_scope: Optional[str] = None
+    target_policy: Optional[str] = None
+    gt_mode: Optional[str] = None
+    base_seed: Optional[int] = None
+    shuffle_rows: Optional[bool] = None
+    shuffle_columns: Optional[bool] = None
+    include_identity_run: Optional[bool] = None
+    prompt_ensemble: Optional[bool] = None
+    variant_generation_effort: Optional[str] = None
+    per_arm_arms: List[Any] = []
+    per_arm_md_sections: List[str] = []
+    per_arm_scope_kind: Optional[str] = None
+    per_arm_num_runs = 0
+
+    run_id_offset = 0
+    for group_mode, art in group_artifacts:
+        md = art.get("markdown_report") or ""
+        markdown_sections.append(
+            f"## Auto-mode group: column_mode={group_mode}\n\n{md}".rstrip()
+        )
+        stop_reason_parts.append(
+            f"{group_mode}: {art.get('stop_reason', '') or ''}"
+        )
+        species_records.extend(art.get("species_records") or [])
+        for row in art.get("progression") or []:
+            new_row = dict(row)
+            new_row.setdefault("group", group_mode)
+            progression.append(new_row)
+        group_dump_count = 0
+        for d in art.get("per_run_dumps") or []:
+            new_d = dict(d)
+            try:
+                rid = int(d.get("run_id", 0))
+            except (TypeError, ValueError):
+                rid = 0
+            new_d["run_id"] = rid + run_id_offset
+            new_d["group"] = group_mode
+            new_d["original_run_id"] = rid
+            # Carry the same shift into the meta blob if present so
+            # the on-disk ``run.json`` stays consistent.
+            if isinstance(new_d.get("meta"), dict):
+                meta = dict(new_d["meta"])
+                if "run_id" in meta:
+                    try:
+                        meta["run_id"] = int(meta["run_id"]) + run_id_offset
+                    except (TypeError, ValueError):
+                        pass
+                meta.setdefault("group", group_mode)
+                new_d["meta"] = meta
+            per_run_dumps.append(new_d)
+            group_dump_count += 1
+        run_id_offset += group_dump_count
+        for v in art.get("variant_records_per_run") or []:
+            if isinstance(v, dict):
+                new_v = dict(v)
+                new_v.setdefault("group", group_mode)
+                variant_records_per_run.append(new_v)
+            else:
+                variant_records_per_run.append(v)
+        for snap in art.get("per_pass_per_arm_snapshots") or []:
+            new_snap = dict(snap)
+            new_snap.setdefault("group", group_mode)
+            per_pass_per_arm_snapshots.append(new_snap)
+        for r in art.get("run_info") or []:
+            if isinstance(r, dict):
+                new_r = dict(r)
+                new_r.setdefault("group", group_mode)
+                run_info.append(new_r)
+            else:
+                run_info.append(r)
+        ep = art.get("estimates_payload") or {}
+        for k in ep.get("saturated_types", []) or []:
+            saturated_types.add(k)
+        for h in ep.get("saturation_history", []) or []:
+            new_h = dict(h)
+            new_h.setdefault("group", group_mode)
+            saturation_history.append(new_h)
+        per_error_type.update(art.get("per_error_type") or {})
+        runs_probed_per_type.update(ep.get("runs_probed_per_type") or {})
+        variant_passes_ok_per_type.update(
+            ep.get("variant_passes_ok_per_type") or {}
+        )
+        nrc = int(art.get("num_runs_completed", 0) or 0)
+        num_runs_completed = max(num_runs_completed, nrc)
+        if ep:
+            num_runs_max = max(num_runs_max, int(ep.get("num_runs_max", 0) or 0))
+            min_runs_seen = max(min_runs_seen, int(ep.get("min_runs", 0) or 0))
+            target_missing_mass = ep.get("target_missing_mass", target_missing_mass)
+            stop_scope = ep.get("stop_scope", stop_scope)
+            target_policy = ep.get("target_policy", target_policy)
+            gt_mode = ep.get("gt_mode", gt_mode)
+            base_seed = ep.get("base_seed", base_seed)
+            shuffle_rows = ep.get("shuffle_rows", shuffle_rows)
+            shuffle_columns = ep.get("shuffle_columns", shuffle_columns)
+            include_identity_run = ep.get(
+                "include_identity_run", include_identity_run
+            )
+            prompt_ensemble = ep.get("prompt_ensemble", prompt_ensemble)
+            variant_generation_effort = ep.get(
+                "variant_generation_effort", variant_generation_effort
+            )
+        per_arm_payload = art.get("per_arm_payload")
+        if per_arm_payload:
+            per_arm_arms.extend(per_arm_payload.get("arms") or [])
+            per_arm_scope_kind = (
+                per_arm_payload.get("scope_kind") or per_arm_scope_kind
+            )
+            per_arm_num_runs = max(
+                per_arm_num_runs,
+                int(per_arm_payload.get("num_runs_completed", 0) or 0),
+            )
+        if art.get("per_arm_markdown"):
+            per_arm_md_sections.append(
+                f"## Auto-mode group: column_mode={group_mode}\n\n"
+                + str(art["per_arm_markdown"])
+            )
+
+    overall = _estimate_overall(species_records, num_runs=num_runs_completed)
+
+    per_source_dict: Dict[str, Any] = {}
+    by_source: Dict[str, List[Any]] = {}
+    for rec in species_records:
+        src = getattr(rec, "source", None)
+        if src is None:
+            continue
+        by_source.setdefault(str(src), []).append(rec)
+    for src_name, recs in by_source.items():
+        per_source_dict[src_name] = _estimate_overall(
+            recs, num_runs=num_runs_completed
+        ).to_dict()
+
+    estimates_payload: Dict[str, Any] = {
+        "gt_mode": gt_mode,
+        "num_runs_completed": num_runs_completed,
+        "num_runs_max": num_runs_max or num_runs_completed,
+        "min_runs": min_runs_seen,
+        "target_missing_mass": target_missing_mass,
+        "stop_scope": stop_scope,
+        "target_policy": target_policy,
+        "saturated_types": sorted(saturated_types),
+        "saturation_history": saturation_history,
+        "runs_probed_per_type": runs_probed_per_type,
+        "variant_passes_ok_per_type": variant_passes_ok_per_type,
+        "stop_reason": "; ".join(stop_reason_parts),
+        "base_seed": base_seed,
+        "shuffle_rows": shuffle_rows,
+        "shuffle_columns": shuffle_columns,
+        "include_identity_run": include_identity_run,
+        "prompt_ensemble": prompt_ensemble,
+        "variant_generation_effort": variant_generation_effort,
+        "overall": overall.to_dict(),
+        "per_error_type": per_error_type,
+        "per_source": per_source_dict,
+        "progression": progression,
+        "runs": run_info,
+    }
+    merged: Dict[str, Any] = {
+        "num_runs_completed": num_runs_completed,
+        "stop_reason": "; ".join(stop_reason_parts),
+        "species_records": species_records,
+        "progression": progression,
+        "estimates_payload": estimates_payload,
+        "markdown_report": "\n\n".join(markdown_sections).strip(),
+        "overall_estimate": overall.to_dict(),
+        "per_run_dumps": per_run_dumps,
+        "variant_records_per_run": variant_records_per_run,
+        "per_pass_per_arm_snapshots": per_pass_per_arm_snapshots,
+        "per_error_type": per_error_type,
+        "per_source": per_source_dict,
+        "run_info": run_info,
+        "per_arm_payload": (
+            {
+                "scope_kind": per_arm_scope_kind,
+                "num_runs_completed": per_arm_num_runs,
+                "arms": per_arm_arms,
+            }
+            if per_arm_arms
+            else None
+        ),
+        "per_arm_markdown": (
+            "\n\n".join(per_arm_md_sections).strip()
+            if per_arm_md_sections
+            else None
+        ),
+    }
+    return merged
 
 
 def _resolve_adaptive_settings(
@@ -945,12 +1452,37 @@ def _resolve_per_arm_config(
         defaults_raw["k_min"] = int(fallback_k_min)
     if fallback_k_max is not None and "k_max" not in defaults_raw:
         defaults_raw["k_max"] = int(fallback_k_max)
+    # ``--gt-no-stop`` is the highest-priority override: it forces
+    # every arm to run all the way to k_max regardless of any other
+    # threshold setting. We force epsilon and epsilon_chao1 to 0 so
+    # neither GT nor Chao1 criterion can ever satisfy the predicate,
+    # AND lift k_min to k_max so the ``num_runs >= k_min`` gate also
+    # never fires before the final pass. Both per_arm.per_error_type
+    # overrides AND any earlier CLI / YAML defaults are clobbered for
+    # consistency -- partial overrides defeat the purpose of forcing
+    # a complete sweep.
+    if args is not None and getattr(args, "gt_no_stop", False):
+        k_max_floor = int(
+            defaults_raw.get("k_max")
+            or fallback_k_max
+            or ArmConfig.default().k_max
+            or 10
+        )
+        defaults_raw["epsilon"] = 0.0
+        defaults_raw["epsilon_chao1"] = 0.0
+        defaults_raw["k_min"] = k_max_floor
+        defaults_raw["k_max"] = k_max_floor
     global_default = ArmConfig.default().merge_into(ArmConfig.default())
     if defaults_raw:
         global_default = ArmConfig(**defaults_raw).merge_into(
             ArmConfig.default()
         )
     per_type_raw = block.get("per_error_type") or {}
+    if args is not None and getattr(args, "gt_no_stop", False):
+        # Wipe per-error-type overrides too: any non-default epsilon /
+        # k_min / k_max here would let some arms stop early and break
+        # the "every arm runs to k_max" invariant the caller asked for.
+        per_type_raw = {}
     per_type_cfg: Dict[str, ArmConfig] = {
         # Drop legacy ``s_min`` here too so per-error-type overrides
         # from older configs don't crash the resolver.
@@ -1069,6 +1601,14 @@ def _run_adaptive_loop(
     # yet) it stays at the per-type fallback.
     saturated_arms: set = set()
     runs_probed_per_arm: Dict[Any, int] = {}
+    # Per-pass per-arm snapshot for offline hyperparameter search.
+    # Each entry is one ``(pass_idx, arm)`` row with the full
+    # estimator state AS OF that pass's cumulative aggregation. Used
+    # by ``experiments/analyze_stop_thresholds.py`` to replay any
+    # ``(stop_when, epsilon, epsilon_chao1, k_min, two_consec)``
+    # combination offline against a single forced-K_max run, so the
+    # threshold sweep doesn't need new LLM calls per configuration.
+    per_pass_per_arm_snapshots: List[Dict[str, Any]] = []
     # Per-arm streak / status memo across passes. ``evaluate_stop``
     # is *stateless* - to honour ``require_two_consecutive`` we have
     # to thread the previous pass's ``(status, streak)`` into the
@@ -1482,6 +2022,35 @@ def _run_adaptive_loop(
             progression[-1]["saturated_arm_count"] = (
                 len(stop_arm_ests) - active_arm_count
             )
+            # Per-pass per-arm snapshot for offline threshold sweeps.
+            # We persist a minimal column-set to keep the JSONL
+            # compact across long runs; richer fields are recoverable
+            # from ``per_arm_estimates.json`` (final state) if needed.
+            for arm, est in stop_arm_ests.items():
+                scope_kind, scope_id = arm[0]
+                per_pass_per_arm_snapshots.append({
+                    "pass_idx": runs_done - 1,
+                    "runs_so_far": runs_done,
+                    "scope_kind": scope_kind,
+                    "scope_id": list(scope_id),
+                    "error_type": arm[1],
+                    "k_arm": int(num_runs_by_arm.get(arm, runs_done)),
+                    "n_observed": int(est.n_observed),
+                    "n1": int(est.frequency_counts.get(1, 0)),
+                    "n2": int(est.frequency_counts.get(2, 0)),
+                    "total_hits": int(est.total_hits),
+                    "good_turing_missing_mass":
+                        float(est.good_turing_missing_mass),
+                    "chao1_estimated_missed":
+                        float(est.chao1_estimated_missed),
+                    "chao1_estimated_total":
+                        float(est.chao1_estimated_total),
+                    "chao1_ci_95_low": float(est.chao1_ci_95_low),
+                    "chao1_ci_95_high": float(est.chao1_ci_95_high),
+                    "fn_rate_point": float(est.fn_rate_point),
+                    "status": est.status,
+                    "saturated_streak": int(est.saturated_streak),
+                })
             if newly_saturated_arms:
                 # Estimate next-pass savings so the user can predict
                 # how much smaller the upcoming progress bar will be.
@@ -1675,6 +2244,9 @@ def _run_adaptive_loop(
         "overall_estimate": overall.to_dict(),
         "per_run_dumps": per_run_dumps,
         "variant_records_per_run": variant_records_per_run,
+        # Per-pass per-arm snapshot stream for offline hyperparameter
+        # sweeps via ``experiments/analyze_stop_thresholds.py``.
+        "per_pass_per_arm_snapshots": per_pass_per_arm_snapshots,
         # Re-exposed for the HTML dashboard so it doesn't have to re-open
         # estimates.json. These are the SAME dicts stored in estimates_payload.
         "per_error_type": {k: v.to_dict() for k, v in per_type.items()},
@@ -1775,6 +2347,35 @@ def _run_adaptive_loop(
     return all_reports, all_flat_issues, gt_artifacts
 
 
+def _write_run_status(
+    run_dir: "Optional[Path]",
+    status: str,
+    *,
+    detail: Optional[str] = None,
+) -> None:
+    """Write a tiny ``RUN_STATUS.json`` so a partial run is visible.
+
+    ``status`` is one of ``in_progress``, ``completed``, ``failed``.
+    Best-effort: never raises - status reporting must not mask the
+    real exit path.
+    """
+    if run_dir is None:
+        return
+    try:
+        from datetime import datetime, timezone
+        payload = {
+            "status": status,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if detail:
+            payload["detail"] = detail[:500]
+        (run_dir / "RUN_STATUS.json").write_text(
+            json.dumps(payload, indent=2), encoding="utf-8",
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("could not write RUN_STATUS.json", exc_info=True)
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     args = parse_args(argv)
     config = load_config(args.config)
@@ -1829,6 +2430,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         csv_path = csv_dir
     elif args.csv is not None:
         candidate = _resolve(args.csv, PROJECT_ROOT)
+        if not candidate.exists():
+            raise FileNotFoundError(
+                f"--csv path does not exist: {candidate}"
+            )
         if candidate.is_dir():
             csv_paths = _discover_csvs(candidate, csv_glob)
             if not csv_paths:
@@ -1837,10 +2442,18 @@ def main(argv: Optional[list[str]] = None) -> int:
                 )
             csv_path = candidate
         else:
+            if not candidate.is_file():
+                raise FileNotFoundError(
+                    f"--csv is not a regular file: {candidate}"
+                )
             csv_paths = [candidate]
             csv_path = candidate
     elif data_cfg.get("csv_dir"):
         csv_dir = _resolve(data_cfg["csv_dir"], PROJECT_ROOT)
+        if not csv_dir.is_dir():
+            raise FileNotFoundError(
+                f"data.csv_dir does not exist or is not a directory: {csv_dir}"
+            )
         csv_paths = _discover_csvs(csv_dir, csv_glob)
         if not csv_paths:
             raise FileNotFoundError(
@@ -1849,6 +2462,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         csv_path = csv_dir
     else:
         csv_path = _resolve(data_cfg["csv_path"], PROJECT_ROOT)
+        if not csv_path.is_file():
+            raise FileNotFoundError(
+                f"data.csv_path does not exist: {csv_path}"
+            )
         csv_paths = [csv_path]
 
     output_dir = _resolve(
@@ -1876,9 +2493,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         args.column_mode
         or str(data_cfg.get("column_mode", COLUMN_MODE_ALL)).strip()
     )
-    if column_mode not in VALID_COLUMN_MODES:
+    if column_mode not in VALID_DISPATCHER_COLUMN_MODES:
         raise ValueError(
-            f"column_mode must be one of {sorted(VALID_COLUMN_MODES)}, "
+            f"column_mode must be one of {sorted(VALID_DISPATCHER_COLUMN_MODES)}, "
             f"got {column_mode!r}"
         )
 
@@ -1945,6 +2562,19 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(f"  {et.key:40s}  {et.summary_line()}")
         return 0
 
+    if getattr(args, "validate_config", False):
+        # All upstream validation has already run by this point:
+        # config schema, mode, adaptive settings, taxonomy.
+        # Emit a one-line OK summary and exit successfully.
+        n_selected = (
+            len(selected_type_keys) if selected_type_keys is not None else "all"
+        )
+        print(
+            f"validate-config: OK  config={args.config}  mode={mode}  "
+            f"types={len(taxonomy.types)}  selected={n_selected}"
+        )
+        return 0
+
     error_types = taxonomy.select(selected_type_keys)
 
     # Optional scope filter (CLI > config). A scope is the prefix of
@@ -1969,6 +2599,103 @@ def main(argv: Optional[list[str]] = None) -> int:
                 "scopes=%s: kept %d type(s), dropped %d non-matching type(s): %s",
                 sorted(active_scopes), len(error_types), len(dropped), dropped,
             )
+
+    # ---- Row-duplication detector ---------------------------------
+    # When ``row_duplication`` is among the selected types, swap the
+    # per-chunk LLM scan for a whole-table key-collision detector +
+    # per-group LLM adjudicator. The deterministic stage finds duplicate
+    # pairs that straddle chunk boundaries; the adjudicator then
+    # confirms each candidate group with a single, focused LLM call.
+    row_dup_cfg = dict(config.get("row_duplication") or {})
+    if args.row_dup_detection_mode is not None:
+        row_dup_cfg["detection_mode"] = args.row_dup_detection_mode
+    if args.row_dup_normalize_keys is not None:
+        row_dup_cfg["normalize_keys"] = args.row_dup_normalize_keys
+    if args.row_dup_adjudicate is not None:
+        row_dup_cfg["adjudicate_groups"] = args.row_dup_adjudicate
+    if args.row_dup_max_groups_per_source is not None:
+        row_dup_cfg["max_groups_per_source"] = args.row_dup_max_groups_per_source
+    if args.row_dup_canonicalize_keys is not None:
+        row_dup_cfg["canonicalize_keys"] = args.row_dup_canonicalize_keys
+    if args.row_dup_canonicalize_max_cardinality is not None:
+        row_dup_cfg["canonicalize_max_cardinality"] = (
+            args.row_dup_canonicalize_max_cardinality
+        )
+    if args.row_dup_blocking_enabled is not None:
+        row_dup_cfg["blocking_enabled"] = args.row_dup_blocking_enabled
+    if args.row_dup_minhash_enabled is not None:
+        row_dup_cfg["minhash_enabled"] = args.row_dup_minhash_enabled
+    if args.row_dup_minhash_threshold is not None:
+        row_dup_cfg["minhash_threshold"] = args.row_dup_minhash_threshold
+    if args.row_dup_embedding_enabled is not None:
+        row_dup_cfg["embedding_enabled"] = args.row_dup_embedding_enabled
+    if args.row_dup_embedding_threshold is not None:
+        row_dup_cfg["embedding_threshold"] = args.row_dup_embedding_threshold
+    if args.row_dup_embedding_model is not None:
+        row_dup_cfg["embedding_model"] = args.row_dup_embedding_model
+    row_dup_settings = AdjudicatorSettings.from_config(row_dup_cfg)
+    # Resolve the per-arm ArmConfig once, regardless of mode. The
+    # row-duplication detector's adaptive inner loops (cluster
+    # adjudication, key canonicalisation) share this same config
+    # surface with the experiment-mode Good-Turing per-arm loop, so
+    # the operator only configures FN-control behaviour in one place.
+    row_dup_arm_config: ArmConfig = _resolve_per_arm_config(config, args)[0]
+    wants_row_dup = any(et.key == "row_duplication" for et in error_types)
+    use_row_dup_adjudicator = (
+        wants_row_dup
+        and row_dup_settings.detection_mode
+        in ("collision_adjudication", "whole_table")
+    )
+    if use_row_dup_adjudicator:
+        # Multi-row detection needs the LLM to see every column on
+        # each row. The adjudicator builds its own per-table prompts
+        # outside the chunked scan, so it works regardless of how the
+        # chunked scan is dispatched - 'auto' is fine here too. We
+        # only nudge the chunked scan to 'all' when the user pinned
+        # 'single' (which makes no sense for the remaining types if
+        # any of them are cross-column).
+        if column_mode == COLUMN_MODE_SINGLE:
+            logger.warning(
+                "row_duplication is selected; switching column_mode "
+                "from 'single' to 'auto' so cross-column types still "
+                "work. Set data.column_mode=auto explicitly to "
+                "silence this warning."
+            )
+            column_mode = COLUMN_MODE_AUTO
+        # Hide row_duplication from the per-chunk detector so we don't
+        # double-scan; the adjudicator emits its findings separately.
+        chunk_error_types = [et for et in error_types if et.key != "row_duplication"]
+        # Adaptive mode is meaningless when only row_duplication is
+        # selected (the adjudicator runs as a single deterministic
+        # pass over each table). Coerce the run to single mode and
+        # warn so the operator knows the GT settings are inert.
+        if not chunk_error_types and mode == "adaptive":
+            logger.warning(
+                "Only row_duplication is selected; switching mode "
+                "from 'adaptive' to 'single' since the adjudicator "
+                "is a single-pass detector. Adaptive settings are "
+                "ignored for this run."
+            )
+            mode = "single"
+            adaptive_settings = None
+        logger.info(
+            "row_duplication: %s enabled "
+            "(normalize_keys=%s, adjudicate_groups=%s, "
+            "max_groups_per_source=%d). Chunk-based scan now runs %d "
+            "type(s) instead of %d.",
+            (
+                "whole-table LLM pass"
+                if row_dup_settings.detection_mode == "whole_table"
+                else "collision-adjudicator"
+            ),
+            row_dup_settings.normalize_keys,
+            row_dup_settings.adjudicate_groups,
+            row_dup_settings.max_groups_per_source,
+            len(chunk_error_types),
+            len(error_types),
+        )
+    else:
+        chunk_error_types = list(error_types)
 
     logger.info("Project root: %s", PROJECT_ROOT)
     if len(csv_paths) == 1:
@@ -2051,6 +2778,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     elif cfg_digest is not None:
         include_digest = bool(cfg_digest)
     else:
+        # Default: ON unless we are in pure single-column mode (where
+        # per-cell prompts gain little from a whole-table overview).
+        # In 'auto' mode the all-column group benefits from the digest
+        # too, so we keep it on.
         include_digest = column_mode != COLUMN_MODE_SINGLE
     digests: Dict[str, TableDigest] = {}
     if include_digest:
@@ -2076,27 +2807,62 @@ def main(argv: Optional[list[str]] = None) -> int:
         else:
             logger.info("Table digest disabled (include_table_digest=off)")
 
-    # Chunks are shared across the detector regardless of mode - in
-    # adaptive mode we rebuild chunks inside the loop against each
-    # perturbed view, but the counts (per_source_chunks, expected_calls)
-    # are stable so we log them once using the identity frames.
-    chunks, per_source_chunks = _prepare_chunks(
-        source_frames,
-        chunk_size=chunk_size,
-        max_chunks=max_chunks,
-        start_row=start_row,
-        column_mode=column_mode,
-        active_columns=active_columns,
+    # ---- Chunk preparation ----------------------------------------
+    # In ``auto`` mode we split the selected error types by scope and
+    # build chunks per scope: single-column-scope types get
+    # ``column_mode=single`` chunks (one cell-shaped prompt at a time),
+    # everything else gets ``column_mode=all`` chunks (whole row
+    # visible). For non-auto modes there is exactly one group.
+    chunk_groups_input = _split_error_types_by_scope(
+        column_mode, chunk_error_types
     )
-    expected_calls_per_pass = len(chunks) * len(error_types)
-    logger.info(
-        "Prepared %d chunk(s) across %d file(s) [column_mode=%s] -> "
-        "%d detection LLM call(s) per pass (chunks * error_types)",
-        len(chunks),
-        len(per_source_chunks),
-        column_mode,
-        expected_calls_per_pass,
+    chunk_groups: List[Tuple[str, List[CsvChunk], List[Any], Dict[str, int]]] = []
+    for group_mode, group_types in chunk_groups_input:
+        group_chunks, group_per_source = _prepare_chunks(
+            source_frames,
+            chunk_size=chunk_size,
+            max_chunks=max_chunks,
+            start_row=start_row,
+            column_mode=group_mode,
+            active_columns=active_columns,
+        )
+        chunk_groups.append(
+            (group_mode, group_chunks, group_types, group_per_source)
+        )
+
+    chunks: List[CsvChunk] = [c for (_, gc, _, _) in chunk_groups for c in gc]
+    # Union of per-source counts for the log line. With auto mode a
+    # source can appear under both 'single' and 'all'; we sum so the
+    # log reflects total chunk volume.
+    per_source_chunks: Dict[str, int] = {}
+    for _, _, _, gps in chunk_groups:
+        for k, v in gps.items():
+            per_source_chunks[k] = per_source_chunks.get(k, 0) + v
+    expected_calls_per_pass = sum(
+        len(gc) * len(gt) for (_, gc, gt, _) in chunk_groups
     )
+    if column_mode == COLUMN_MODE_AUTO:
+        breakdown = ", ".join(
+            f"{gm}:{len(gc)}\u00d7{len(gt)}"
+            for (gm, gc, gt, _) in chunk_groups
+        ) or "(none)"
+        logger.info(
+            "Prepared %d chunk(s) across %d file(s) [column_mode=auto: %s] "
+            "-> %d detection LLM call(s) per pass",
+            len(chunks),
+            len(per_source_chunks),
+            breakdown,
+            expected_calls_per_pass,
+        )
+    else:
+        logger.info(
+            "Prepared %d chunk(s) across %d file(s) [column_mode=%s] -> "
+            "%d detection LLM call(s) per pass (chunks * error_types)",
+            len(chunks),
+            len(per_source_chunks),
+            column_mode,
+            expected_calls_per_pass,
+        )
     if mode == "adaptive":
         gt_mode_label = adaptive_settings["gt_mode"]
         max_passes = adaptive_settings["num_runs"]
@@ -2111,11 +2877,21 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
 
     if args.dry_run:
-        if not chunks:
+        if not chunk_groups or all(not gc for (_, gc, _, _) in chunk_groups):
             print("(no chunks to render)")
             return 0
-        first_chunk = chunks[0]
-        first_type = error_types[0]
+        # Pick the first group with at least one chunk and at least
+        # one error type so the rendered prompt is representative.
+        first_chunk = None
+        first_type = None
+        for _, gc, gt, _ in chunk_groups:
+            if gc and gt:
+                first_chunk = gc[0]
+                first_type = gt[0]
+                break
+        if first_chunk is None or first_type is None:
+            print("(no chunks to render)")
+            return 0
         print(f"# error_type: {first_type.key}  ({first_type.summary_line()})")
         print(f"# source: {first_chunk.source}")
         print(f"# system: {taxonomy.system_prompt}")
@@ -2127,9 +2903,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     # persist per-pass artifacts (prompt variants, per-run detections)
     # while the loop is in flight.
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    run_id = f"{timestamp}_{model}"
+    run_name = getattr(args, "run_name", None)
+    if run_name:
+        run_id = str(run_name)
+    else:
+        run_id = f"{timestamp}_{model}"
     run_dir = output_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
+    _write_run_status(run_dir, "in_progress")
 
     llm = LLMClient()
 
@@ -2137,17 +2918,51 @@ def main(argv: Optional[list[str]] = None) -> int:
     gt_artifacts: Optional[Dict[str, Any]] = None
 
     if mode == "single":
-        detector = PerTypeCleaningDetector(
-            llm=llm,
-            taxonomy=taxonomy,
-            model=model,
-            error_types=error_types,
-            reasoning_effort=reasoning_effort,
-            reasoning_summary=reasoning_summary,
-            concurrency=concurrency,
-            digests=digests,
-        )
-        reports = detector.run(chunks)
+        if chunk_error_types:
+            reports = []
+            representative_concurrency = concurrency or 1
+            # In ``auto`` mode we run the detector once per scope
+            # group: single-column-scope types against single-column
+            # chunks, multi-* types against all-column chunks. Other
+            # modes have a single group so this collapses to one
+            # detector invocation, identical to the prior behaviour.
+            for group_mode, group_chunks, group_types, _ in chunk_groups:
+                if not group_chunks or not group_types:
+                    continue
+                detector = PerTypeCleaningDetector(
+                    llm=llm,
+                    taxonomy=taxonomy,
+                    model=model,
+                    error_types=group_types,
+                    reasoning_effort=reasoning_effort,
+                    reasoning_summary=reasoning_summary,
+                    concurrency=concurrency,
+                    digests=digests,
+                )
+                reports.extend(detector.run(group_chunks))
+                # Track the most recent detector's concurrency for
+                # config-snapshot purposes; in single-group runs this
+                # is the same value as before, in auto-mode it picks
+                # whichever group's detector ran last.
+                representative_concurrency = detector.concurrency
+        else:
+            # row_duplication is the only selected type; skip the
+            # chunk-based detector entirely.
+            reports = []
+            representative_concurrency = concurrency or 1
+        if use_row_dup_adjudicator:
+            row_dup_detector = RowDuplicationDetector(
+                llm=llm,
+                taxonomy=taxonomy,
+                model=model,
+                settings=row_dup_settings,
+                digests=digests,
+                reasoning_effort=reasoning_effort,
+                reasoning_summary=reasoning_summary,
+                concurrency=concurrency,
+                arm_config=row_dup_arm_config,
+            )
+            reports.extend(row_dup_detector.run(source_frames))
         flat_issues = flatten_issues(
             reports,
             source_frames=source_frames,
@@ -2156,7 +2971,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         logger.info("Flattened into %d raw detections", len(flat_issues))
         # Used by the config_snapshot below; single mode keeps a
         # representative detector instance around.
-        representative_concurrency = detector.concurrency
     else:  # mode == "adaptive"
         # Build the prompt-variant generator if the user left
         # prompt_ensemble on. When off, the adaptive loop falls back
@@ -2189,26 +3003,94 @@ def main(argv: Optional[list[str]] = None) -> int:
                 adaptive_settings["shuffle_columns"],
             )
 
-        reports, flat_issues, gt_artifacts = _run_adaptive_loop(
-            llm=llm,
-            model=model,
-            base_taxonomy=taxonomy,
-            seed_error_types=error_types,
-            reasoning_effort=reasoning_effort,
-            reasoning_summary=reasoning_summary,
-            concurrency=concurrency,
-            source_frames=source_frames,
-            chunk_size=chunk_size,
-            max_chunks=max_chunks,
-            start_row=start_row,
-            column_mode=column_mode,
-            active_columns=active_columns,
-            enable_synthesis=enable_synthesis,
-            settings=adaptive_settings,
-            variant_generator=variant_generator,
-            run_dir=run_dir,
-            digests=digests,
+        # In ``column_mode=auto`` the adaptive loop runs once per
+        # non-empty scope group (single-column types, then everything
+        # else) and the per-group ``gt_artifacts`` are merged at the
+        # end. For non-auto modes there is exactly one group so this
+        # collapses to the historical single-call behaviour.
+        adaptive_groups: List[Tuple[str, List[Any]]] = (
+            _split_error_types_by_scope(column_mode, chunk_error_types)
         )
+        # Filter out empty groups defensively (already done by the
+        # splitter, but keep the loop body simple).
+        adaptive_groups = [(gm, gt) for (gm, gt) in adaptive_groups if gt]
+        is_multi_group = len(adaptive_groups) > 1
+        if is_multi_group:
+            logger.info(
+                "Adaptive auto-mode: running %d scope group(s) sequentially: %s",
+                len(adaptive_groups),
+                ", ".join(
+                    f"{gm}({len(gt)})" for (gm, gt) in adaptive_groups
+                ),
+            )
+
+        reports = []
+        flat_issues = []
+        per_group_gt: List[Tuple[str, Dict[str, Any]]] = []
+        for group_mode, group_types in adaptive_groups:
+            # Each group writes its own prompt_variants/ subtree to
+            # avoid clobbering when multiple groups run.
+            group_run_dir = (
+                run_dir / f"auto_{group_mode}" if is_multi_group else run_dir
+            )
+            if is_multi_group:
+                group_run_dir.mkdir(parents=True, exist_ok=True)
+                logger.info(
+                    "Adaptive group: column_mode=%s types=%s",
+                    group_mode,
+                    [et.key for et in group_types],
+                )
+            g_reports, g_flat, g_artifacts = _run_adaptive_loop(
+                llm=llm,
+                model=model,
+                base_taxonomy=taxonomy,
+                seed_error_types=group_types,
+                reasoning_effort=reasoning_effort,
+                reasoning_summary=reasoning_summary,
+                concurrency=concurrency,
+                source_frames=source_frames,
+                chunk_size=chunk_size,
+                max_chunks=max_chunks,
+                start_row=start_row,
+                column_mode=group_mode,
+                active_columns=active_columns,
+                enable_synthesis=enable_synthesis,
+                settings=adaptive_settings,
+                variant_generator=variant_generator,
+                run_dir=group_run_dir,
+                digests=digests,
+            )
+            reports.extend(g_reports)
+            flat_issues.extend(g_flat)
+            per_group_gt.append((group_mode, g_artifacts))
+        gt_artifacts = _merge_adaptive_gt_artifacts(per_group_gt)
+        if use_row_dup_adjudicator:
+            row_dup_detector = RowDuplicationDetector(
+                llm=llm,
+                taxonomy=taxonomy,
+                model=model,
+                settings=row_dup_settings,
+                digests=digests,
+                reasoning_effort=reasoning_effort,
+                reasoning_summary=reasoning_summary,
+                concurrency=concurrency,
+                arm_config=row_dup_arm_config,
+            )
+            extra_reports = row_dup_detector.run(source_frames)
+            reports.extend(extra_reports)
+            flat_issues.extend(
+                flatten_issues(
+                    extra_reports,
+                    source_frames=source_frames,
+                    include_full_row=enable_synthesis,
+                )
+            )
+            logger.info(
+                "row_duplication: appended %d adjudicator report(s) -> "
+                "%d unified raw detections total",
+                len(extra_reports),
+                len(flat_issues),
+            )
         logger.info(
             "Adaptive loop finished: %d pass(es) done, %d unified raw detections",
             gt_artifacts["num_runs_completed"],
@@ -2349,6 +3231,16 @@ def main(argv: Optional[list[str]] = None) -> int:
             (gt_dir / "per_arm_report.md").write_text(
                 per_arm_md, encoding="utf-8"
             )
+        # Per-pass per-arm snapshot stream for offline hyperparameter
+        # sweeps. One JSON line per ``(pass_idx, arm)`` row; consumed
+        # by ``experiments/analyze_stop_thresholds.py``.
+        per_pass_snaps = gt_artifacts.get("per_pass_per_arm_snapshots") or []
+        if per_pass_snaps:
+            with (gt_dir / "per_pass_per_arm.jsonl").open(
+                "w", encoding="utf-8"
+            ) as fh:
+                for row in per_pass_snaps:
+                    fh.write(json.dumps(row, ensure_ascii=False) + "\n")
         runs_subdir = run_dir / "runs"
         runs_subdir.mkdir(parents=True, exist_ok=True)
         for run_dump in gt_artifacts["per_run_dumps"]:
@@ -2438,11 +3330,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     if getattr(args, "verify_web", False):
         try:
             from experiments.run_web_verify import verify_run as _verify_run
-            logger.info("web verification: starting (provider=%s)", args.web_provider)
+            logger.info("web verification: starting (agent_id=%s)", args.web_agent_id or "<env>")
             wv = _verify_run(
                 run_dir,
-                provider=args.web_provider,
-                api_key=args.web_api_key,
+                agent_endpoint=args.web_agent_endpoint,
+                agent_id=args.web_agent_id,
                 model=str(config.get("llm", {}).get("model", "gpt-5.2")),
                 concurrency=args.web_concurrency,
                 max_clusters=args.web_max_clusters,
@@ -2497,8 +3389,44 @@ def main(argv: Optional[list[str]] = None) -> int:
         "To build the HTML dashboard, run: "
         "python -m experiments.build_report %s", _rel(run_dir),
     )
+    _write_run_status(run_dir, "completed")
     return 0
 
 
+def _main_with_status(argv: Optional[list[str]] = None) -> int:
+    """Top-level entry that ensures partial runs are marked failed
+    on disk so users don't mistake a half-written ``outputs/<ts>/``
+    for a successful run.
+    """
+    try:
+        return main(argv)
+    except SystemExit:
+        # argparse / explicit exit codes - re-raise unchanged.
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("run_cleaning_detection failed: %s", exc)
+        # Best-effort: walk the most recent run dir under outputs/ and
+        # mark it failed. We don't know the run_dir at this scope, so
+        # rely on RUN_STATUS.json having been seeded as "in_progress"
+        # by main(); search for the freshest one and stamp it.
+        try:
+            outputs_root = Path("outputs")
+            if outputs_root.is_dir():
+                candidates = [
+                    p for p in outputs_root.iterdir()
+                    if p.is_dir() and (p / "RUN_STATUS.json").is_file()
+                ]
+                if candidates:
+                    latest = max(candidates, key=lambda p: p.stat().st_mtime)
+                    cur = json.loads((latest / "RUN_STATUS.json").read_text())
+                    if cur.get("status") == "in_progress":
+                        _write_run_status(
+                            latest, "failed", detail=f"{type(exc).__name__}: {exc}",
+                        )
+        except Exception:  # noqa: BLE001
+            logger.debug("could not stamp failed status", exc_info=True)
+        return 2
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_main_with_status())

@@ -51,6 +51,31 @@ kbd {
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
+/* Keyboard-focus rings: only visible to keyboard users (:focus-visible
+   skips mouse interactions). Mirrors the report-template treatment so
+   the workbench and the standalone report look like one product. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* When a label submission is in flight we mark <body> with .saving so
+   keypresses (1-5 / Enter) and click handlers visually communicate
+   the in-flight state. Pointer-events stay live so the user can still
+   navigate; only inputs that would race the save are softened. */
+body.saving #verdict-buttons button { opacity: 0.6; cursor: progress; }
+body.saving { cursor: progress; }
+
 /* -------- header -------- */
 header {
   grid-area: header;
@@ -134,6 +159,18 @@ header .actions a {
   color: var(--muted);
 }
 .queue .wb-body .group-header.src { padding-left: 22px; }
+/* Duplicate-group sub-header inside a CSV: nests one level deeper than
+   ``.src`` and uses an amber accent to match the ``.dup-group`` row
+   tint in the context table. */
+.queue .group-header.dup {
+  padding-left: 28px;
+  color: rgb(180, 110, 0);
+  background: rgba(245,158,11,0.06);
+  border-left: 2px solid rgba(245,158,11,0.55);
+}
+.queue .wb-body .group-header.dup { padding-left: 40px; }
+.queue .src-body .dup-body .row { padding-left: 44px; }
+.queue .wb-body .src-body .dup-body .row { padding-left: 52px; }
 .queue .group-header:hover { background: var(--panel-2); }
 .queue .group-header .caret {
   width: 12px;
@@ -340,6 +377,11 @@ header .actions a {
 .csv-viewer tr.target td.flagged {
   background: rgba(239,68,68,0.22);
 }
+/* Duplicate-group siblings of a row_duplication cluster: a softer
+   amber band so the operator can see the whole group at a glance
+   while still keeping the primary `target` row visually dominant. */
+.csv-viewer tr.dup-group { background: rgba(245,158,11,0.10); }
+.csv-viewer tr.dup-group.target { background: rgba(245,158,11,0.18); }
 
 /* -------- detail pane -------- */
 .detail {
@@ -677,4 +719,87 @@ footer.shortcuts {
   color: var(--muted);
   border-color: var(--muted);
   font-style: italic;
+}
+/* Duplicate-group badge in the queue list: signals that the cluster
+   spans multiple rows (row_duplication). Amber to match the
+   ``.dup-group`` row tint in the context table. */
+.dup-badge {
+  display: inline-block;
+  padding: 0 5px;
+  margin-left: 6px;
+  border: 1px solid rgba(245,158,11,0.7);
+  border-radius: 3px;
+  font-size: 9px;
+  line-height: 13px;
+  font-weight: 700;
+  color: rgb(180, 110, 0);
+  background: rgba(245,158,11,0.12);
+  vertical-align: middle;
+  letter-spacing: 0.3px;
+}
+/* Near-duplicate variant: cooler colour so reviewers can prioritise
+   the high-confidence ``duplicate`` groups while still seeing the
+   "needs human review" near-duplicate ones. */
+.verdict-badge.near-dup-badge {
+  display: inline-block;
+  padding: 0 5px;
+  margin-left: 6px;
+  border: 1px solid rgba(99,102,241,0.7);
+  border-radius: 3px;
+  font-size: 9px;
+  line-height: 13px;
+  font-weight: 700;
+  color: rgb(67, 56, 202);
+  background: rgba(99,102,241,0.12);
+  vertical-align: middle;
+  letter-spacing: 0.3px;
+}
+.group-header.dup.near-dup {
+  background: rgba(99,102,241,0.08);
+  border-left: 3px solid rgba(99,102,241,0.7);
+}
+/* Discovery-strategy chips on the bucket header. Subtle pill list
+   so a reviewer can see at a glance which clusterer surfaced the
+   group (key_collision = high precision, blocking / minhash_lsh /
+   embedding = recall-first). */
+.strategy-chips {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+.strategy-chip {
+  display: inline-block;
+  padding: 0 5px;
+  border-radius: 3px;
+  font-size: 9px;
+  line-height: 13px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  color: var(--muted);
+  background: rgba(127,127,127,0.10);
+  border: 1px solid rgba(127,127,127,0.25);
+}
+.strategy-chip.strategy-key_collision {
+  color: rgb(21, 128, 61);
+  background: rgba(34,197,94,0.10);
+  border-color: rgba(34,197,94,0.4);
+}
+/* Source-header warning: row_duplication candidate budget exhausted
+   for this CSV. Red because the operator should rerun with a larger
+   cap before trusting the labels for this source. */
+.budget-warn-badge {
+  display: inline-block;
+  padding: 0 6px;
+  margin-left: 8px;
+  border: 1px solid rgba(220,38,38,0.7);
+  border-radius: 3px;
+  font-size: 9px;
+  line-height: 14px;
+  font-weight: 700;
+  color: rgb(185, 28, 28);
+  background: rgba(220,38,38,0.10);
+  vertical-align: middle;
+  letter-spacing: 0.3px;
+  cursor: help;
 }

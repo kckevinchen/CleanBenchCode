@@ -1,0 +1,101 @@
+# Post-discovery generalization prompt.
+#
+# Some discovery passes still emit families of value-keyed rules
+# (one rule per observed cell value of a free-text column) despite
+# the prompt's PARAMETRIC ABSTRACTION clause. This pass clusters
+# those families by (source, sorted column tuple) and asks the LLM
+# to rewrite each cluster as ONE parametric rule, OR explicitly
+# decline if no rule generalizes.
+#
+# Originals are NEVER discarded - they remain in `relations.jsonl`.
+# Output of this pass is written to `relations_generalized.jsonl`
+# with a `generalized_from` field listing the species_keys of the
+# input cluster, and the report UI surfaces the generalization as
+# the primary card with the original family tucked under expand.
+#
+# Placeholders:
+#   error_type     - shared error_type tag of the cluster
+#   columns        - involved columns (verbatim)
+#   cluster_size   - N rules in the family
+#   cluster_rules  - bullet list of the original rules
+#   sample_rows    - small Markdown preview of the source so the LLM
+#                    can ground the parametric form in real values
+
+system: >
+  You are simplifying a family of value-keyed data-quality rules
+  into ONE parametric rule, or rejecting the family when no
+  parametric form is faithful.
+
+  PRECISION OVER RECALL. A wrong generalization is worse than no
+  generalization, because it changes the semantics of every original
+  rule in the family. If the family does NOT cleanly factor through
+  a single parameter extracted from the conditioning column, return
+  {"generalized": null, "reason": "..."} and the originals are kept
+  as-is.
+
+  YOU MAY use these pseudo-functions in `executable` when the
+  parameter must be extracted from a cell value:
+    regex_extract(col, "<regex with one capture group>")
+    parse_int(...) / parse_float(...)
+    lower(col), upper(col), trim(col)
+
+  YOU MUST NOT invent column names. Only the columns listed in the
+  cluster header may be referenced in the parametric rule.
+
+  YOU MUST NOT emit a parametric form whose semantics differ from
+  any of the input rules. If even one branch contradicts the
+  pattern, reject.
+
+  Respond with strictly valid JSON, no markdown fences.
+
+user_template: |
+  You are given a CLUSTER of {cluster_size} rules from the same
+  source ({source}) and the same error type ({error_type}), all
+  referencing the SAME columns:
+
+  COLUMNS:
+  {columns}
+
+  CLUSTER RULES (verbatim, original kind / predicate / executable):
+  {cluster_rules}
+
+  A small sample of the source's rows for grounding (the first
+  column `__row__` is the 0-indexed source row number):
+
+  {sample_rows}
+
+  TASK
+  ----
+  If the {cluster_size} rules above are paraphrases or
+  literal-value branches of the SAME underlying parametric rule,
+  emit one parametric replacement that is mathematically /
+  logically equivalent to the conjunction of all of them.
+
+  If even one of the rules cannot be expressed by the parametric
+  form, OR if the family does not cleanly factor through a single
+  parameter, return null and the originals will be preserved.
+
+  OUTPUT FORMAT
+  -------------
+  Respond with one of:
+
+  Generalization possible:
+  {{
+    "generalized": {{
+      "kind":       "<a valid kind for {error_type}>",
+      "columns":    ["<col>", ...],
+      "lhs":        ["<col>", ...] | null,
+      "rhs":        ["<col>", ...] | null,
+      "predicate":  "<one parametric natural-language rule>",
+      "executable": "<expression using pseudo-functions>" | null,
+      "confidence": "high"|"medium"|"low",
+      "rationale":  "<1 sentence: how the parameter is extracted, why this covers all branches>"
+    }},
+    "reason": "<short justification>"
+  }}
+
+  Generalization not possible:
+  {{
+    "generalized": null,
+    "reason": "<short justification>"
+  }}
