@@ -58,12 +58,12 @@ Total detection calls =
 
 ## Error-type taxonomy
 
-The 13 keys in [`prompts/error_types.yaml`](prompts/error_types.yaml)
+The 9 keys in [`prompts/error_types.yaml`](prompts/error_types.yaml)
 mirror `error_type.csv` row-for-row, grouped by Scope:
 
 | Scope | Types | column_mode |
 |---|---|---|
-| **Single-Column** *(default)* | typo, text_inconsistency, casing_inconsistency, pattern_inconsistency, punctuation_inconsistency, number_format_inconsistency, semantic_incompatible, numeric_outlier | `single` ok |
+| **Single-Column** *(default)* | typo, inconsistency *(umbrella: text / casing / pattern / punctuation / number_format sub-patterns)*, semantic_incompatible, numeric_outlier | `single` ok |
 | **Multi-Column** *(intra-row)* | fd_violation, row_calculation_inconsistency, string_calculation_inconsistency | `all` required |
 | **Multi-Row** *(intra-table)* | row_duplication | `all` required |
 | **Multi-Table** *(rare in single-table chunks)* | inter_table_inconsistency | `all` required |
@@ -282,7 +282,7 @@ false-negative rate**.
 
 ```bash
 python -m experiments.run_cleaning_detection \
-  --csv-dir data/curated --error-types pattern_inconsistency \
+  --csv-dir data/curated --error-types inconsistency \
   --mode adaptive --gt-num-runs 5 --gt-base-seed 42
 ```
 
@@ -331,9 +331,10 @@ Endpoints (default pool ships in `src/core/llm_client.py`):
 export AZURE_OPENAI_ENDPOINTS="https://foo.openai.azure.com/,https://bar.openai.azure.com/"
 ```
 
-Concurrency defaults to `min(8, #endpoints)`. Detection and Phase-B
-synthesis use independent knobs (`--concurrency` /
-`--synthesis-concurrency`).
+Concurrency defaults to `min(8, #endpoints)`. A single `--concurrency`
+flag governs detection and Phase-B synthesis (both share the same
+endpoint pool). The web verifier uses a separate `--web-concurrency`
+because it hits a different agent service.
 
 ---
 

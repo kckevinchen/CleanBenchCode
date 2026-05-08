@@ -1594,15 +1594,27 @@ def find_time_overlap_candidates(
                 sample = col.dropna().astype(str).head(50)
                 if sample.empty:
                     continue
-                import warnings as _warnings
-                with _warnings.catch_warnings():
-                    _warnings.simplefilter("ignore", UserWarning)
-                    parsed_sample = pd.to_datetime(sample, errors="coerce")
+                # ``format="mixed"`` (pandas 2.0+) tells pandas we
+                # KNOW the column may contain heterogeneous date
+                # formats, so it shouldn't emit the "Could not infer
+                # format, falling back to dateutil" UserWarning. We
+                # used to wrap the call in ``catch_warnings()`` but
+                # that context manager mutates the process-wide
+                # warning filter list and is not thread-safe; the
+                # priors run inside a ThreadPoolExecutor in
+                # ``run_relation_discovery``, so the filter window
+                # could close before the warning fired and the
+                # message would leak to stderr. ``format="mixed"``
+                # silences the warning at its source, which is both
+                # cheaper and thread-safe.
+                parsed_sample = pd.to_datetime(
+                    sample, errors="coerce", format="mixed",
+                )
                 if parsed_sample.notna().mean() < 0.7:
                     continue
-                with _warnings.catch_warnings():
-                    _warnings.simplefilter("ignore", UserWarning)
-                    full = pd.to_datetime(col, errors="coerce").dropna()
+                full = pd.to_datetime(
+                    col, errors="coerce", format="mixed",
+                ).dropna()
                 if not full.empty:
                     per_col[str(c)] = full
         if per_col:
@@ -1825,7 +1837,7 @@ def find_unionable_groups(
     *,
     sheets: Sequence[str],
     frames: Mapping[str, pd.DataFrame],
-    min_jaccard: float = 0.5,
+    min_jaccard: float = 0.25,
     min_group_size: int = 2,
     max_groups: int = 16,
 ) -> List[UnionableGroupCandidate]:
@@ -1837,9 +1849,12 @@ def find_unionable_groups(
     union-find over the pairwise edge graph; transitive closure
     keeps the loop O(n^2) which is fine at our sheet cap.
 
-    The Jaccard cutoff is intentionally permissive (``0.5``) so the
-    LLM can still see partial-overlap groups that need NaN-fills.
-    The downstream resolver decides whether to accept the group.
+    The Jaccard cutoff is intentionally permissive (``0.25``) so the
+    LLM can still see partial-overlap groups that need NaN-fills,
+    including sheets where multi-line / parenthetical header drift
+    pushes raw-header Jaccard well below 0.5. The downstream LLM
+    resolver is the actual gatekeeper: it sees the candidate group
+    plus row samples and may mark it ``confirmed=false``.
     """
     if len(sheets) < 2:
         return []

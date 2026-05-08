@@ -49,7 +49,7 @@ where:
 
 Note that ``error_type`` is intentionally NOT part of the species
 identity. The same cell flagged with ``typo`` in one run and
-``casing_inconsistency`` in another counts as ONE species (a single
+``inconsistency`` in another counts as ONE species (a single
 disputed cell) detected in two runs - not as two singletons. This
 matches the practical question Good-Turing answers: "how many DATA
 DEFECTS are we missing?", where a defect lives in a cell, not in a
@@ -149,7 +149,7 @@ class SpeciesRecord:
     A *species* here is one CELL ``(source, column, row)``. Cell-level
     identity makes the singleton count what users intuitively expect:
     a cell flagged by run 0 as ``typo`` and by run 1 as
-    ``casing_inconsistency`` is ONE species detected in two runs, not
+    ``inconsistency`` is ONE species detected in two runs, not
     two singletons. ``runs_by_error_type`` keeps per-type breakdown for
     :func:`estimate_by_group`.
     """

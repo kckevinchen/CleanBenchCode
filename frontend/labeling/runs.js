@@ -114,14 +114,26 @@ function renderRuns(runs) {
     if (r.kind === "relations") {
       return renderRelationsRunRow(r);
     }
-    const labelLink = r.has_clusters
-      ? `<a class="primary" href="./label.html?run=${encodeURIComponent(r.run_id)}">Label</a>`
-      : `<span class="muted">(no clusters)</span>`;
+    // The unified label page covers both cluster items and
+    // cross-sheet (multi-table) findings, so a single "Label" entry
+    // is enough. We surface the cross-sheet count in the link text
+    // when the run has any, so the operator can spot detection runs
+    // that include MT findings without drilling in.
+    const hasAny = r.has_clusters || r.has_multi_table;
+    const mtSuffix = r.has_multi_table
+      ? ` <span class="muted">(+${escape(String(r.n_multi_table_findings ?? 0))} MT)</span>`
+      : "";
+    const labelLink = hasAny
+      ? `<a class="primary" href="./label.html?run=${encodeURIComponent(r.run_id)}">Label${mtSuffix}</a>`
+      : `<span class="muted">(no findings)</span>`;
     const reportLink = r.has_report
       ? `<a href="/api/runs/${encodeURIComponent(r.run_id)}/report" target="_blank" rel="noopener">Report</a>`
       : `<button data-action="build-report" data-run="${escape(r.run_id)}">Build report</button>`;
     const exportLink = r.has_clusters
       ? `<a href="/api/runs/${encodeURIComponent(r.run_id)}/export/benchmark" download>Benchmark</a>`
+      : "";
+    const exportByTypeLink = r.has_clusters
+      ? `<a href="/api/runs/${encodeURIComponent(r.run_id)}/export/benchmark-by-type" download title="One JSONL per error_type, bundled as a ZIP">By type</a>`
       : "";
     const created = r.created ? escape(r.created.slice(0, 19).replace("T", " ")) + " UTC" : "";
     // Build tag spans through one helper so future contributors adding
@@ -146,6 +158,7 @@ function renderRuns(runs) {
           ${labelLink}
           ${reportLink}
           ${exportLink}
+          ${exportByTypeLink}
           <button class="danger" data-action="delete-run" data-run="${escape(r.run_id)}" title="Delete this run">Delete</button>
         </div>
       </div>
@@ -423,6 +436,7 @@ function applyConfigDefaults(defaults) {
   // ----- Chip pre-selection (error_types) -----
   preselectChips("error-types", prompts.error_types, state.selectedErrorTypes);
   refreshRowDupBlock();
+  refreshMultiTableBlock();
 }
 
 function setChecked(id, on) {
@@ -458,7 +472,10 @@ function makeChip(key, set, labelText) {
     label.classList.toggle("active", input.checked);
     if (input.checked) set.add(key);
     else set.delete(key);
-    if (set === state.selectedErrorTypes) refreshRowDupBlock();
+    if (set === state.selectedErrorTypes) {
+      refreshRowDupBlock();
+      refreshMultiTableBlock();
+    }
   });
   return label;
 }
@@ -472,6 +489,19 @@ function refreshRowDupBlock() {
   if (!block) return;
   const sel = state.selectedErrorTypes;
   const relevant = sel.size === 0 || sel.has("row_duplication");
+  block.hidden = !relevant;
+}
+
+// Show the multi-table fieldset only when the operator has selected
+// ``inter_table_inconsistency`` (or no types at all, which means
+// "run them all"). The cleaning runner auto-triggers the cross-sheet
+// pipeline when that type is in scope and >= 2 sheets share a
+// workbook directory.
+function refreshMultiTableBlock() {
+  const block = document.getElementById("mt-block");
+  if (!block) return;
+  const sel = state.selectedErrorTypes;
+  const relevant = sel.size === 0 || sel.has("inter_table_inconsistency");
   block.hidden = !relevant;
 }
 
@@ -555,6 +585,22 @@ function collectParams() {
     params.row_dup_max_groups_per_source = num("row-dup-max-groups");
   }
 
+  // ----- multi-table cross-sheet overrides (only sent when the
+  //       fieldset is visible, which happens when the operator has
+  //       selected ``inter_table_inconsistency`` or no types at all).
+  //       The pipeline auto-runs whenever the type is in scope; these
+  //       knobs let the user reuse groups from a prior discovery run
+  //       and pick the step-3 strategy.
+  const mtBlock = document.getElementById("mt-block");
+  const mtVisible = mtBlock && !mtBlock.hidden;
+  if (mtVisible) {
+    params.multi_table_from = val("mt-from");
+    params.multi_table_strategy = val("mt-strategy");
+    params.multi_table_semantic_rows = num("mt-semantic-rows");
+    params.multi_table_semantic_max_pages = num("mt-semantic-max-pages");
+    params.no_multi_table_verify = check("mt-no-verify") || null;
+  }
+
   if (params.mode === "adaptive") {
     Object.assign(params, {
       gt_mode: val("gt-mode"),
@@ -608,6 +654,10 @@ function previewCommand() {
     gt_per_arm_epsilon_chao1: "--gt-per-arm-epsilon-chao1",
     row_dup_detection_mode: "--row-dup-detection-mode",
     row_dup_max_groups_per_source: "--row-dup-max-groups-per-source",
+    multi_table_from: "--multi-table-from",
+    multi_table_strategy: "--multi-table-strategy",
+    multi_table_semantic_rows: "--multi-table-semantic-rows",
+    multi_table_semantic_max_pages: "--multi-table-semantic-max-pages",
   };
   const boolMap = {
     no_synthesis: ["--no-synthesis", null],
@@ -622,6 +672,7 @@ function previewCommand() {
       "--gt-per-arm-two-consecutive",
       "--no-gt-per-arm-two-consecutive",
     ],
+    no_multi_table_verify: ["--no-multi-table-verify", null],
   };
   for (const [k, v] of Object.entries(params)) {
     if (k in boolMap) {
@@ -959,6 +1010,14 @@ function renderRelationsRunRow(r) {
   // dashboard at the end so users don't need a separate "rebuild"
   // step.
   const validateBtn = `<button data-action="validate-relations" data-run="${escape(r.run_id)}" title="Run LLM-written check() code against the data and record pass-rates">Validate</button>`;
+  // Multi-table inconsistencies (cross-sheet attribute conflicts /
+  // duplicate rows / surface drift) also attach to relations runs
+  // when the relation discovery pipeline did the cross-sheet pass.
+  // The unified label page hosts the cross-sheet queue alongside
+  // cluster items, so a single "Label MT" link routes there.
+  const mtLink = r.has_multi_table
+    ? `<a class="primary" href="./label.html?run=${encodeURIComponent(r.run_id)}" title="Cross-sheet findings (label page)">Label MT (${escape(String(r.n_multi_table_findings ?? 0))})</a>`
+    : "";
   const tag = (cls, value, title) => value
     ? `<span class="tag ${cls}"${title ? ` title="${escape(title)}"` : ""}>${escape(String(value))}</span>`
     : "";
@@ -990,6 +1049,7 @@ function renderRelationsRunRow(r) {
       <div class="actions">
         ${reportLink}
         ${validateBtn}
+        ${mtLink}
         <button class="danger" data-action="delete-run" data-run="${escape(r.run_id)}" title="Delete this run">Delete</button>
       </div>
     </div>

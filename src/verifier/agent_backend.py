@@ -359,7 +359,17 @@ class AzureAgentBackend:
                     getattr(run, "id", "?"), elapsed, self.warn_after_seconds,
                 )
 
-            status = str(getattr(run, "status", "") or "").lower()
+            run_id = str(getattr(run, "id", "") or "")
+            # ``run.status`` is an ``Enum`` in newer azure-ai-agents
+            # SDKs (RunStatus.COMPLETED, etc.) and a plain ``str`` in
+            # older ones. ``str(enum)`` yields ``"RunStatus.COMPLETED"``
+            # which historically broke the ``== "completed"`` check
+            # below and tagged every successful run as errored. Pull
+            # ``.value`` first when present so we always compare on the
+            # SDK's documented short tokens ("queued", "in_progress",
+            # "completed", ...).
+            raw_status = getattr(run, "status", "")
+            status = str(getattr(raw_status, "value", raw_status) or "").lower()
             if status == "failed":
                 err = getattr(run, "last_error", None)
                 msg = (
@@ -367,7 +377,40 @@ class AzureAgentBackend:
                     or (err.get("message") if isinstance(err, Mapping) else None)
                     or "agent run failed"
                 )
-                return AgentVerdict(error=str(msg))
+                return AgentVerdict(error=f"failed: {msg} (run={run_id})")
+            if status in ("cancelled", "expired"):
+                return AgentVerdict(error=f"agent run {status} (run={run_id})")
+            # ``incomplete`` is a terminal Azure agent status meaning
+            # the run finished but the output was truncated (typically
+            # ``max_completion_tokens`` / ``max_prompt_tokens`` /
+            # ``content_filter``). Partial messages may still be on the
+            # thread, and ``run.incomplete_details.reason`` explains
+            # why. We treat it like ``completed`` and let the existing
+            # empty-text -> error path below surface the reason; that
+            # path already prefers the incomplete_reason when present.
+            if status and status not in ("completed", "incomplete"):
+                # queued / in_progress / requires_action shouldn't reach
+                # here because create_and_process is synchronous, but
+                # surface them clearly if they do.
+                return AgentVerdict(
+                    error=f"unexpected agent run status: {status} (run={run_id})",
+                )
+
+            # ``incomplete_details`` lives on a *completed* run when the
+            # output was suppressed (content filter, max tokens, etc.).
+            # Without surfacing it, the caller just sees an empty
+            # response with no idea why - the dominant failure mode for
+            # person-name / private-individual cells is content_filter
+            # here.
+            incomplete_reason: Optional[str] = None
+            incomp = getattr(run, "incomplete_details", None)
+            if incomp is not None:
+                reason = (
+                    getattr(incomp, "reason", None)
+                    or (incomp.get("reason") if isinstance(incomp, Mapping) else None)
+                )
+                if reason:
+                    incomplete_reason = str(reason)
 
             # Read messages + run steps (best-effort; messages are
             # required, run steps are decorative).
@@ -398,7 +441,35 @@ class AzureAgentBackend:
                 n_search_calls=n_calls,
             )
 
-            if self.cache is not None and cache_key and not verdict.error:
+            # Promote incomplete_details / empty-text into a real error
+            # so it (a) shows up in the UI's "error" field with a
+            # diagnostic reason, and (b) prevents us from caching the
+            # failure as if it were a successful empty verdict (see
+            # below).
+            if not verdict.text.strip() and not verdict.citations:
+                if incomplete_reason:
+                    verdict.error = (
+                        f"agent returned empty response "
+                        f"(reason={incomplete_reason}, run={run_id})"
+                    )
+                else:
+                    verdict.error = (
+                        f"agent returned empty response (run={run_id})"
+                    )
+
+            # Cache only payloads that carry useful signal. Caching
+            # empty / errored payloads poisons every subsequent retry
+            # because the verifier would just replay the empty result
+            # forever. Re-runs of an empty cluster should re-hit the
+            # agent (it's non-deterministic; person-name content-filter
+            # blocks frequently flip on retry).
+            should_cache = (
+                self.cache is not None
+                and cache_key
+                and not verdict.error
+                and (verdict.text.strip() or verdict.citations)
+            )
+            if should_cache:
                 self.cache.put(
                     self.name, cache_key,
                     {

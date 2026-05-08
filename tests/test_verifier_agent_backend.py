@@ -259,3 +259,130 @@ def test_azure_agent_empty_prompt_returns_error():
     backend = AzureAgentBackend(endpoint="https://e", agent_id="asst_x")
     v = backend.verify("   ")
     assert v.error == "empty prompt"
+
+
+# ---------------------------------------------------------------------------
+# AzureAgentBackend run-status diagnostics + empty-payload cache behaviour
+#
+# These tests exercise the failure-mode paths that previously returned
+# a vanilla ``AgentVerdict(error="agent returned empty response")``
+# regardless of why the run produced no text. The fix:
+#   1. Surfaces the run id + ``incomplete_details.reason`` so the
+#      caller can tell content-filter blocks from real timeouts.
+#   2. Skips the cache write when the agent produced no useful payload
+#      (text empty AND no citations) so a transient empty result is
+#      not replayed forever on subsequent runs.
+# ---------------------------------------------------------------------------
+
+
+def _fake_client_factory(*, run, messages=(), run_steps=(), thread_id="thr_1"):
+    """Build a fake Foundry agents client object whose ``runs``,
+    ``messages``, and ``run_steps`` namespaces return the values the
+    test wants. Used by the run-status / cache tests below to drive
+    AzureAgentBackend.verify without actually contacting Azure."""
+    thread = SimpleNamespace(id=thread_id)
+    return SimpleNamespace(
+        threads=SimpleNamespace(create=lambda: thread),
+        messages=SimpleNamespace(
+            create=lambda thread_id, role, content: None,
+            list=lambda thread_id, **_: list(messages),
+        ),
+        runs=SimpleNamespace(
+            create_and_process=lambda **_: run,
+        ),
+        run_steps=SimpleNamespace(
+            list=lambda thread_id, run_id: list(run_steps),
+        ),
+    )
+
+
+def test_azure_agent_failed_run_includes_message_and_id():
+    backend = AzureAgentBackend(endpoint="https://e", agent_id="asst_x")
+    run = SimpleNamespace(
+        id="run_failed",
+        status="failed",
+        last_error=SimpleNamespace(message="rate_limit_exceeded"),
+        incomplete_details=None,
+    )
+    backend._client = _fake_client_factory(run=run)
+    v = backend.verify("hello")
+    assert v.error and "rate_limit_exceeded" in v.error
+    assert "run_failed" in v.error
+
+
+def test_azure_agent_cancelled_run_surfaces_status():
+    backend = AzureAgentBackend(endpoint="https://e", agent_id="asst_x")
+    run = SimpleNamespace(
+        id="run_cancel",
+        status="cancelled",
+        last_error=None,
+        incomplete_details=None,
+    )
+    backend._client = _fake_client_factory(run=run)
+    v = backend.verify("hello")
+    assert v.error and "cancelled" in v.error and "run_cancel" in v.error
+
+
+def test_azure_agent_completed_with_incomplete_details_reports_reason():
+    """Foundry returns ``status=completed`` with ``incomplete_details``
+    when the model output was suppressed (e.g. content_filter, hard
+    token cap). The verifier must surface the ``reason`` so empty
+    responses for person names are diagnosable."""
+    backend = AzureAgentBackend(endpoint="https://e", agent_id="asst_x")
+    empty_msg = SimpleNamespace(role="assistant", text_messages=[])
+    run = SimpleNamespace(
+        id="run_blocked",
+        status="completed",
+        last_error=None,
+        incomplete_details=SimpleNamespace(reason="content_filter"),
+    )
+    backend._client = _fake_client_factory(run=run, messages=[empty_msg])
+    v = backend.verify("hello")
+    assert v.error and "content_filter" in v.error and "run_blocked" in v.error
+
+
+def test_azure_agent_does_not_cache_empty_payloads(tmp_path: Path):
+    """Regression: empty payloads (no text, no citations) used to be
+    cached as if they were a successful empty verdict. Once cached,
+    every subsequent run for that cluster would replay the empty
+    result without ever re-hitting the agent. With the fix, the
+    cache is written ONLY when the verdict carries useful signal."""
+    cache = WebCache(tmp_path)
+    backend = AzureAgentBackend(
+        endpoint="https://e", agent_id="asst_x", cache=cache,
+    )
+    empty_msg = SimpleNamespace(role="assistant", text_messages=[])
+    run = SimpleNamespace(
+        id="run_empty",
+        status="completed",
+        last_error=None,
+        incomplete_details=None,
+    )
+    backend._client = _fake_client_factory(run=run, messages=[empty_msg])
+
+    v = backend.verify("hello", cache_key="cid::deadbeef")
+    assert v.error and "run_empty" in v.error
+    # Empty payload must NOT be cached.
+    assert cache.get(backend.name, "cid::deadbeef") is None
+
+
+def test_azure_agent_caches_non_empty_payloads(tmp_path: Path):
+    """Sanity-check that a real (text-bearing) verdict still gets
+    cached after the empty-payload guard."""
+    cache = WebCache(tmp_path)
+    backend = AzureAgentBackend(
+        endpoint="https://e", agent_id="asst_x", cache=cache,
+    )
+    msg = _make_assistant_msg('{"verdict": "ambiguous"}', [])
+    run = SimpleNamespace(
+        id="run_ok",
+        status="completed",
+        last_error=None,
+        incomplete_details=None,
+    )
+    backend._client = _fake_client_factory(run=run, messages=[msg])
+
+    v = backend.verify("hello", cache_key="cid::cafebabe")
+    assert v.error is None
+    assert v.text == '{"verdict": "ambiguous"}'
+    assert cache.get(backend.name, "cid::cafebabe") is not None

@@ -64,15 +64,7 @@ from src.core.relation_aggregate import (  # noqa: E402
     write_aggregated_jsonl,
     write_aggregation_report_json,
 )
-from src.core.multi_table_resolver import (  # noqa: E402
-    load_confirm_prompt,
-    resolve_workbook,
-    write_resolved_workbooks_jsonl,
-)
-from src.core.multi_table_violations import (  # noqa: E402
-    compile_violations,
-    write_violations_jsonl,
-)
+
 logger = logging.getLogger("run_relation_discovery")
 
 
@@ -300,126 +292,39 @@ def _run_multi_table_pass(
     prompt_path: Path,
     concurrency: int,
 ) -> Dict[str, Any]:
-    """Run the cross-sheet UNION/JOIN confirmation pass and emit
-    deterministic per-row violations for ``inter_table_inconsistency``.
+    """Run the multi-table cross-sheet **discovery** pass (steps 1+2).
 
-    This replaces the LLM ``check()``-codegen path used by the other
-    error types. The flow is:
+    Discovery emits the *relation* (``multi_table_groups.jsonl``) so
+    downstream consumers can decide what to do with it. Per-row
+    violation detection (step 3) and the optional LLM verifier
+    (step 4) live in the cleaning-detection runner; they consume the
+    groups file via ``--multi-table-from`` (or run end-to-end
+    inline). Splitting the pipeline this way keeps each runner doing
+    one thing and matches the single-table convention where
+    ``run_relation_discovery`` produces relations and
+    ``run_cleaning_detection`` produces error findings.
 
-        priors -> LLM confirm groups -> deterministic violation compiler
-
-    Outputs:
-        * ``multi_table_groups.jsonl``      - one line per workbook,
-          carrying every confirmed (and rejected) group + column
-          mapping the LLM emitted.
-        * ``multi_table_violations.jsonl``  - flat list of per-row
-          violation records (one record per affected (sheet, row);
-          linked records share ``violation_id``).
+    Output: ``multi_table_groups.jsonl`` - one line per workbook,
+    carrying every confirmed (and rejected) group + column mapping
+    the LLM emitted at step 2.
 
     Returns a stats dict for ``summary.json``. Workbooks with <2
     sheets are skipped silently; an empty stats dict is returned
     when the entire workbook map has none.
     """
-    import concurrent.futures as _cf
+    from src.core.multi_table_pipeline import resolve_groups_pass
 
-    eligible = {
-        wb: list(sheets) for wb, sheets in workbooks.items()
-        if len(sheets) >= 2
-    }
-    if not eligible:
-        return {
-            "n_workbooks": 0,
-            "n_groups": 0,
-            "n_confirmed_groups": 0,
-            "n_violations": 0,
-            "violations_by_kind": {},
-            "n_workbooks_errored": 0,
-        }
-
-    prompt_cfg = load_confirm_prompt(prompt_path)
-    logger.info(
-        "Multi-table cross-sheet pass: %d workbook(s) eligible "
-        "(prompt=%s, model=%s)",
-        len(eligible), prompt_path.name, model,
+    _, stats = resolve_groups_pass(
+        run_dir=run_dir,
+        workbooks=workbooks,
+        source_frames=source_frames,
+        digests=digests,
+        llm=llm,
+        model=model,
+        prompt_path=prompt_path,
+        concurrency=concurrency,
     )
-
-    resolved_list: List[Any] = [None] * len(eligible)  # type: ignore[list-item]
-    items = list(eligible.items())
-
-    def _work(idx: int, wb: str, sheets: List[str]) -> None:
-        try:
-            resolved_list[idx] = resolve_workbook(
-                workbook=wb,
-                sheets=sheets,
-                frames=source_frames,
-                digests=digests,
-                llm=llm,
-                model=model,
-                prompt_cfg=prompt_cfg,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.exception(
-                "multi-table resolve failed for workbook=%s: %s", wb, exc,
-            )
-
-    if concurrency <= 1 or len(items) == 1:
-        for idx, (wb, sheets) in enumerate(items):
-            _work(idx, wb, sheets)
-    else:
-        with _cf.ThreadPoolExecutor(max_workers=concurrency) as ex:
-            futures = [
-                ex.submit(_work, idx, wb, sheets)
-                for idx, (wb, sheets) in enumerate(items)
-            ]
-            for fut in _cf.as_completed(futures):
-                fut.result()
-
-    resolved = [r for r in resolved_list if r is not None]
-
-    # Compile violations for every confirmed group.
-    all_violations: List[Any] = []
-    for r in resolved:
-        try:
-            all_violations.extend(
-                compile_violations(resolved=r, frames=source_frames),
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception(
-                "compile_violations failed for workbook=%s", r.workbook,
-            )
-
-    write_resolved_workbooks_jsonl(
-        resolved, run_dir / "multi_table_groups.jsonl",
-    )
-    write_violations_jsonl(
-        all_violations, run_dir / "multi_table_violations.jsonl",
-    )
-
-    by_kind: Dict[str, int] = {}
-    for v in all_violations:
-        by_kind[v.kind] = by_kind.get(v.kind, 0) + 1
-    n_groups = sum(len(r.groups) for r in resolved)
-    n_confirmed = sum(
-        1 for r in resolved for g in r.groups if g.confirmed
-    )
-    n_errored = sum(1 for r in resolved if r.error)
-
-    logger.info(
-        "Multi-table pass: %d workbook(s), %d group(s) "
-        "(%d confirmed), %d violation(s) (%s); %d workbook(s) errored.",
-        len(resolved), n_groups, n_confirmed, len(all_violations),
-        ", ".join(f"{k}={v}" for k, v in sorted(by_kind.items())) or "none",
-        n_errored,
-    )
-
-    return {
-        "n_workbooks": len(resolved),
-        "n_groups": n_groups,
-        "n_confirmed_groups": n_confirmed,
-        "n_violations": len(all_violations),
-        "violations_by_kind": by_kind,
-        "n_workbooks_errored": n_errored,
-    }
+    return stats
 
 
 def _run_validation_pass(
@@ -557,6 +462,225 @@ def _run_validation_pass(
         "n_poor": n_poor,
         "n_errors": n_errors,
     }
+
+
+def _run_violation_compilation_pass(
+    *,
+    run_dir: Path,
+    source_frames: Mapping[str, Any],
+    llm: Any,
+    model: str,
+    detect_prompt_path: Path,
+    enable_code_compile: bool,
+    enable_llm_detect: bool,
+    min_pass_rate: float,
+    max_violations_per_rule: int,
+    min_confidence: str,
+    timeout_seconds: float,
+    llm_max_rows_per_call: int,
+    llm_max_violations_per_rule: int,
+) -> Optional[Dict[str, Any]]:
+    """Compile per-row violations from the validated relations.
+
+    Two paths share this pass:
+
+    * **Code path** (``compile_code_violations``) -- re-runs the
+      sandboxed ``check(df)`` against every relation that the
+      validator marked verifiable, gates on pass-rate / confidence /
+      violator count, and emits one violation record per failing
+      row. The validator already discarded the full violator mask
+      (it only persists 5 sample rows), so we re-execute the
+      function rather than try to reconstruct the mask from the
+      sample. Re-execution is deterministic and cheap.
+
+    * **LLM path** (``relation_llm_detector``) -- one whole-table
+      LLM call per relation that was declared not code-verifiable,
+      asking the model to enumerate violating row indices.
+
+    Both paths produce ``RelationViolation`` records; the combined
+    list is written to ``relation_violations.jsonl`` (raw artifact)
+    and converted to flat-issue dicts that go through the standard
+    ``cluster_issues`` pipeline. The resulting clusters are written
+    to ``clusters.json`` / ``clusters.jsonl`` so the unified label
+    UI surfaces them automatically alongside cluster + multi-table
+    findings.
+
+    Returns a stats dict for ``summary.json``. Returns ``None`` when
+    the validation artifact is missing (nothing to compile from).
+    """
+    # Lazy imports keep the module import cheap when the violation
+    # compilation pass is disabled.
+    from src.core.aggregator import cluster_issues  # noqa: WPS433
+    from src.core.jsonl_io import read_jsonl, write_jsonl  # noqa: WPS433
+    from src.core.report_builder import write_json  # noqa: WPS433
+    from src.core.relation_violations import (  # noqa: WPS433
+        compile_code_violations,
+        relation_violations_to_flat_issues,
+    )
+
+    verifications_path = run_dir / "relation_verifications.jsonl"
+    if not verifications_path.is_file():
+        logger.info(
+            "violation compilation: no relation_verifications.jsonl in %s; "
+            "skipping (run validation first)",
+            run_dir,
+        )
+        return None
+
+    # Load verifications. The code path iterates the sequence; the
+    # LLM detector indexes by species_key, so build a dict view too.
+    verifications_list = read_jsonl(verifications_path)
+    verifications_by_key: Dict[str, Dict[str, Any]] = {}
+    for v in verifications_list:
+        key = v.get("species_key") or v.get("relation_species_key")
+        if not key:
+            continue
+        verifications_by_key[str(key)] = v
+
+    # Load the relation layer the validator actually scored. The
+    # validator stamps ``layer`` on each verification; pick the
+    # first non-empty value (all verifications in a single run share
+    # the same layer).
+    chosen_layer: Optional[str] = None
+    for v in verifications_list:
+        if v.get("layer"):
+            chosen_layer = str(v["layer"])
+            break
+    layer_files = {
+        "generalized": "relations_generalized.jsonl",
+        "aggregated":  "relations_aggregated.jsonl",
+        "originals":   "relations.jsonl",
+    }
+    relations_path = run_dir / layer_files.get(chosen_layer or "originals", "relations.jsonl")
+    if not relations_path.is_file():
+        # Fall back through the layer waterfall.
+        for name in ("generalized", "aggregated", "originals"):
+            candidate = run_dir / layer_files[name]
+            if candidate.is_file():
+                relations_path = candidate
+                chosen_layer = name
+                break
+    relations_list = read_jsonl(relations_path)
+    if not relations_list:
+        logger.info(
+            "violation compilation: no relations to compile from in %s",
+            relations_path,
+        )
+        return None
+
+    # Code path: deterministic re-execution of check().
+    violations: List = []
+    skip_log: List[Dict[str, Any]] = []
+    if enable_code_compile:
+        relations_by_species: Dict[str, Dict[str, Any]] = {}
+        for r in relations_list:
+            key = r.get("species_key")
+            if not key:
+                continue
+            relations_by_species[str(key)] = r
+        violations, skip_log = compile_code_violations(
+            relations_by_species=relations_by_species,
+            verifications=verifications_list,
+            source_frames=source_frames,
+            min_pass_rate=float(min_pass_rate),
+            max_violations_per_rule=int(max_violations_per_rule),
+            min_confidence=str(min_confidence),
+            timeout_seconds=float(timeout_seconds),
+        )
+        logger.info(
+            "violation compilation: code path produced %d violation(s) "
+            "across %d rule(s) (skipped %d rules: %s)",
+            len(violations),
+            len({v.relation_species_key for v in violations}),
+            len(skip_log),
+            ", ".join(f"{e['reason']}={e['count']}" for e in _summarize_skip_log(skip_log)) or "none",
+        )
+
+    # LLM path: whole-table single call for non-code-verifiable rules.
+    n_llm_violations = 0
+    if enable_llm_detect:
+        if not detect_prompt_path.is_file():
+            logger.warning(
+                "violation compilation: detect prompt missing at %s; "
+                "skipping LLM detection path",
+                detect_prompt_path,
+            )
+        else:
+            from src.core.relation_llm_detector import (  # noqa: WPS433
+                detect_violations_for_relations,
+                load_detect_prompt,
+            )
+            prompt_cfg = load_detect_prompt(detect_prompt_path)
+            llm_violations = detect_violations_for_relations(
+                relations_list,
+                verifications=verifications_by_key,
+                source_frames=source_frames,
+                llm=llm,
+                model=model,
+                prompt_cfg=prompt_cfg,
+                max_rows_per_call=int(llm_max_rows_per_call),
+                max_violations_per_rule=int(llm_max_violations_per_rule),
+            )
+            n_llm_violations = len(llm_violations)
+            violations.extend(llm_violations)
+
+    # Persist raw violations regardless of whether either path found
+    # anything - an empty file is itself useful traceability.
+    out_violations = run_dir / "relation_violations.jsonl"
+    write_jsonl(out_violations, [v.as_dict() for v in violations])
+
+    # Convert to flat-issue contract, run through cluster_issues, and
+    # emit clusters.json / clusters.jsonl so the unified label UI
+    # picks the relation findings up alongside cleaning + multi-table.
+    flat_issues = relation_violations_to_flat_issues(violations)
+    clusters = cluster_issues(flat_issues)
+    cluster_dicts = [c.as_dict() for c in clusters]
+    write_jsonl(run_dir / "clusters.jsonl", cluster_dicts)
+    write_json(run_dir / "clusters.json", cluster_dicts)
+    write_jsonl(run_dir / "issues.jsonl", flat_issues)
+    write_json(run_dir / "issues.json", list(flat_issues))
+
+    n_code_violations = len(violations) - n_llm_violations
+    n_rules_with_violations = len({v.relation_species_key for v in violations})
+    logger.info(
+        "violation compilation: total %d violation(s) across %d rule(s) "
+        "(code=%d, llm=%d) -> %d cluster(s). Artifacts: %s, %s",
+        len(violations), n_rules_with_violations,
+        n_code_violations, n_llm_violations,
+        len(clusters),
+        out_violations.name, "clusters.json",
+    )
+    return {
+        "layer": chosen_layer,
+        "code_path_enabled": enable_code_compile,
+        "llm_path_enabled": enable_llm_detect,
+        "n_violations": len(violations),
+        "n_code_violations": n_code_violations,
+        "n_llm_violations": n_llm_violations,
+        "n_rules_with_violations": n_rules_with_violations,
+        "n_clusters": len(clusters),
+        "skipped_rules": _summarize_skip_log(skip_log),
+        "config": {
+            "min_pass_rate": float(min_pass_rate),
+            "max_violations_per_rule": int(max_violations_per_rule),
+            "min_confidence": str(min_confidence),
+            "timeout_seconds": float(timeout_seconds),
+            "llm_max_rows_per_call": int(llm_max_rows_per_call),
+            "llm_max_violations_per_rule": int(llm_max_violations_per_rule),
+        },
+    }
+
+
+def _summarize_skip_log(skip_log: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """Group ``compile_code_violations`` skip entries by reason for
+    summary.json. Per-rule diagnostics stay in the raw skip log on
+    disk if a future caller wants them; here we just want the
+    histogram."""
+    counts: Dict[str, int] = {}
+    for entry in skip_log:
+        reason = str(entry.get("reason") or "unknown")
+        counts[reason] = counts.get(reason, 0) + 1
+    return [{"reason": r, "count": c} for r, c in sorted(counts.items())]
 
 
 def _build_argparser() -> argparse.ArgumentParser:
@@ -758,13 +882,16 @@ def _build_argparser() -> argparse.ArgumentParser:
         "--no-multi-table",
         action="store_true",
         help=(
-            "Skip the cross-sheet UNION/JOIN pass for "
-            "inter_table_inconsistency. When the pass runs, it "
-            "REPLACES the LLM check()-codegen path for that error type: "
-            "structural priors are computed, the LLM is asked once "
-            "per workbook to confirm groups + provide a canonical "
-            "column mapping, and a deterministic compiler emits "
-            "per-row violations to multi_table_violations.jsonl."
+            "Skip the cross-sheet UNION/JOIN discovery pass for "
+            "inter_table_inconsistency. When the pass runs it "
+            "REPLACES the LLM check()-codegen path for that error "
+            "type: structural priors are computed and the LLM is "
+            "asked once per workbook to confirm groups + provide a "
+            "canonical column mapping. The result is written to "
+            "multi_table_groups.jsonl. Per-row violations (step 3) "
+            "and the optional LLM verifier (step 4) are produced by "
+            "run_cleaning_detection (which can consume this run's "
+            "groups via --multi-table-from)."
         ),
     )
     p.add_argument(
@@ -816,6 +943,101 @@ def _build_argparser() -> argparse.ArgumentParser:
         help=(
             "Cap the number of relations validated (default: no cap). "
             "Useful for smoke tests on large adaptive runs."
+        ),
+    )
+    # ---- Violation compilation (post-validation, pre-multi-table) ----
+    p.add_argument(
+        "--no-compile-violations",
+        action="store_true",
+        help=(
+            "Skip the violation compilation pass. By default, after "
+            "validation, the runner re-executes each verifiable "
+            "check(df) to materialize per-row violations and runs a "
+            "whole-table LLM scan against non-code-verifiable rules. "
+            "Both paths are converted into clusters and persisted to "
+            "clusters.json so the unified label UI surfaces them."
+        ),
+    )
+    p.add_argument(
+        "--no-llm-detect-violations",
+        action="store_true",
+        help=(
+            "Disable only the LLM table-scan path of violation "
+            "compilation; the deterministic code path still runs. "
+            "Useful for offline/smoke runs without LLM access."
+        ),
+    )
+    p.add_argument(
+        "--detect-violations-prompt",
+        type=str,
+        default="prompts/detect_relation_violation.yaml",
+        help=(
+            "Path to the LLM table-scan prompt YAML "
+            "(default: prompts/detect_relation_violation.yaml)."
+        ),
+    )
+    p.add_argument(
+        "--violations-min-pass-rate",
+        type=float,
+        default=0.85,
+        help=(
+            "Skip rules whose validated pass_rate is below this "
+            "threshold (default 0.85). Low pass-rate is usually a "
+            "hallucinated rule; we drop it instead of flooding the "
+            "label queue."
+        ),
+    )
+    p.add_argument(
+        "--violations-max-per-rule",
+        type=int,
+        default=200,
+        help=(
+            "Cap on rows compiled per rule. A rule with more "
+            "violators than this is almost certainly miscoded; we "
+            "skip it (default 200)."
+        ),
+    )
+    p.add_argument(
+        "--violations-min-confidence",
+        choices=["low", "medium", "high"],
+        default="medium",
+        help=(
+            "Minimum rule confidence to compile (default 'medium'). "
+            "'low' compiles every rule; 'high' compiles only the "
+            "rules the LLM was very confident in."
+        ),
+    )
+    p.add_argument(
+        "--violations-timeout",
+        type=float,
+        default=8.0,
+        help=(
+            "Per-rule check() wall-clock cap during re-execution "
+            "(default 8s). Independent of --validate-timeout because "
+            "the compilation pass typically runs against larger "
+            "frames than the validator did."
+        ),
+    )
+    p.add_argument(
+        "--violations-llm-max-rows",
+        type=int,
+        default=300,
+        help=(
+            "Whole-table LLM-scan: max rows rendered into the prompt "
+            "for a single relation (default 300). Tables larger than "
+            "this are truncated rather than chunked, because chunking "
+            "destroys the LLM's ability to spot inconsistencies that "
+            "span rows."
+        ),
+    )
+    p.add_argument(
+        "--violations-llm-max-per-rule",
+        type=int,
+        default=50,
+        help=(
+            "Whole-table LLM-scan: cap on rows the LLM is allowed to "
+            "flag per (relation, source) call (default 50). The "
+            "system prompt asks for the strongest cases first."
         ),
     )
     return p
@@ -888,12 +1110,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     error_types = [et for et in error_types if et.key in discovery_cfg.types]
 
     # Multi-table pass routing: by default ``inter_table_inconsistency``
-    # is handled by the new structural priors -> LLM-confirm -> compiler
-    # path (see ``_run_multi_table_pass``), NOT by the LLM check()-
-    # codegen flow. When the new pass is active we drop the type from
+    # is handled by the new structural priors -> LLM-confirm path
+    # (see ``_run_multi_table_pass``), NOT by the LLM check()-codegen
+    # flow. When the new pass is active we drop the type from
     # ``error_types`` so SchemaDiscoverer never issues a discovery call
     # for it. ``--no-multi-table`` flips both: keep the type, run the
-    # legacy LLM relation discovery + check() validation path.
+    # legacy LLM relation discovery + check() validation path. Step 3
+    # (per-row violation detection) lives in run_cleaning_detection.
     multi_table_enabled = (
         not args.no_multi_table
         and any(et.key == "inter_table_inconsistency" for et in error_types)
@@ -904,7 +1127,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         ]
         logger.info(
             "Routing 'inter_table_inconsistency' through the multi-table "
-            "cross-sheet pass (priors -> LLM-confirm -> compiler). "
+            "cross-sheet discovery pass (priors -> LLM-confirm groups). "
+            "Per-row violation detection is run by run_cleaning_detection. "
             "Pass --no-multi-table to use the legacy check()-codegen path."
         )
 
@@ -924,8 +1148,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     # its own workbook and the table-scope discovery arms are
     # skipped automatically.
     workbooks: Dict[str, List[str]] = {}
+    skipped_csvs: List[Path] = []
     for path in csv_paths:
-        df = load_csv(path)
+        try:
+            df = load_csv(path)
+        except (pd.errors.EmptyDataError, pd.errors.ParserError) as exc:
+            # The bing21 export occasionally contains whitespace-only
+            # or otherwise unparseable sheets. Skip them with a warning
+            # so a single bad CSV does not abort an entire workbook
+            # batch; ``group_workbooks`` downstream handles workbooks
+            # that drop below the multi-sheet threshold.
+            logger.warning("Skipping unreadable CSV %s: %s", path, exc)
+            skipped_csvs.append(path)
+            continue
         # Source key is the bare filename, with relative path
         # disambiguation when basenames collide (mirrors the cleaning
         # runner's convention so artifacts cross-reference cleanly).
@@ -940,6 +1175,17 @@ def main(argv: Optional[list[str]] = None) -> int:
         workbook_id = path.parent.name or "_root"
         workbooks.setdefault(workbook_id, []).append(name)
         logger.debug("Loaded %s: %d rows x %d cols", name, len(df), len(df.columns))
+    if skipped_csvs:
+        logger.warning(
+            "Skipped %d/%d CSV(s) that pandas could not parse "
+            "(empty header, malformed, or mid-file corruption).",
+            len(skipped_csvs), len(csv_paths),
+        )
+    if not source_frames:
+        raise RuntimeError(
+            f"No readable CSVs in {csv_dir_arg} "
+            f"(tried {len(csv_paths)}, all empty or malformed)."
+        )
 
     digests = {
         name: build_table_digest(df, source=name, sample_k_values=8)
@@ -1188,9 +1434,34 @@ def main(argv: Optional[list[str]] = None) -> int:
                 limit=args.validate_limit,
             )
 
+        # Violation compilation pass: turn validated rules into per-row
+        # findings + clusters. Runs after validation (which produces
+        # the ``check()`` code we re-execute) and before multi-table
+        # (which has its own row-level pipeline).
+        violations_stats: Optional[Dict[str, Any]] = None
+        if not args.no_compile_violations and validation_stats is not None:
+            violations_stats = _run_violation_compilation_pass(
+                run_dir=run_dir,
+                source_frames=source_frames,
+                llm=llm,
+                model=model,
+                detect_prompt_path=_resolve(args.detect_violations_prompt, PROJECT_ROOT),
+                enable_code_compile=True,
+                enable_llm_detect=not args.no_llm_detect_violations,
+                min_pass_rate=args.violations_min_pass_rate,
+                max_violations_per_rule=args.violations_max_per_rule,
+                min_confidence=args.violations_min_confidence,
+                timeout_seconds=args.violations_timeout,
+                llm_max_rows_per_call=args.violations_llm_max_rows,
+                llm_max_violations_per_rule=args.violations_llm_max_per_rule,
+            )
+
         # Multi-table cross-sheet pass for inter_table_inconsistency.
-        # Routed here so its artifacts land in the same run_dir as the
-        # rest of the discovery output.
+        # Discovery only runs steps 1+2 (priors -> LLM-confirm groups);
+        # step 3 (semantic detector) and step 4 (verifier) are owned
+        # by the cleaning-detection runner, which can either consume
+        # this run's ``multi_table_groups.jsonl`` via
+        # ``--multi-table-from`` or run the whole pipeline end-to-end.
         multi_table_stats: Optional[Dict[str, Any]] = None
         if multi_table_enabled:
             multi_table_stats = _run_multi_table_pass(
@@ -1220,11 +1491,21 @@ def main(argv: Optional[list[str]] = None) -> int:
                     "n_arms": gt_summary["n_arms"],
                     "n_saturated_arms": gt_summary["n_saturated_arms"],
                     "saturated_arms_by_pass": gt_summary["saturated_arms_by_pass"],
-                    "config": result.config,
+                    # Merge the adaptive-discovery knobs (max_passes,
+                    # gt_threshold, ...) with the data-config keys the
+                    # labelling app + downstream report builders read
+                    # (csv_paths, csv_glob). Keeping them under one
+                    # ``config`` namespace mirrors the cleaning runner.
+                    "config": {
+                        **result.config,
+                        "csv_paths": [str(p) for p in csv_paths],
+                        "csv_glob": csv_glob,
+                    },
                     "csv_paths": [str(p) for p in csv_paths],
                     "aggregation": agg_stats,
                     "generalization": gen_stats,
                     "validation": validation_stats,
+                    "violations": violations_stats,
                     "multi_table": multi_table_stats,
                 },
                 indent=2,
@@ -1248,6 +1529,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     agg_stats: Optional[Dict[str, Any]] = None
     gen_stats: Optional[Dict[str, Any]] = None
     validation_stats: Optional[Dict[str, Any]] = None
+    violations_stats: Optional[Dict[str, Any]] = None
 
     if discoverer is not None:
         reports = discoverer.run()
@@ -1315,9 +1597,29 @@ def main(argv: Optional[list[str]] = None) -> int:
                 limit=args.validate_limit,
             )
 
-    # Multi-table cross-sheet pass for inter_table_inconsistency
-    # (deterministic priors -> LLM-confirm -> compiler). Routed here
-    # so its artifacts land alongside the legacy outputs.
+        # Violation compilation (mirrors the adaptive branch).
+        if not args.no_compile_violations and validation_stats is not None:
+            violations_stats = _run_violation_compilation_pass(
+                run_dir=run_dir,
+                source_frames=source_frames,
+                llm=llm,
+                model=model,
+                detect_prompt_path=_resolve(args.detect_violations_prompt, PROJECT_ROOT),
+                enable_code_compile=True,
+                enable_llm_detect=not args.no_llm_detect_violations,
+                min_pass_rate=args.violations_min_pass_rate,
+                max_violations_per_rule=args.violations_max_per_rule,
+                min_confidence=args.violations_min_confidence,
+                timeout_seconds=args.violations_timeout,
+                llm_max_rows_per_call=args.violations_llm_max_rows,
+                llm_max_violations_per_rule=args.violations_llm_max_per_rule,
+            )
+
+    # Multi-table cross-sheet pass for inter_table_inconsistency.
+    # Discovery only runs steps 1+2 (priors -> LLM-confirm groups);
+    # step 3 (semantic detector) and step 4 (verifier) are owned by
+    # the cleaning-detection runner. See ``_run_multi_table_pass`` and
+    # ``src.core.multi_table_pipeline`` for the split.
     multi_table_stats: Optional[Dict[str, Any]] = None
     if multi_table_enabled:
         multi_table_stats = _run_multi_table_pass(
@@ -1358,9 +1660,18 @@ def main(argv: Optional[list[str]] = None) -> int:
                 "n_parse_errors": parse_failed,
                 "relations_by_error_type": by_type,
                 "relations_by_source": by_source,
+                # Surface csv_paths under ``config`` so the labelling
+                # app's RunContext can resolve sheet basenames back to
+                # files (used by the multi-table label page to fetch
+                # full row contents around a flagged cell).
+                "config": {
+                    "csv_paths": [str(p) for p in csv_paths],
+                    "csv_glob": csv_glob,
+                },
                 "aggregation": agg_stats,
                 "generalization": gen_stats,
                 "validation": validation_stats,
+                "violations": violations_stats,
                 "multi_table": multi_table_stats,
             },
             indent=2,

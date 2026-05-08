@@ -72,6 +72,12 @@ class RunInfo:
     n_passes: Optional[int] = None
     n_arms: Optional[int] = None
     n_saturated_arms: Optional[int] = None
+    # Multi-table cross-sheet pass artifacts (only populated by
+    # ``run_relation_discovery`` when --error-types includes
+    # inter_table_inconsistency). Exposed so the runs list can show a
+    # "Label MT" entry point.
+    has_multi_table: bool = False
+    n_multi_table_findings: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -95,6 +101,8 @@ class RunInfo:
             "n_passes": self.n_passes,
             "n_arms": self.n_arms,
             "n_saturated_arms": self.n_saturated_arms,
+            "has_multi_table": self.has_multi_table,
+            "n_multi_table_findings": self.n_multi_table_findings,
         }
 
 
@@ -173,6 +181,32 @@ def _parse_run_dir(path: Path) -> RunInfo:
     except OSError:
         created = None
 
+    # Multi-table cross-sheet artifacts. ``multi_table_violations.jsonl``
+    # is one line per (sheet, row) per finding; many findings span 2+
+    # rows, so we count UNIQUE violation_ids for the headline figure
+    # (= number of distinct findings the user has to review).
+    mt_path = path / "multi_table_violations.jsonl"
+    has_multi_table = mt_path.exists()
+    n_multi_table_findings = 0
+    if has_multi_table:
+        try:
+            seen_vids: set = set()
+            with mt_path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    vid = rec.get("violation_id")
+                    if vid:
+                        seen_vids.add(vid)
+            n_multi_table_findings = len(seen_vids)
+        except OSError:
+            pass
+
     return RunInfo(
         run_id=path.name,
         path=path,
@@ -194,6 +228,8 @@ def _parse_run_dir(path: Path) -> RunInfo:
         n_passes=n_passes,
         n_arms=n_arms,
         n_saturated_arms=n_saturated_arms,
+        has_multi_table=has_multi_table,
+        n_multi_table_findings=n_multi_table_findings,
     )
 
 
@@ -378,7 +414,6 @@ def build_detection_argv(payload: Dict[str, Any]) -> List[str]:
     _append_if(argv, "--concurrency", payload.get("concurrency"))
     _append_if(argv, "--error-types", payload.get("error_types"))
     _append_if(argv, "--scopes", payload.get("scopes"))
-    _append_if(argv, "--synthesis-concurrency", payload.get("synthesis_concurrency"))
     _append_if(argv, "--synthesis-effort", payload.get("synthesis_effort"))
     _append_if(argv, "--output-dir", payload.get("output_dir"))
 
@@ -504,6 +539,45 @@ def build_detection_argv(payload: Dict[str, Any]) -> List[str]:
         payload.get("gt_per_arm_epsilon_chao1"),
     )
 
+    # Multi-table cross-sheet pass. The cleaning runner owns the
+    # whole multi-table pipeline (steps 1+2+3 plus optional step 4)
+    # so artifacts land in the same run as the rest of the
+    # detection output. ``inter_table_inconsistency`` in
+    # --error-types auto-triggers the pass; --multi-table-from
+    # short-circuits steps 1+2 by reusing groups from a prior
+    # discovery run.
+    if payload.get("no_multi_table"):
+        argv.append("--no-multi-table")
+    _append_if(argv, "--multi-table-from", payload.get("multi_table_from"))
+    _append_if(argv, "--multi-table-prompt", payload.get("multi_table_prompt"))
+    _append_if(
+        argv,
+        "--multi-table-strategy",
+        payload.get("multi_table_strategy"),
+    )
+    _append_if(
+        argv,
+        "--multi-table-detect-prompt",
+        payload.get("multi_table_detect_prompt"),
+    )
+    _append_if(
+        argv,
+        "--multi-table-verify-prompt",
+        payload.get("multi_table_verify_prompt"),
+    )
+    if payload.get("no_multi_table_verify"):
+        argv.append("--no-multi-table-verify")
+    _append_if(
+        argv,
+        "--multi-table-semantic-rows",
+        payload.get("multi_table_semantic_rows"),
+    )
+    _append_if(
+        argv,
+        "--multi-table-semantic-max-pages",
+        payload.get("multi_table_semantic_max_pages"),
+    )
+
     return argv
 
 
@@ -603,6 +677,50 @@ def build_relation_validation_argv(
         argv.extend(["--concurrency", str(int(concurrency))])
     if limit is not None:
         argv.extend(["--limit", str(int(limit))])
+    return argv
+
+
+def build_column_verify_argv(
+    run_id: str,
+    *,
+    source: Optional[str] = None,
+    column: Optional[str] = None,
+    all_budget_capped: bool = False,
+    concurrency: Optional[int] = None,
+    max_distinct: Optional[int] = None,
+    skip_flagged: bool = False,
+    force: bool = False,
+    model: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
+) -> List[str]:
+    """Argv for ``experiments.run_web_verify_column``.
+
+    Either ``(source, column)`` must be supplied OR ``all_budget_capped``
+    must be True. The caller (JobManager.launch_column_verify) is
+    responsible for validating that condition before reaching here.
+    """
+    argv: List[str] = ["-m", "experiments.run_web_verify_column",
+                       "--run-id", run_id]
+    if all_budget_capped:
+        argv.append("--all-budget-capped")
+    else:
+        if not source:
+            raise ValueError("source is required when all_budget_capped is False")
+        if not column:
+            raise ValueError("column is required when all_budget_capped is False")
+        argv.extend(["--source", source, "--column", column])
+    if concurrency is not None:
+        argv.extend(["--concurrency", str(int(concurrency))])
+    if max_distinct is not None:
+        argv.extend(["--max-distinct", str(int(max_distinct))])
+    if skip_flagged:
+        argv.append("--skip-flagged")
+    if force:
+        argv.append("--force")
+    if model:
+        argv.extend(["--model", str(model)])
+    if reasoning_effort:
+        argv.extend(["--reasoning-effort", str(reasoning_effort)])
     return argv
 
 
@@ -766,6 +884,29 @@ class JobManager:
             path_keys=_DETECTION_PATH_KEYS,
             glob_keys=_DETECTION_GLOB_KEYS,
         )
+        # ``multi_table_from`` accepts either a bare run id (resolved
+        # against ``outputs/``) or a project-root-relative path. The
+        # run-id form must not be auto-converted to an absolute path
+        # (the detector's resolver tries both candidates), so we only
+        # block ``..`` traversal and absolute paths outside the
+        # workspace here rather than running it through ``_path_within``.
+        mt_from = payload.get("multi_table_from")
+        if mt_from:
+            mt_from_str = str(mt_from)
+            parts = re.split(r"[\\/]+", mt_from_str)
+            if any(p == ".." for p in parts):
+                raise ValueError(
+                    "invalid multi_table_from: '..' segment not allowed"
+                )
+            mt_path = Path(mt_from_str)
+            if mt_path.is_absolute():
+                # Reuse the standard containment check for explicit paths.
+                try:
+                    _path_within(mt_from_str, self.project_root)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"invalid multi_table_from: {exc}"
+                    ) from exc
         return self._launch("detection", build_detection_argv(payload))
 
     def launch_report(self, run_id: str) -> Job:
@@ -822,6 +963,49 @@ class JobManager:
             limit=params.get("limit"),
         )
         return self._launch("relation_validation", argv)
+
+    def launch_column_verify(
+        self,
+        run_id: str,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Job:
+        """Spawn ``experiments.run_web_verify_column`` for one run.
+
+        ``params`` accepts ``source`` + ``column`` for a single-column
+        audit, OR ``all_budget_capped=True`` to scan every (source,
+        column) whose adaptive arms are exhausted. Optional knobs
+        (``concurrency``, ``max_distinct``, ``skip_flagged``,
+        ``force``, ``model``, ``reasoning_effort``) are passed through.
+        """
+        run_dir = self.project_root / "outputs" / run_id
+        if not run_dir.is_dir():
+            raise FileNotFoundError(f"run not found: {run_id}")
+        try:
+            _path_within(str(run_dir), self.project_root)
+        except ValueError as exc:
+            raise ValueError(f"invalid run_id: {exc}") from exc
+        params = dict(params or {})
+        all_capped = bool(params.get("all_budget_capped"))
+        source = params.get("source")
+        column = params.get("column")
+        if not all_capped and (not source or not column):
+            raise ValueError(
+                "launch_column_verify requires either "
+                "(source + column) or all_budget_capped=True"
+            )
+        argv = build_column_verify_argv(
+            run_id=run_id,
+            source=str(source) if source else None,
+            column=str(column) if column else None,
+            all_budget_capped=all_capped,
+            concurrency=params.get("concurrency"),
+            max_distinct=params.get("max_distinct"),
+            skip_flagged=bool(params.get("skip_flagged")),
+            force=bool(params.get("force")),
+            model=params.get("model"),
+            reasoning_effort=params.get("reasoning_effort"),
+        )
+        return self._launch("column_verify", argv)
 
     def launch_curate(self, payload: Dict[str, Any]) -> Job:
         payload = dict(payload)

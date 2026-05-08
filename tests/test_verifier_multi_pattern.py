@@ -576,3 +576,290 @@ def test_load_verifications_back_compat_with_old_records(tmp_path: Path):
     assert v.columns_all == []
     assert v.record_snapshots == []
     assert v.canonical_record is None
+
+
+# ---------------------------------------------------------------------------
+# Regression: pattern routing must reflect error-type intent, not just
+# the structural shape. A single-column ``typo`` /
+# ``pattern_inconsistency`` cluster whose detections list sibling
+# ``affected_rows`` (the LLM's evidence-of-scope hint) must NOT be
+# rendered with the multi_row "are these the same real-world entity?"
+# prompt - that asks the wrong question. Demote to single_cell so
+# the agent verifies the suspect cell value at ``cluster.row``.
+# ---------------------------------------------------------------------------
+
+
+def test_verifier_typo_with_sibling_rows_demotes_to_single_cell():
+    """A typo cluster on column 'school' with sibling affected_rows
+    must verify the suspect cell, not run a duplicate-detection
+    prompt across the sibling rows."""
+    payload = json.dumps({
+        "verdict": "confirmed_error",
+        "canonical_value": "Bremen Public Schools",
+        "confidence": 0.85,
+        "evidence": [{
+            "url": "https://maine.gov/sau",
+            "title": "Maine SAUs",
+            "quote": "Bremen Public Schools is the canonical name",
+        }],
+        "reasoning": "Authoritative directory shows the canonical name.",
+    })
+    agent = StubAgentBackend(default=_verdict(
+        payload, urls=[("https://maine.gov/sau", "Maine SAUs")],
+    ))
+    cluster = {
+        "cluster_id": "schools.csv__r2-c0",
+        "source": "schools.csv",
+        "row": 2,
+        "columns": ["school"],
+        "error_types": ["typo", "pattern_inconsistency"],
+        "detections": [{
+            "error_type": "typo",
+            "affected_rows": [2, 3, 6, 11, 17],
+        }],
+    }
+    rows = {
+        ("schools.csv", 2): {"school": "Bremn Public Schools", "town": "Bremen"},
+        ("schools.csv", 3): {"school": "Bremn Public", "town": "Bremen"},
+    }
+    verifier = Verifier(
+        agent=agent,
+        cell_lookup=_make_cell_lookup({
+            ("schools.csv", 2, "school"): "Bremn Public Schools",
+        }),
+        column_samples=_make_column_samples(),
+        row_lookup=_make_row_lookup(rows),
+        cfg=VerifierConfig(prompt_path=PROMPT_PATH, concurrency=1),
+    )
+    v = verifier.run([cluster])[0]
+
+    # Pattern must be demoted to single_cell despite shape == multi_row.
+    assert v.pattern == "single_cell"
+    # Anchored to the LLM's primary row, not the smallest sibling.
+    assert v.row == 2
+    assert v.column == "school"
+    assert v.suspect_value == "Bremn Public Schools"
+
+    # Prompt must use the single_cell task framing - it asks about
+    # the suspect cell value, NOT whether records are duplicates.
+    prompt = agent.calls[0]["prompt"]
+    assert "pattern:       single_cell" in prompt
+    # Single record block - no Record 2 / Record 3 siblings.
+    assert "Record 1 (row 2):" in prompt
+    assert "Record 2" not in prompt
+    # Should NOT contain duplicate-detection cues.
+    assert "describe the SAME real-world entity" not in prompt
+    assert "duplicate records" not in prompt
+    # Single-cell task instructions present.
+    assert "suspect cell value" in prompt
+
+
+def test_verifier_typo_anchors_on_cluster_row_when_lower_sibling_exists():
+    """``cluster_shape`` sorts rows; the verifier must still anchor
+    the single-cell snapshot on ``cluster.row`` (the LLM's anchor),
+    not the lowest row index in the affected list."""
+    payload = json.dumps({
+        "verdict": "ambiguous",
+        "canonical_value": None,
+        "confidence": 0.4,
+        "evidence": [],
+        "reasoning": "x",
+    })
+    agent = StubAgentBackend(default=_verdict(payload, urls=[]))
+    cluster = {
+        "cluster_id": "geo.csv__r6-c0",
+        "source": "geo.csv",
+        # Anchor row is 6, but affected_rows includes lower indices.
+        "row": 6,
+        "columns": ["city"],
+        "error_types": ["pattern_inconsistency", "text_inconsistency"],
+        "detections": [{
+            "error_type": "pattern_inconsistency",
+            "affected_rows": [0, 6, 11, 75, 79, 80, 83],
+        }],
+    }
+    rows = {
+        ("geo.csv", 0): {"city": "new york"},
+        ("geo.csv", 6): {"city": "miAMI"},
+    }
+    verifier = Verifier(
+        agent=agent,
+        cell_lookup=_make_cell_lookup({
+            ("geo.csv", 6, "city"): "miAMI",
+        }),
+        column_samples=_make_column_samples(),
+        row_lookup=_make_row_lookup(rows),
+        cfg=VerifierConfig(prompt_path=PROMPT_PATH, concurrency=1),
+    )
+    v = verifier.run([cluster])[0]
+
+    assert v.pattern == "single_cell"
+    assert v.row == 6  # NOT 0 (the smallest sibling)
+    assert v.suspect_value == "miAMI"
+
+    prompt = agent.calls[0]["prompt"]
+    # Header must show row 6, not row 0.
+    assert "Record 1 (row 6):" in prompt
+    assert "miAMI" in prompt
+
+
+def test_verifier_row_duplication_cluster_still_uses_multi_row_prompt():
+    """A genuine row_duplication cluster - the same shape as the
+    typo case but with the right error_type intent - must still get
+    the multi_row prompt. This pins the demotion to error_type
+    intent, not just the structural shape."""
+    payload = json.dumps({
+        "verdict": "false_positive",
+        "canonical_value": None,
+        "confidence": 0.8,
+        "evidence": [{
+            "url": "https://example.com/registry",
+            "title": "Registry",
+            "quote": "These are distinct entities",
+        }],
+        "reasoning": "x",
+    })
+    agent = StubAgentBackend(default=_verdict(
+        payload, urls=[("https://example.com/registry", "Registry")],
+    ))
+    # Same shape as the typo cluster (1 col, multi affected_rows) but
+    # the LLM marked it as a duplication candidate. Must remain
+    # multi_row.
+    cluster = {
+        "cluster_id": "vendors.csv__r0-dup",
+        "source": "vendors.csv",
+        "row": 0,
+        "columns": ["Vendor"],
+        "error_types": ["row_duplication"],
+        "detections": [{
+            "error_type": "row_duplication",
+            "affected_rows": [0, 7],
+        }],
+    }
+    rows = {
+        ("vendors.csv", 0): {"Vendor": "Acme Corp"},
+        ("vendors.csv", 7): {"Vendor": "AcmeCo"},
+    }
+    verifier = Verifier(
+        agent=agent,
+        cell_lookup=_make_cell_lookup({}),
+        column_samples=_make_column_samples(),
+        row_lookup=_make_row_lookup(rows),
+        cfg=VerifierConfig(prompt_path=PROMPT_PATH, concurrency=1),
+    )
+    v = verifier.run([cluster])[0]
+
+    assert v.pattern == "multi_row"
+    assert len(v.record_snapshots) == 2
+
+    prompt = agent.calls[0]["prompt"]
+    assert "pattern:       multi_row" in prompt
+    assert "Record 1 (row 0):" in prompt
+    assert "Record 2 (row 7):" in prompt
+    assert "describe the SAME real-world entity" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Task-block specialisation by entity_kind. The single_cell branch has a
+# dedicated "person" path that biases the verdict toward false_positive
+# when ANY web hit on the suspect spelling exists - rare-spelling names
+# look like typos but aren't.
+# ---------------------------------------------------------------------------
+
+
+def test_format_task_block_person_single_cell_uses_specialized_text():
+    from src.verifier.verify import _format_task_block
+
+    block = _format_task_block(
+        pattern="single_cell",
+        columns=["First Name"],
+        n_rows=1,
+        entity_kind="person",
+    )
+    # Person-specific framing
+    assert "Person-name typo verification" in block
+    # The "any web hit -> false_positive" policy must be explicit
+    assert "false_positive" in block
+    assert "rare-spelling" in block.lower() or "rare-spelling" in block
+    # Confirmed_error bar must be high (suggested_fix supported in row context)
+    assert "confirmed_error" in block
+    assert "context" in block.lower()
+    # Must NOT contain the default single_cell paragraph header
+    # ("Notes for person-name columns: ... return ambiguous"); the
+    # person-specialised block replaces that policy entirely.
+    assert "Notes for person-name columns" not in block
+
+
+def test_format_task_block_single_cell_other_keeps_default_text():
+    """Sanity: non-person single_cell clusters get the original block."""
+    from src.verifier.verify import _format_task_block
+
+    block = _format_task_block(
+        pattern="single_cell",
+        columns=["Address"],
+        n_rows=1,
+        entity_kind="address",
+    )
+    # The original "Notes for person-name columns" paragraph still
+    # lives in the default single_cell block (preserved for any
+    # non-person single_cell call), so its presence here confirms we
+    # didn't regress the default path.
+    assert "Notes for person-name columns" in block
+    assert "Person-name typo verification" not in block
+
+
+def test_format_task_block_default_entity_kind_is_other():
+    """The new ``entity_kind`` kwarg must default to ``other`` so
+    existing callers (and any external users) continue to work."""
+    from src.verifier.verify import _format_task_block
+
+    block = _format_task_block(
+        pattern="single_cell",
+        columns=["Status"],
+        n_rows=1,
+    )
+    # Default branch is the original single_cell text.
+    assert "Notes for person-name columns" in block
+    assert "Person-name typo verification" not in block
+
+
+def test_verifier_dispatches_person_block_for_first_name_column():
+    """End-to-end (no real agent): a typo cluster on a ``First Name``
+    column with ``verify_person=True`` should emit the person-specific
+    task block in the prompt the verifier hands to the backend."""
+    from src.verifier.gate import GateConfig
+
+    payload = '{"verdict":"false_positive","canonical_value":null,"confidence":0.6,"evidence":[],"reasoning":"x"}'
+    agent = StubAgentBackend(default=_verdict(payload, urls=[]))
+    cluster = {
+        "cluster_id": "people.csv__r00005-c000",
+        "source": "people.csv",
+        "row": 5,
+        "columns": ["First Name"],
+        "values": ["Murry"],
+        "error_type": "typo",
+        "error_types": ["typo"],
+        "detections": [{
+            "error_type": "typo",
+            "observed": "Murry",
+            "suggested_fix": "Murray",
+        }],
+    }
+    cells = {("people.csv", 5, "First Name"): "Murry"}
+    verifier = Verifier(
+        agent=agent,
+        cell_lookup=_make_cell_lookup(cells),
+        column_samples=_make_column_samples(),
+        cfg=VerifierConfig(
+            prompt_path=PROMPT_PATH,
+            concurrency=1,
+            gate=GateConfig(verify_person=True),
+        ),
+    )
+    [v] = verifier.run([cluster])
+
+    assert v.entity_kind == "person"
+    prompt = agent.calls[0]["prompt"]
+    assert "Person-name typo verification" in prompt
+    # Default single_cell guidance must NOT be in the prompt.
+    assert "Notes for person-name columns" not in prompt

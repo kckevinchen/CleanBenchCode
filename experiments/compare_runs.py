@@ -50,26 +50,22 @@ logger = logging.getLogger("compare_runs")
 
 
 # ---------------------------------------------------------------------------
-# Bucketing: collapse the LLM's 13-type taxonomy onto buckets the
-# compare-runs panel can usefully diff. Most types map to themselves;
-# the only deliberate fold is ``number_format_inconsistency`` ->
-# ``pattern_inconsistency`` because the heuristics treat them as one
-# class (numeric format mismatches are a special case of pattern
-# minorities). Anything not in this map keeps its raw ``error_type``
-# string and ends up in a per-type bucket the heuristics cannot
-# produce - which is fine; we just want every error_type the
-# detectors can emit to be VISIBLE in the bucket overlap table.
+# Bucketing: collapse the LLM's 9-type taxonomy onto buckets the
+# compare-runs panel can usefully diff. The five legacy
+# ``*_inconsistency`` keys (text / casing / pattern / punctuation /
+# number_format) were merged into a single ``inconsistency`` umbrella
+# at the prompt level, so there is no longer a deliberate fold to
+# apply here - every emitted ``error_type`` maps to itself. Anything
+# not in this map keeps its raw ``error_type`` string and ends up in
+# a per-type bucket - which is fine; we just want every error_type
+# the detectors can emit to be VISIBLE in the bucket overlap table.
 # ---------------------------------------------------------------------------
 
 
 ERROR_TYPE_BUCKETS = {
     # ---- single-column ---------------------------------------------
     "typo": "typo",
-    "text_inconsistency": "text_inconsistency",
-    "casing_inconsistency": "casing_inconsistency",
-    "pattern_inconsistency": "pattern_inconsistency",
-    "punctuation_inconsistency": "punctuation_inconsistency",
-    "number_format_inconsistency": "pattern_inconsistency",
+    "inconsistency": "inconsistency",
     "semantic_incompatible": "semantic_incompatible",
     "numeric_outlier": "numeric_outlier",
     # ---- multi-column (intra-row) ----------------------------------
@@ -93,8 +89,7 @@ def _bucket(error_type: str) -> str:
 # Keep this in sync with the detectors under ``src/heuristics/`` and
 # ``src/core/row_duplication_detector.py``.
 HEURISTIC_BUCKETS = {
-    "typo", "text_inconsistency", "casing_inconsistency",
-    "pattern_inconsistency", "punctuation_inconsistency",
+    "typo", "inconsistency",
     "numeric_outlier", "fd_violation",
     "row_duplication",
 }

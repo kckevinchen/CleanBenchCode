@@ -65,6 +65,34 @@ class LabelStore:
             self._latest[label.target_id] = label
         return label
 
+    def append_many(self, labels: List[Label]) -> List[Label]:
+        """Persist ``labels`` in a single fsync.
+
+        Equivalent to calling :meth:`append` per record but folds the
+        write + fsync into one syscall pair, which matters on slow
+        disks (~10 ms fsync each on the data volume): a 30-cell
+        propagation drops from ~300 ms to ~10 ms.
+        """
+        if not labels:
+            return []
+        payload = "".join(lab.model_dump_json() + "\n" for lab in labels)
+        with self._lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(
+                self.path,
+                os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+                0o644,
+            )
+            try:
+                os.write(fd, payload.encode("utf-8"))
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            for lab in labels:
+                self._records.append(lab)
+                self._latest[lab.target_id] = lab
+        return list(labels)
+
     # -------------------------------------------------------------- queries
 
     def all(self) -> List[Label]:

@@ -14,8 +14,8 @@ Two `column_mode` strategies are supported:
                   violations across the row).
 * ``"single"``  - one chunk per (row-slice, column) pair, containing a
                   single CSV column at a time. Best for *single-column*
-                  error types (typo, text_inconsistency,
-                  pattern_inconsistency, semantic_incompatible) where the
+                  error types (typo, inconsistency,
+                  semantic_incompatible) where the
                   detector only needs to look at a single column's
                   distribution to decide.
 
@@ -101,15 +101,86 @@ class CsvChunk:
         """
         frame = self.frame.copy()
 
-        def _truncate(v: object) -> str:
+        def _format(v: object) -> str:
             s = "" if pd.isna(v) else str(v)
+            s = _visible_whitespace(s)
             if len(s) > max_cell_chars:
                 return s[: max_cell_chars - 1] + "\u2026"
             return s
 
-        frame = frame.astype(object).map(_truncate)
+        frame = frame.astype(object).map(_format)
         frame.insert(0, "__row__", list(self.frame.index))
         return frame.to_markdown(index=False)
+
+
+# ---------------------------------------------------------------------------
+# Whitespace markers for LLM-facing renderings
+# ---------------------------------------------------------------------------
+# ``tabulate`` (used by ``DataFrame.to_markdown``) right-pads cells with
+# regular spaces to align the column - which is visually identical to a
+# trailing-space run inside a cell value. A cell of ``"Centerville "``
+# and one of ``"Centerville"`` therefore round-trip to the EXACT same
+# rendered line, so every downstream detector (typo, inconsistency,
+# ...) is structurally blind to leading/trailing whitespace defects.
+# Internal newlines, tabs, NBSPs, and zero-width characters are
+# similarly invisible in a Markdown table.
+#
+# Substituting these characters with visible sentinels right before
+# rendering preserves their PRESENCE in the LLM's view while keeping
+# the markdown structurally correct. The convention is documented in
+# the ``base.user_template`` block of ``prompts/error_types.yaml`` so
+# every per-type prompt knows what the markers mean.
+_WS_NEWLINE = "\u21B5"   # downwards arrow with corner leftwards
+_WS_TAB = "\u2192"       # rightwards arrow
+_WS_SPACE = "\u2423"     # open box (visible space)
+_WS_ZW = "\u00B7"        # middle dot (zero-width characters)
+
+_NEWLINE_CHARS = ("\n", "\r", "\u2028", "\u2029")
+_ZW_CHARS = ("\u200B", "\u200C", "\u200D", "\u00AD", "\uFEFF")
+
+
+def _visible_whitespace(s: str) -> str:
+    """Substitute invisible / structurally hidden whitespace with sentinels.
+
+    See module-level note above ``_WS_NEWLINE`` for why we do this.
+
+    Rules:
+    * Leading / trailing runs of regular ``" "`` -> one ``␣`` per space.
+    * ``\\t`` -> ``→``.
+    * Newlines (``\\n``, ``\\r``, U+2028, U+2029) -> ``↵``.
+    * NBSP (U+00A0) -> ``␣`` (it functions as a space).
+    * Zero-width characters (ZWSP, ZWNJ, ZWJ, soft hyphen, BOM) -> ``·``.
+
+    Internal multi-space runs are LEFT ALONE because tabulate preserves
+    them verbatim - they remain visible in the rendered table.
+    """
+    if not s:
+        return s
+    # Mark zero-width and NBSP first so they don't interfere with the
+    # leading/trailing-space detection (NBSP is not "whitespace" for
+    # ``str.lstrip()`` with default argument anyway, but mark it for
+    # the LLM regardless).
+    for ch in _ZW_CHARS:
+        if ch in s:
+            s = s.replace(ch, _WS_ZW)
+    if "\u00A0" in s:
+        s = s.replace("\u00A0", _WS_SPACE)
+    if "\t" in s:
+        s = s.replace("\t", _WS_TAB)
+    for ch in _NEWLINE_CHARS:
+        if ch in s:
+            s = s.replace(ch, _WS_NEWLINE)
+    # Leading / trailing regular-space runs.
+    n = len(s)
+    lead = 0
+    while lead < n and s[lead] == " ":
+        lead += 1
+    trail = 0
+    while trail < n - lead and s[n - 1 - trail] == " ":
+        trail += 1
+    if lead or trail:
+        s = (_WS_SPACE * lead) + s[lead : n - trail] + (_WS_SPACE * trail)
+    return s
 
 
 def _dedupe_columns(columns: Sequence[str]) -> List[str]:

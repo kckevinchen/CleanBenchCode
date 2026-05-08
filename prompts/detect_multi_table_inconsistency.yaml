@@ -1,0 +1,212 @@
+# Cross-sheet semantic inconsistency detector (Shape-1, "LLM as
+# detector"). This REPLACES the deterministic compiler in
+# `src.core.multi_table_violations` and the per-violation verifier
+# in `src.core.multi_table_verifier` for groups where the user
+# selects `--multi-table-strategy semantic`.
+#
+# The pipeline is now:
+#
+#   1. Structural priors (Python)
+#   2. Group + canonical-mapping confirmation (LLM,
+#      prompts/confirm_union_join.yaml)
+#   3. Semantic inconsistency detection (LLM, this prompt)  <-- here
+#
+# This is "step 4 collapsed into step 3": instead of having the
+# Python compiler enumerate `==`-style mismatches and then asking
+# the LLM to verify each one, we hand the LLM the column mapping +
+# row samples for a confirmed group and ask it to *find* the
+# inconsistencies directly. That's the only way to catch semantic
+# variants the compiler can't see by definition - "USA" vs
+# "United States", $100 vs 10000 cents, "2024-01-15" vs "15/01/24",
+# legitimate roll-ups vs duplicate entries, etc.
+#
+# This prompt is called per (workbook, group). For groups whose
+# rows exceed the per-call budget, the runner pages through chunks
+# of N rows and dedupes findings by `(sheet, row, columns)` so
+# multi-page calls collapse into one logical record.
+#
+# Output format (strict JSON, no prose, no fences):
+#   {
+#     "findings": [
+#       {
+#         "kind": "duplicate_row" | "attribute_conflict"
+#               | "surface_drift" | "unit_drift" | "format_drift"
+#               | "null_placeholder" | "snapshot_aggregation"
+#               | "fk_orphan",
+#         "verdict":   "confirmed_inconsistency"
+#                    | "benign_variation"
+#                    | "uncertain",
+#         "confidence": "high" | "medium" | "low",
+#         "locations": [{"sheet": "...", "row": <int>}, ...],
+#         "columns": ["canonical_col", ...],
+#         "evidence":  "<one-line value-level snippet>",
+#         "rationale": "<one short sentence>"
+#       }
+#     ]
+#   }
+#
+# `row` is the 0-based positional index inside the rendered row
+# block for that sheet (matches the indices we write into the
+# block; NOT a workbook-global row number).
+#
+# Kind rubric:
+#   - `duplicate_row`: rows on different sheets describe the same
+#     entity (after collapsing surface variants) and agree on
+#     attributes. Use this for true cross-sheet copies.
+#   - `attribute_conflict`: rows describe the same entity but
+#     disagree on a non-key column in a way the deterministic `==`
+#     would not catch (e.g. "USA" vs "United States" *plus* the
+#     score columns also differ).
+#   - `surface_drift`: same value rendered differently with no
+#     downstream impact (case, whitespace, punctuation, common
+#     abbreviations) - usually `benign_variation`.
+#   - `unit_drift`: the same quantity expressed in different units
+#     or scales between sheets ($1.50 vs 150 cents, kg vs g,
+#     percentage vs decimal). Verdict depends on whether a
+#     companion column (currency, unit) declares the difference.
+#   - `format_drift`: same value, different rendering (date format,
+#     number with thousand separators, ISO vs locale). Usually
+#     `benign_variation`.
+#   - `null_placeholder`: one side carries a pseudo-null ("",
+#     "-", "N/A", "NULL", 0) while the other has a real value.
+#     `benign_variation` if the column allows missing data,
+#     `confirmed_inconsistency` otherwise.
+#   - `snapshot_aggregation`: a row in one sheet is the
+#     aggregate/sum/snapshot of multiple rows in another (or the
+#     same row at a different time). Almost always
+#     `benign_variation`; flag as `confirmed_inconsistency` only
+#     when totals don't match.
+#   - `fk_orphan`: only valid for `join` groups. A child key has
+#     no matching parent.
+
+model: gpt-5.2
+reasoning_effort: medium
+reasoning_summary: detailed
+
+system: |
+  You are a data-integration auditor. Given a CONFIRMED cross-sheet
+  group (the resolver in step 2 already vouched the sheets describe
+  the same kind of entity), find the rows on those sheets that
+  represent the same logical entity but disagree on something, OR
+  that are exact / near-exact duplicates of each other.
+
+  You see:
+    * The canonical column map (which raw column on each sheet
+      corresponds to which canonical name).
+    * The primary key (canonical names; possibly empty for unions
+      where the resolver could not identify a key).
+    * Up to N rows per sheet, with their positional row index
+      reproduced verbatim. The indices are LOCAL to each sheet and
+      0-based.
+
+  FAVOR RECALL (the verifier is downstream).
+    A separate verification step (verify_multi_table_violations.yaml)
+    re-checks every finding before it reaches the user dashboard,
+    so this prompt should SURFACE candidate disagreements rather
+    than filter them. When the evidence is partial, prefer
+    `verdict: "uncertain"` with `confidence: "low"` over emitting
+    nothing at all - silent drops become permanent false negatives,
+    while uncertain findings get a second look. Only stay silent
+    when there is genuinely no candidate disagreement to evaluate.
+
+  HOW TO DECIDE WHICH ROWS PAIR UP
+  --------------------------------
+  * If a primary key is provided, pair rows by the PK after
+    forgiving case / whitespace / punctuation drift.
+  * If no PK is provided (union with no agreed-on key), pair rows
+    by an obvious natural identifier in the row (e.g. a "name" or
+    "id" column whose values look unique). Do not invent pairings
+    based on order.
+  * If you cannot reliably pair rows, emit no finding for that
+    pair and add a single `verdict: "uncertain"` record with
+    `kind: "attribute_conflict"`, empty `locations`, and a
+    one-sentence rationale explaining why pairing was infeasible.
+
+  HOW TO CLASSIFY A DISAGREEMENT
+  -------------------------------
+  * String values that differ only in case / whitespace /
+    punctuation / abbreviation: `surface_drift` /
+    `benign_variation`.
+  * Same name spelled out vs abbreviated ("USA" / "United States",
+    "NYC" / "New York City", "Jan" / "January"): `surface_drift`
+    / `benign_variation`. UNLESS another non-key column also
+    disagrees - then it becomes `attribute_conflict` /
+    `confirmed_inconsistency`, because we now have two real
+    discrepancies on the same entity.
+  * Numeric values that differ by a factor of 100 / 1000 / a
+    common unit conversion: `unit_drift`.
+  * Numeric values within rounding tolerance: usually
+    `benign_variation` if the column is a derived total or a
+    reported figure; `confirmed_inconsistency` if it's a recorded
+    measurement.
+  * One side is empty / NaN / "N/A" / "—" / "NULL" / 0:
+    `null_placeholder`. `benign_variation` if the column is
+    optional, otherwise `confirmed_inconsistency`.
+  * Same identity, same attributes, just two copies on different
+    sheets: `duplicate_row`. `benign_variation` when the sheets
+    are clearly master vs detail or summary vs transactional;
+    `confirmed_inconsistency` only when both sheets are supposed
+    to be authoritative on the entity.
+  * The "primary key" was actually a category column and rows
+    sharing a value are not the same entity: emit nothing for
+    those rows, OR a single `verdict: "uncertain"` record with
+    `rationale: "primary key column appears to be a category, not
+    an identifier"`.
+
+  ROW-INDEX RULES
+  ---------------
+  * `row` is the LOCAL 0-based index from the rendered row block,
+    NOT a workbook-wide row number. Always use the index that
+    appears immediately to the left of the row content.
+  * `locations` must list every (sheet, row) involved in the
+    finding. A `duplicate_row` between sheets A and B has TWO
+    locations; an `attribute_conflict` typically has two as well.
+    Snapshot/aggregation cases may have many.
+
+  RETURN STRICT JSON. No prose, no markdown fences, no comments.
+  If there are no inconsistencies in the rows shown, return
+  `{"findings": []}`.
+
+user_template: |
+  WORKBOOK: {workbook!r}
+  GROUP:    group_id={group_id} kind={group_kind} sheets={sheets}
+  PRIMARY KEY (canonical): {primary_key}
+
+  ----- COLUMN MAPPING (canonical -> raw variants per sheet) -----
+  {column_mapping_block}
+
+  ----- ROW SAMPLES (each row prefixed with its LOCAL 0-based index) -----
+  Page {page_index} of {n_pages} (sheets may be truncated to {n_sample_rows} rows per page).
+
+  {row_samples_block}
+
+  TASK
+  ----
+  Find every row pair / row group that represents the SAME logical
+  entity (across the listed sheets) but either disagrees on a
+  non-key column OR is a true duplicate. Use the rubric in the
+  system prompt to choose `kind` + `verdict`.
+
+  Surface candidate findings rather than silently dropping them:
+  the downstream verifier will re-check each one. Use
+  `verdict: "uncertain"` (with `confidence: "low"`) for pairs you
+  cannot fully decide; do not omit them.
+
+  OUTPUT (strict JSON):
+  {{
+    "findings": [
+      {{
+        "kind": "duplicate_row" | "attribute_conflict"
+              | "surface_drift" | "unit_drift" | "format_drift"
+              | "null_placeholder" | "snapshot_aggregation"
+              | "fk_orphan",
+        "verdict": "confirmed_inconsistency" | "benign_variation"
+                 | "uncertain",
+        "confidence": "high" | "medium" | "low",
+        "locations": [{{"sheet": "...", "row": 0}}],
+        "columns": ["canonical_col", "..."],
+        "evidence": "...",
+        "rationale": "..."
+      }}
+    ]
+  }}

@@ -54,7 +54,7 @@ def _casing_fingerprint(text: str) -> str:
 @register_detector
 class CasingFingerprintDetector(HeuristicDetector):
     name = "casing_fingerprint"
-    default_error_type = "casing_inconsistency"
+    default_error_type = "inconsistency"
 
     def __init__(
         self,

@@ -35,21 +35,25 @@ base:
     NOT scanning rows for violations - downstream detectors do that.
     You only enumerate the rules.
 
-    PRECISION OVER RECALL. A spurious relation pollutes the
-    downstream detector and produces false positives. Only emit a
-    relation when the headers, dtypes, sampled values, or the
-    explicit hints in the digest make the rule clearly inferable. If
-    in doubt, omit. Returning an empty list is a valid answer.
+    FAVOR RECALL. The relations you emit feed downstream detectors;
+    a relation you omit here is one we never check. Each relation
+    also passes through an independent code-execution validator
+    (validate_relation.yaml) that empirically tests whether the
+    rule actually holds, so speculative rules get filtered out
+    automatically. Emit the rule with ``confidence: "low"`` rather
+    than dropping it - the validator decides.
 
-    SEMANTIC GROUNDING IS REQUIRED. Every relation must rest on a
-    real-world reason - a definition, an arithmetic identity, a
-    domain convention, a regulatory rule, or an entity model -
+    SEMANTIC GROUNDING IS STILL REQUIRED. Every relation must rest
+    on a real-world reason - a definition, an arithmetic identity,
+    a domain convention, a regulatory rule, or an entity model -
     NOT just a pattern that happens to hold on the sampled rows.
+    A coincidental sample pattern is not a relation; the validator
+    cannot rescue a rule that has no semantic basis.
 
     Before emitting a relation, ask: "If this rule were violated
     on a NEW row not in the sample, would the violation still be
-    a defect?" If the answer depends on the specific rows shown,
-    do NOT emit the rule.
+    a defect?" If yes, emit it (with appropriate confidence). If
+    the answer depends on the specific rows shown, do NOT emit it.
 
     Examples of patterns that LOOK like rules but are usually NOT
     semantic:
@@ -89,9 +93,13 @@ base:
           aggregation pair, total-row index). Treat these as
           stronger evidence than sample patterns.
 
-    If the only reason to emit a rule is "the sampled rows obey
-    it", DO NOT EMIT IT. The sample is small and stratified; you
-    will see spurious patterns by chance.
+    If the ONLY reason to emit a rule is "the sampled rows obey
+    it" with no semantic story, DO NOT EMIT IT. The sample is
+    small and stratified; coincidental patterns are common. But
+    if you have a semantic story (even a weak one) plus sample
+    support, emit at ``confidence: "low"`` - the validator will
+    test the rule against the full table and reject it cleanly
+    if it doesn't hold.
 
     NO HALLUCINATIONS. Every column referenced in a relation MUST
     appear verbatim in the COLUMN HEADERS list. Never invent column
@@ -168,8 +176,10 @@ base:
     * `confidence` is "high" when the rule is essentially
       definitional (Zip determines State, total = sum of details),
       "medium" when strongly suggested by headers + samples, "low"
-      when speculative. Prefer omitting low-confidence rules
-      altogether.
+      when speculative but semantically plausible. EMIT
+      low-confidence rules - the downstream validator runs them
+      against the full table and rejects the ones that don't hold.
+      Skipping a low-confidence rule means we never check it.
     * `rationale` is at most 1 sentence and must cite the
       specific evidence (header names, dtypes, observed value
       pattern, digest hint) that supports the rule. The
@@ -212,18 +222,22 @@ base:
       values in the digest) AND each branch carries a genuinely
       different non-numeric constraint.
 
-    HARD RED-LINE FOR `implication` / `mandatory_when` /
+    PER-ROW-LITERAL GATE FOR `implication` / `mandatory_when` /
     `equality_within` / `factual` / `bounded` / `cap` / `equality`:
     Before emitting a rule whose predicate or executable contains
     a quoted literal that is also a cell value of one of the
     referenced columns (i.e. a literal pulled from the column's
     `top values` in the digest), CHECK the column's
     `n_distinct`. If the column has more than 4 distinct values
-    in the digest, DO NOT EMIT THE RULE. The rule is
-    sample-fitted to one specific cell - the same predicate
-    would have to be repeated for every other value of that
-    column, none of which the schema can validate. Examples
-    that MUST be rejected at this gate:
+    in the digest, the rule is almost certainly sample-fitted to
+    one specific cell rather than describing a column-level
+    constraint - the same predicate would need to be repeated for
+    every other value of that column, exploding the rule set into
+    paraphrases. Prefer the PARAMETRIC ABSTRACTION below; if no
+    parametric form fits, OMIT the literal-keyed rule (this is
+    the one case where omission is right - the rule has no
+    column-level meaning and the validator cannot rescue it).
+    Examples that MUST be rejected at this gate:
         * "if Customer Name == 'Acme Corp' then Country == 'US'"
           (Customer Name is high-cardinality - this is one row,
           not a rule)

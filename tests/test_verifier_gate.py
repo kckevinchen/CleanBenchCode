@@ -31,7 +31,7 @@ def test_org_column_is_eligible():
 
 
 def test_address_column_is_eligible():
-    c = _cluster(columns=["Mailing Address"], error_types=["text_inconsistency"])
+    c = _cluster(columns=["Mailing Address"], error_types=["inconsistency"])
     assert classify_cluster(c) == EntityKind.ADDRESS
     assert should_verify(c, cell_value="1 Main St")
 
@@ -41,30 +41,36 @@ def test_phone_url_kinds():
     assert classify_cluster(_cluster(columns=["Website"])) == EntityKind.URL
 
 
-def test_person_off_by_default_for_pii():
+def test_person_on_by_default():
+    """Person columns are gate-eligible by default. The verifier
+    uses a lenient criterion ("valid if anyone has the name") so
+    rare-but-real spellings stop being false-positive-flagged."""
     c = _cluster(columns=["First Name"], error_types=["typo"])
-    assert classify_cluster(c) == EntityKind.NONE
-    # Opt in.
-    cfg = GateConfig(verify_person=True)
-    assert classify_cluster(c, cfg=cfg) == EntityKind.PERSON
-    assert should_verify(c, cell_value="Marcus", cfg=cfg)
+    assert classify_cluster(c) == EntityKind.PERSON
+    assert should_verify(c, cell_value="Marcus")
+    # Opt out (privacy-sensitive audit) still works.
+    cfg = GateConfig(verify_person=False)
+    assert classify_cluster(c, cfg=cfg) == EntityKind.NONE
+    assert not should_verify(c, cell_value="Marcus", cfg=cfg)
 
 
-def test_person_column_not_verified_via_error_type_fallthrough():
+def test_person_column_with_error_type_runs_by_default():
     """Regression: a PERSON column with a whitelisted error_type
-    (e.g. typo) used to leak through ``should_verify`` because
-    ``classify_cluster`` downgraded PERSON->NONE, after which the
-    ``error_type`` branch happily admitted it. The PII reject must
-    win over the error_type branch."""
+    (e.g. typo) must NOT be downgraded to OTHER under default cfg -
+    it must classify as PERSON so the verifier picks the lenient
+    person-name prompt branch."""
     c = _cluster(columns=["First Name"], error_types=["typo"])
-    assert not should_verify(c, cell_value="Matt")  # default cfg
-    c2 = _cluster(columns=["Last Name"], error_types=["text_inconsistency"])
-    assert not should_verify(c2, cell_value="Smith")
+    assert classify_cluster(c) == EntityKind.PERSON
+    assert should_verify(c, cell_value="Matt")
+    c2 = _cluster(columns=["Last Name"], error_types=["inconsistency"])
+    assert should_verify(c2, cell_value="Smith")
     c3 = _cluster(columns=["Contact Name"], error_types=["typo"])
-    assert not should_verify(c3, cell_value="Jane Doe")
-    # But with opt-in, it goes through.
-    cfg = GateConfig(verify_person=True)
-    assert should_verify(c, cell_value="Matt", cfg=cfg)
+    assert should_verify(c3, cell_value="Jane Doe")
+    # Opt out: privacy-sensitive audit -> all rejected.
+    cfg = GateConfig(verify_person=False)
+    assert not should_verify(c, cell_value="Matt", cfg=cfg)
+    assert not should_verify(c2, cell_value="Smith", cfg=cfg)
+    assert not should_verify(c3, cell_value="Jane Doe", cfg=cfg)
 
 
 def test_numeric_only_value_rejected():
@@ -116,4 +122,4 @@ def test_filter_eligible_uses_value_lookup():
 
 def test_default_error_types_include_typo():
     assert "typo" in DEFAULT_ERROR_TYPES
-    assert "text_inconsistency" in DEFAULT_ERROR_TYPES
+    assert "inconsistency" in DEFAULT_ERROR_TYPES

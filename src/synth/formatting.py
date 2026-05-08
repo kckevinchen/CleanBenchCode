@@ -23,7 +23,7 @@ _NUMERIC_RE = re.compile(r"^-?\d+(\.\d+)?$")
 @register_injector
 class PunctuationInjector(Injector):
     name = "punctuation"
-    error_type = "punctuation_inconsistency"
+    error_type = "inconsistency"
 
     _SUBS = [
         ("'", "\u2019"),    # straight -> right single quote
@@ -49,7 +49,7 @@ class PunctuationInjector(Injector):
 @register_injector
 class NumberFormatInjector(Injector):
     name = "number_format"
-    error_type = "number_format_inconsistency"
+    error_type = "inconsistency"
 
     def applicable(self, value: str) -> bool:
         return bool(_NUMERIC_RE.match((value or "").strip()))
@@ -104,7 +104,7 @@ class PatternInjector(Injector):
     pattern.
     """
     name = "pattern"
-    error_type = "pattern_inconsistency"
+    error_type = "inconsistency"
 
     def applicable(self, value: str) -> bool:
         return bool(value) and len(value) >= 4

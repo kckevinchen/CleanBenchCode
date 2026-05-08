@@ -36,6 +36,7 @@ from src.adaptive._chao1 import (
     chao1_variance_bias_corrected,
     compute_core,
     frequency_of_frequencies,
+    is_saturated_by_estimate,
 )
 
 
@@ -303,3 +304,73 @@ class TestComputeCore:
         # And the upper-95 CI should cover the truth (with high prob).
         # Not a guaranteed test but stable for this seed.
         assert core.chao1_ci_95_high >= true_S * 0.6
+
+
+# ---------------------------------------------------------------------------
+# is_saturated_by_estimate: S_obs == 0 semantics
+# ---------------------------------------------------------------------------
+
+
+class TestSaturatedAtZeroObservations:
+    """When S_obs == 0 the Chao1 estimator is degenerate (no f1/f2 to
+    extrapolate). We define the missing-fraction ratio to be 0 so that
+    K consecutive empty passes are read as "no species exist." The
+    k_min / two-consecutive guards on the caller prevent a premature
+    stop on a single empty draw."""
+
+    def test_chao1_zero_obs_treated_as_saturated(self) -> None:
+        # An empty draw under "chao1": ratio is 0 -> saturated.
+        assert is_saturated_by_estimate(
+            n_observed=0,
+            good_turing_missing_mass=0.0,
+            chao1_ci_95_high=0.0,
+            epsilon=0.05,
+            epsilon_chao1=0.05,
+            stop_when="chao1",
+        ) is True
+
+    def test_both_zero_obs_treated_as_saturated(self) -> None:
+        # Under "both", GT-zero AND chao1-zero both pass at S_obs=0,
+        # so the conjunction also saturates.
+        assert is_saturated_by_estimate(
+            n_observed=0,
+            good_turing_missing_mass=0.0,
+            chao1_ci_95_high=0.0,
+            epsilon=0.05,
+            epsilon_chao1=0.05,
+            stop_when="both",
+        ) is True
+
+    def test_gt_zero_obs_treated_as_saturated(self) -> None:
+        # GT mass is zero by convention at S_obs=0 (compute_core
+        # short-circuits): "gt" mode also saturates.
+        assert is_saturated_by_estimate(
+            n_observed=0,
+            good_turing_missing_mass=0.0,
+            chao1_ci_95_high=0.0,
+            epsilon=0.05,
+            epsilon_chao1=0.05,
+            stop_when="gt",
+        ) is True
+
+    def test_chao1_with_observations_unchanged(self) -> None:
+        # Sanity: the >0 branch is unaffected. Tight CI saturates,
+        # loose CI does not.
+        # n_observed=10, ci_95_high=10 -> ratio=0 -> saturated.
+        assert is_saturated_by_estimate(
+            n_observed=10,
+            good_turing_missing_mass=0.5,  # gt fails
+            chao1_ci_95_high=10.0,
+            epsilon=0.05,
+            epsilon_chao1=0.05,
+            stop_when="chao1",
+        ) is True
+        # n_observed=10, ci_95_high=20 -> ratio=1.0 -> not saturated.
+        assert is_saturated_by_estimate(
+            n_observed=10,
+            good_turing_missing_mass=0.0,
+            chao1_ci_95_high=20.0,
+            epsilon=0.05,
+            epsilon_chao1=0.05,
+            stop_when="chao1",
+        ) is False

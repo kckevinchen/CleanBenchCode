@@ -47,12 +47,12 @@ class TestCellLevelRawHits:
 
     def test_multiple_emissions_within_a_pass_count_separately(self) -> None:
         # Same cell flagged twice in pass 0 (e.g., once as typo,
-        # once as casing_inconsistency). Under Interp B this counts
+        # once as inconsistency). Under Interp B this counts
         # as TWO raw emissions but ONE entry in runs_found_in.
         runs = [
             [
                 _det_cell("a.csv", "typo", 1),
-                _det_cell("a.csv", "casing_inconsistency", 1),
+                _det_cell("a.csv", "inconsistency", 1),
             ],
             [],
         ]
@@ -63,7 +63,7 @@ class TestCellLevelRawHits:
         # And the per-error-type breakdown is also raw.
         assert rec.raw_hits_by_error_type == {
             "typo": 1,
-            "casing_inconsistency": 1,
+            "inconsistency": 1,
         }
 
     def test_affected_rows_expansion_increments_raw_hits_per_row(self) -> None:
@@ -88,7 +88,7 @@ class TestCellLevelRawHits:
             [
                 _det_cell("a.csv", "typo", 1),
                 _det_cell("a.csv", "typo", 1),  # duplicate within pass 0
-                _det_cell("a.csv", "casing_inconsistency", 1),
+                _det_cell("a.csv", "inconsistency", 1),
             ],
             [_det_cell("a.csv", "typo", 1)],
         ]
@@ -106,11 +106,11 @@ class TestCellLevelRawHits:
             [
                 _det_cell("a.csv", "typo", 1),
                 _det_cell("a.csv", "typo", 2),
-                _det_cell("b.csv", "casing_inconsistency", 5, col="x"),
+                _det_cell("b.csv", "inconsistency", 5, col="x"),
             ],
             [
                 _det_cell("a.csv", "typo", 1),
-                _det_cell("a.csv", "casing_inconsistency", 1),
+                _det_cell("a.csv", "inconsistency", 1),
             ],
         ]
         table = cell_aggregate_runs(runs)
@@ -155,12 +155,12 @@ class TestScopedRawHits:
         runs = [
             [
                 _det_scope("a.csv", "typo", 1),
-                _det_scope("a.csv", "casing_inconsistency", 1),
+                _det_scope("a.csv", "inconsistency", 1),
             ],
         ]
         table = aggregate_runs_by_scope(runs, scope_kind="column")
         arm_typo = (("column", ("a.csv", "c")), "typo")
-        arm_cas = (("column", ("a.csv", "c")), "casing_inconsistency")
+        arm_cas = (("column", ("a.csv", "c")), "inconsistency")
         assert table[arm_typo][(1,)].raw_hits == 1
         assert table[arm_cas][(1,)].raw_hits == 1
 
@@ -184,12 +184,12 @@ class TestScopedRawHits:
         # One detection listing two columns yields two species; each
         # contributes 1 raw_hit to its respective column-arm.
         runs = [
-            [_det_scope("a.csv", "pattern_inconsistency", 1,
+            [_det_scope("a.csv", "inconsistency", 1,
                         columns=("c1", "c2"))],
         ]
         table = aggregate_runs_by_scope(runs, scope_kind="column")
-        arm_c1 = (("column", ("a.csv", "c1")), "pattern_inconsistency")
-        arm_c2 = (("column", ("a.csv", "c2")), "pattern_inconsistency")
+        arm_c1 = (("column", ("a.csv", "c1")), "inconsistency")
+        arm_c2 = (("column", ("a.csv", "c2")), "inconsistency")
         assert table[arm_c1][(1,)].raw_hits == 1
         assert table[arm_c2][(1,)].raw_hits == 1
 
@@ -234,7 +234,7 @@ class TestScopedRawHits:
             ],
             [
                 _det_scope("a.csv", "typo", 1),
-                _det_scope("a.csv", "casing_inconsistency", 1),
+                _det_scope("a.csv", "inconsistency", 1),
             ],
         ]
         table = aggregate_runs_by_scope(runs, scope_kind="column")
@@ -242,7 +242,7 @@ class TestScopedRawHits:
         # Hand count: 3 emissions in pass 0 + 1 in pass 1 = 4.
         total_typo = sum(r.raw_hits for r in table[arm_typo].values())
         assert total_typo == 4
-        arm_cas = (("column", ("a.csv", "c")), "casing_inconsistency")
+        arm_cas = (("column", ("a.csv", "c")), "inconsistency")
         total_cas = sum(r.raw_hits for r in table[arm_cas].values())
         assert total_cas == 1
 

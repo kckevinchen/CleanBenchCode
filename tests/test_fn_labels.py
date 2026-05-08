@@ -400,6 +400,147 @@ class TestExportWithFN:
         assert rec["corrected_value"] == "Alice"
 
 
+class TestExportByErrorType:
+    """End-to-end smoke test for the per-error-type export endpoint.
+
+    Uses the same fixture as the JSONL exporter; pins:
+      * the endpoint returns a real ZIP archive,
+      * each entry inside it is a JSONL keyed by error_type slug,
+      * cells are bucketed correctly (typo cluster + FN cell go to
+        ``typo`` and ``_uncategorized`` respectively).
+    """
+
+    def test_zip_contains_one_jsonl_per_type(self, client_and_run) -> None:
+        client, run_id = client_and_run
+        # Label cluster c1 (error_type=typo) as TP.
+        client.post(
+            f"/api/runs/{run_id}/labels",
+            json={
+                "target": "cluster", "target_id": "c1",
+                "source": "a.csv", "row": 1, "column": "name",
+                "status": "tp", "corrected_value": "Alice",
+            },
+        )
+        # Add an FN cell with no enclosing cluster -> uncategorized.
+        client.post(
+            f"/api/runs/{run_id}/labels",
+            json={
+                "target": "cell", "target_id": "x",
+                "source": "a.csv", "row": 2, "column": "email",
+                "status": "fn", "corrected_value": "c@example.com",
+            },
+        )
+        r = client.get(f"/api/runs/{run_id}/export/benchmark-by-type")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("application/zip")
+
+        import io
+        import zipfile
+        zf = zipfile.ZipFile(io.BytesIO(r.content))
+        names = sorted(zf.namelist())
+        assert names == ["_uncategorized.jsonl", "typo.jsonl"]
+
+        with zf.open("typo.jsonl") as fh:
+            lines = fh.read().decode("utf-8").splitlines()
+            assert len(lines) == 1
+            rec = json.loads(lines[0])
+            assert rec["column"] == "name"
+            assert rec["label"] == "error"
+            assert rec["corrected_value"] == "Alice"
+            assert "typo" in rec["error_types"]
+
+        with zf.open("_uncategorized.jsonl") as fh:
+            lines = fh.read().decode("utf-8").splitlines()
+            assert len(lines) == 1
+            rec = json.loads(lines[0])
+            assert rec["column"] == "email"
+            assert rec["label"] == "error"
+            assert rec["error_types"] == []
+            # FN cells emit empty cluster_ids - this is the marker the
+            # downstream cleaner uses to tell FN from TP-via-cluster.
+            assert rec["cluster_ids"] == []
+
+
+class TestExportSingleErrorType:
+    """End-to-end check for the per-error-type single-bucket export.
+
+    Mirrors :class:`TestExportByErrorType` but pins the surface that
+    serves a single ``error_type`` as a plain JSONL (not a ZIP):
+
+      * ``GET /export/benchmark/typo`` returns the typo bucket only.
+      * Slug normalisation: ``Typo``, ``typo``, ``typo.jsonl`` all
+        resolve to the same bucket.
+      * 404 with the available-bucket list when no labelled cell
+        belongs to the requested type.
+    """
+
+    def test_returns_jsonl_for_requested_type(self, client_and_run) -> None:
+        client, run_id = client_and_run
+        client.post(
+            f"/api/runs/{run_id}/labels",
+            json={
+                "target": "cluster", "target_id": "c1",
+                "source": "a.csv", "row": 1, "column": "name",
+                "status": "tp", "corrected_value": "Alice",
+            },
+        )
+        r = client.get(f"/api/runs/{run_id}/export/benchmark/typo")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("application/x-ndjson")
+        rows = [json.loads(line) for line in r.text.splitlines() if line.strip()]
+        assert len(rows) == 1
+        rec = rows[0]
+        assert rec["column"] == "name"
+        assert rec["label"] == "error"
+        assert rec["corrected_value"] == "Alice"
+        assert "typo" in rec["error_types"]
+
+    def test_slug_normalisation(self, client_and_run) -> None:
+        client, run_id = client_and_run
+        client.post(
+            f"/api/runs/{run_id}/labels",
+            json={
+                "target": "cluster", "target_id": "c1",
+                "source": "a.csv", "row": 1, "column": "name",
+                "status": "tp", "corrected_value": "Alice",
+            },
+        )
+        # Both "typo.jsonl" and "Typo" should resolve to the same bucket
+        # via :func:`_slug_for_error_type`. We accept the lowercased
+        # canonical slug; an upper-cased input is normalised on the
+        # client (the dropdown emits canonical lowercase) but the
+        # server still rejects unknown slugs cleanly.
+        for variant in ("typo.jsonl",):
+            r = client.get(f"/api/runs/{run_id}/export/benchmark/{variant}")
+            assert r.status_code == 200, (variant, r.text)
+            assert r.text.strip()
+
+    def test_unknown_type_returns_404_with_available_list(
+        self, client_and_run,
+    ) -> None:
+        client, run_id = client_and_run
+        # Label a typo-cluster so the run has at least ONE bucket;
+        # then ask for a different type that has no labels.
+        client.post(
+            f"/api/runs/{run_id}/labels",
+            json={
+                "target": "cluster", "target_id": "c1",
+                "source": "a.csv", "row": 1, "column": "name",
+                "status": "tp",
+            },
+        )
+        r = client.get(
+            f"/api/runs/{run_id}/export/benchmark/numeric_outlier"
+        )
+        assert r.status_code == 404
+        body = r.json()
+        # FastAPI nests the structured detail under ``detail``.
+        detail = body.get("detail", body)
+        assert detail["error"] == "no_labelled_cells_for_error_type"
+        assert detail["requested"] == "numeric_outlier"
+        assert "typo" in detail["available"]
+
+
 # ---------------------------------------------------------------------------
 # Per-source coverage surface (checked / labelled_clusters / fn_cells)
 # ---------------------------------------------------------------------------

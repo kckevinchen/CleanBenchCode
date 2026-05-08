@@ -70,8 +70,20 @@ _COLUMN_PATTERNS: dict[EntityKind, re.Pattern[str]] = {
         # Conservative: only obvious person-name columns. We do not
         # verify person names by default (privacy) - a separate gate
         # config flag toggles this.
-        r"\b(?:first[\s_-]?name|last[\s_-]?name|surname|"
-        r"contact[\s_-]?name|representative|principal|owner[\s_-]?name)\b",
+        # Patterns include the explicit name parts (first / last /
+        # surname), name-bearing role columns ("Sales Person",
+        # "Person Name", "Contact Name"), and entity-of-record roles
+        # that are typically populated with a person's name in real
+        # tables (representative, principal, owner_name, applicant,
+        # signer, signatory, author). We deliberately keep these
+        # unambiguous - "name" alone could be a product / project /
+        # account name and stays untouched.
+        r"\b(?:"
+        r"first[\s_-]?name|last[\s_-]?name|sur[\s_-]?name|middle[\s_-]?name|"
+        r"full[\s_-]?name|person[\s_-]?name|sales[\s_-]?person|sales[\s_-]?rep(?:resentative)?|"
+        r"contact[\s_-]?name|representative|principal|owner[\s_-]?name|"
+        r"applicant|signer|signatory|author|attendee|guest"
+        r")\b",
         re.IGNORECASE,
     ),
 }
@@ -85,11 +97,13 @@ _COLUMN_PATTERNS: dict[EntityKind, re.Pattern[str]] = {
 # whether a column should use ``%`` vs decimal, or whether a row's
 # Total = Item1 + Item2 holds.
 DEFAULT_ERROR_TYPES: frozenset[str] = frozenset({
-    # Single-cell: classic entity-name / address corrections.
+    # Single-cell: classic entity-name / address corrections. The
+    # merged ``inconsistency`` umbrella covers what used to be
+    # text/casing/pattern/punctuation/number_format. Punctuation and
+    # number-format clusters are weeded out cheaply by the column /
+    # value gates below before any web call is attempted.
     "typo",
-    "text_inconsistency",
-    "casing_inconsistency",
-    "pattern_inconsistency",
+    "inconsistency",
     "semantic_incompatible",
     # Multi-row: web can confirm whether two records are really the
     # same real-world entity (or distinct entities that happen to share
@@ -111,8 +125,6 @@ DEFAULT_ERROR_TYPES: frozenset[str] = frozenset({
 NON_WEB_VERIFIABLE_TYPES: frozenset[str] = frozenset({
     "row_calculation_inconsistency",
     "string_calculation_inconsistency",
-    "number_format_inconsistency",
-    "punctuation_inconsistency",
     "numeric_outlier",
 })
 
@@ -124,8 +136,16 @@ class GateConfig:
     error_types: frozenset[str] = field(default_factory=lambda: DEFAULT_ERROR_TYPES)
     max_value_chars: int = 200
     min_value_chars: int = 2
-    # Person verification is OFF by default to avoid PII fishing.
-    verify_person: bool = False
+    # Person verification is ON by default. The verifier uses a
+    # lenient criterion for person-name typos -- a name is valid as
+    # long as the EXACT suspect spelling exists somewhere on the web
+    # as a real person's name (anywhere in the world). It does NOT
+    # need to match the specific person referenced by the row. This
+    # avoids the systematic false-positive problem where rare-but-
+    # real spellings (e.g. "Murry", "Catherin") get flagged as typos.
+    # Flip to ``False`` if you need to suppress all person-name web
+    # calls (e.g. for a PII-sensitive audit).
+    verify_person: bool = True
     # Multi-row caps: skip clusters with fewer than this many distinct
     # rows (a 1-row "multi-row" cluster is just a single_cell), and
     # cap the number of records we send to the agent for a given
@@ -282,7 +302,7 @@ def should_verify(
     # whose header reads as a person-name field must NOT go to the web
     # unless the caller explicitly opts in. This has to happen before
     # the error_type branch below, otherwise PERSON columns with a
-    # whitelisted error_type (typo, text_inconsistency, ...) would
+    # whitelisted error_type (typo, inconsistency, ...) would
     # still leak through as ``OTHER`` via :func:`classify_cluster`.
     columns = cluster.get("columns") or []
     raw_header = ""
@@ -324,7 +344,7 @@ def should_verify(
         multicol_ok = {
             "fd_violation",
             "inter_table_inconsistency",
-            "text_inconsistency",
+            "inconsistency",
             "semantic_incompatible",
         }
         return et_match or any(t in multicol_ok for t in et_list)

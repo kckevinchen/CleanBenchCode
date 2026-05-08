@@ -56,7 +56,7 @@ _EMBEDDED_NEWLINE_RE = re.compile(r"[\r\n\t]")
 @register_detector
 class WhitespaceDetector(HeuristicDetector):
     name = "whitespace"
-    default_error_type = "text_inconsistency"
+    default_error_type = "inconsistency"
 
     def __init__(
         self,
@@ -84,7 +84,7 @@ class WhitespaceDetector(HeuristicDetector):
                     source=source,
                     row=row,
                     column=str(col),
-                    error_type="text_inconsistency",
+                    error_type="inconsistency",
                     detector=self.name,
                     observed=self._truncate(text),
                     explanation="; ".join(p["msg"] for p in problems),

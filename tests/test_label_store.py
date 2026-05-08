@@ -168,6 +168,58 @@ class TestConcurrentAppend:
 
 
 # ---------------------------------------------------------------------------
+# Batched append (single fsync)
+# ---------------------------------------------------------------------------
+
+
+class TestAppendMany:
+    def test_persists_and_indexes_all(self, tmp_path: Path) -> None:
+        path = tmp_path / "labels.jsonl"
+        s = LabelStore(path)
+        s.append_many([_label(f"b-{i}") for i in range(5)])
+        # On-disk: one line per record.
+        assert len(path.read_text().splitlines()) == 5
+        # In-memory: latest_by_target is updated for every record.
+        latest = s.latest_by_target()
+        assert {f"b-{i}" for i in range(5)} <= set(latest)
+        # Reloading from disk yields the same set.
+        s2 = LabelStore(path)
+        ids = sorted(r.target_id for r in s2.all())
+        assert ids == [f"b-{i}" for i in range(5)]
+
+    def test_empty_input_is_noop(self, tmp_path: Path) -> None:
+        path = tmp_path / "labels.jsonl"
+        s = LabelStore(path)
+        s.append_many([])
+        assert not path.exists() or path.read_text() == ""
+        assert s.all() == []
+
+    def test_latest_collision_resolves_to_last_in_batch(
+        self, tmp_path: Path,
+    ) -> None:
+        path = tmp_path / "labels.jsonl"
+        s = LabelStore(path)
+        s.append_many([
+            _label("dup", status=LabelStatus.TP, note="first"),
+            _label("dup", status=LabelStatus.FP, note="second"),
+        ])
+        latest = s.latest_for("dup")
+        assert latest is not None
+        assert latest.status == LabelStatus.FP
+        assert latest.note == "second"
+
+    def test_interleaves_with_append(self, tmp_path: Path) -> None:
+        # Mixing single + batched appends preserves order on disk.
+        path = tmp_path / "labels.jsonl"
+        s = LabelStore(path)
+        s.append(_label("a"))
+        s.append_many([_label("b"), _label("c")])
+        s.append(_label("d"))
+        s2 = LabelStore(path)
+        assert [r.target_id for r in s2.all()] == ["a", "b", "c", "d"]
+
+
+# ---------------------------------------------------------------------------
 # cell_target_id helper
 # ---------------------------------------------------------------------------
 

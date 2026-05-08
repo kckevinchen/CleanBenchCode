@@ -400,3 +400,76 @@ class TestLinguaEnglish:
         ok, detail = mod._lingua_english(df, min_english_prob=0.5)
         assert ok
         assert detail.get("error") == "lingua_not_installed"
+
+
+# ---------------------------------------------------------------------------
+# Empty-CSV rejection (data-prep filter)
+# ---------------------------------------------------------------------------
+
+
+class TestEmptyCsvRejection:
+    """The bing21 corpus contains a few thousand whitespace-only CSVs
+    that would crash ``pandas.read_csv`` with ``EmptyDataError``. Both
+    curation entry points (``curate.py`` and ``curate_pbi_min.py``)
+    must reject these explicitly so the curated dataset never carries
+    them downstream into the cleaning runner."""
+
+    def test_load_full_returns_none_on_empty(self, tmp_path, caplog) -> None:
+        from src.data_prep.curate import _load_full
+        p = tmp_path / "empty.csv"
+        # The exact byte layout that triggered the original crash:
+        # four whitespace-only CRLF lines, 12 bytes total.
+        p.write_bytes(b"   \r\n" * 4)
+        with caplog.at_level("WARNING", logger="src.data_prep.curate"):
+            df = _load_full(p)
+        assert df is None
+        # The misleading "Failed to load" warning must NOT fire for
+        # known-empty files (it's expected, not a failure).
+        assert not any("Failed to load" in r.message for r in caplog.records)
+
+    def test_load_full_returns_none_on_zero_byte(self, tmp_path) -> None:
+        from src.data_prep.curate import _load_full
+        p = tmp_path / "zero.csv"
+        p.write_bytes(b"")
+        assert _load_full(p) is None
+
+    def test_load_full_loads_real_csv(self, tmp_path) -> None:
+        from src.data_prep.curate import _load_full
+        p = tmp_path / "real.csv"
+        p.write_text("a,b\n1,2\n3,4\n")
+        df = _load_full(p)
+        assert df is not None
+        assert list(df.columns) == ["a", "b"]
+        assert len(df) == 2
+
+    def test_curate_pbi_min_rejects_empty(self, tmp_path) -> None:
+        from src.data_prep.curate_pbi_min import _process_csv
+        p = tmp_path / "empty.csv"
+        p.write_bytes(b"   \r\n" * 4)
+        df, detail = _process_csv(
+            p,
+            max_avg_col_chars=50.0,
+            langdetect_min_prob=0.5,
+            max_empty_cell_ratio=0.3,
+            max_rows=None,
+            seed=0,
+        )
+        assert df is None
+        assert detail["status"] == "rejected"
+        assert detail["reason"] == "empty_csv"
+
+    def test_curate_pbi_min_rejects_zero_byte(self, tmp_path) -> None:
+        from src.data_prep.curate_pbi_min import _process_csv
+        p = tmp_path / "zero.csv"
+        p.write_bytes(b"")
+        df, detail = _process_csv(
+            p,
+            max_avg_col_chars=50.0,
+            langdetect_min_prob=0.5,
+            max_empty_cell_ratio=0.3,
+            max_rows=None,
+            seed=0,
+        )
+        assert df is None
+        assert detail["status"] == "rejected"
+        assert detail["reason"] == "empty_csv"

@@ -127,8 +127,8 @@ class TestFindUnionableGroups:
         assert "c.csv" not in groups[0].sheets
 
     def test_below_threshold_no_group(self) -> None:
-        # With only 1 of 3 columns shared the Jaccard is 1/5 = 0.2,
-        # below the 0.5 default - no group is emitted.
+        # With only 1 of 5 union columns shared the Jaccard is 1/5 = 0.2,
+        # below the 0.25 default - no group is emitted.
         df_a = pd.DataFrame({"a": [1], "b": [2], "c": [3]})
         df_b = pd.DataFrame({"a": [1], "x": [9], "y": [8]})
         frames = {"a.csv": df_a, "b.csv": df_b}

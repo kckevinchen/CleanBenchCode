@@ -1,16 +1,20 @@
-"""Live regression test: re-probe the columns that produced NFI singletons
-in the kmax sweep ``20260501T001835Z_gpt-5.2`` run, using the *new*
-prompt with the QUANTITATIVE-COLUMN GATE.
+"""Live regression test: re-probe the columns that produced
+number-format singletons in the kmax sweep
+``20260501T001835Z_gpt-5.2`` run, using the *new* merged
+``inconsistency`` prompt with the QUANTITATIVE-COLUMN GATE.
 
 Why this exists
 ---------------
-The kmax sweep produced 89 ``number_format_inconsistency`` singletons,
-~80 of which originated from columns that are CODES / IDENTIFIERS, not
-quantities (zip, FIPS, county/town code, etc.). We diagnosed those as
-false positives and patched the prompt to fast-skip code/identifier
-columns. This test re-runs the patched prompt on the exact (source,
-column) pairs and asserts the model now returns ``issues == []`` for
-the code-column cases.
+The kmax sweep produced 89 ``number_format_inconsistency`` singletons
+(this taxonomy has since been merged into the umbrella
+``inconsistency`` type), ~80 of which originated from columns that
+are CODES / IDENTIFIERS, not quantities (zip, FIPS, county/town
+code, etc.). We diagnosed those as false positives and patched the
+prompt to fast-skip code/identifier columns under the number_format
+sub-pattern. This test re-runs the patched prompt on the exact
+(source, column) pairs and asserts the model now returns
+``issues == []`` for the code-column cases (or, when issues fire,
+none of them claims the number_format sub-pattern).
 
 Cost / safety
 -------------
@@ -174,8 +178,12 @@ def _build_single_column_chunk(csv_path: Path, column: str) -> CsvChunk:
 
 
 def _query_nfi(llm: LLMClient, taxonomy, chunk: CsvChunk):
-    nfi = taxonomy.get("number_format_inconsistency")
-    rendered = taxonomy.render_user_prompt(nfi, chunk)
+    # The five legacy ``*_inconsistency`` types were merged into a
+    # single ``inconsistency`` umbrella; the number_format
+    # sub-pattern's QUANTITATIVE-COLUMN GATE now lives under the
+    # merged type's notes.
+    et = taxonomy.get("inconsistency")
+    rendered = taxonomy.render_user_prompt(et, chunk)
     response = llm.query(
         MODEL,
         rendered,
@@ -225,10 +233,20 @@ def test_nfi_singleton_arm_under_new_prompt(
     )
 
     if expect_empty:
-        assert issues == [], (
-            "Patched NFI prompt still flagged a code/identifier column "
-            "as a number-format problem. The QUANTITATIVE-COLUMN GATE "
-            "must fast-skip these to {{\"issues\": []}}." + summary
+        # The merged ``inconsistency`` prompt is allowed to fire on the
+        # OTHER sub-patterns (text / casing / pattern / punctuation) on
+        # a code/identifier column - only the number_format
+        # sub-pattern is forbidden by the QUANTITATIVE-COLUMN GATE.
+        nfi_hits = [
+            i for i in issues
+            if "number_format" in str(i.get("explanation", "")).lower()
+        ]
+        assert nfi_hits == [], (
+            "Patched ``inconsistency`` prompt still flagged a "
+            "code/identifier column as a number-format problem. The "
+            "QUANTITATIVE-COLUMN GATE in the merged prompt's notes "
+            "must skip the number_format sub-pattern on these "
+            "columns." + summary
         )
     else:
         # Sanity: prompt is well-formed and produced a parseable result.

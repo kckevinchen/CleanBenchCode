@@ -703,6 +703,94 @@ def test_stop_when_chao1_uses_upper_ci_not_point() -> None:
     assert evaluate_stop(est, cfg_loose)[0] == "saturated"
 
 
+def test_stop_when_both_saturates_when_S_obs_zero_after_k_min() -> None:
+    """A column with no errors should saturate, not exhaust.
+
+    Regression: when S_obs=0 the Chao1 missing-fraction is degenerate.
+    We define the ratio to be 0 (no species observed -> no species
+    inferred missing) so that K consecutive empty passes saturate
+    under stop_when=both. The k_min and two-consecutive guards on
+    the caller prevent a premature stop at K=1.
+    """
+    cfg = _cfg(
+        stop_when="both",
+        epsilon=0.05,
+        epsilon_chao1=0.05,
+        k_min=3,
+        k_max=15,
+        require_two_consecutive=True,
+    )
+
+    # Pass 1 (K=1): below k_min, criterion holds vacuously but the
+    # k_min gate keeps us active. Streak does not advance.
+    s1, st1 = evaluate_stop(
+        _est(1, 0, p_miss=0.0, chao1_ci_95_high=0.0), cfg
+    )
+    assert s1 == "active"
+    assert st1 == 0
+
+    # Pass 2 (K=2): still below k_min.
+    s2, st2 = evaluate_stop(
+        _est(2, 0, p_miss=0.0, chao1_ci_95_high=0.0),
+        cfg,
+        previous_status=s1,
+        previous_streak=st1,
+    )
+    assert s2 == "active"
+    assert st2 == 0
+
+    # Pass 3 (K=3): k_min reached, criterion holds -> streak=1.
+    # Two-consecutive still requires another pass.
+    s3, st3 = evaluate_stop(
+        _est(3, 0, p_miss=0.0, chao1_ci_95_high=0.0),
+        cfg,
+        previous_status=s2,
+        previous_streak=st2,
+    )
+    assert s3 == "active"
+    assert st3 == 1
+
+    # Pass 4 (K=4): two consecutive empties -> saturated.
+    s4, st4 = evaluate_stop(
+        _est(4, 0, p_miss=0.0, chao1_ci_95_high=0.0),
+        cfg,
+        previous_status=s3,
+        previous_streak=st3,
+    )
+    assert s4 == "saturated"
+    assert st4 == 2
+
+
+def test_stop_when_both_does_not_exhaust_clean_column_under_k_max() -> None:
+    """Before this fix, a clean column would burn all k_max passes
+    under stop_when=both because the Chao1 ratio at S_obs=0 was inf.
+    Pin the new behaviour: it saturates well before k_max."""
+    cfg = _cfg(
+        stop_when="both",
+        epsilon=0.05,
+        epsilon_chao1=0.05,
+        k_min=3,
+        k_max=15,
+        require_two_consecutive=True,
+    )
+    status = "active"
+    streak = 0
+    saturated_at: int | None = None
+    for k in range(1, cfg.k_max + 1):
+        status, streak = evaluate_stop(
+            _est(k, 0, p_miss=0.0, chao1_ci_95_high=0.0),
+            cfg,
+            previous_status=status,
+            previous_streak=streak,
+        )
+        if status == "saturated":
+            saturated_at = k
+            break
+    assert saturated_at is not None
+    assert saturated_at < cfg.k_max
+    assert status == "saturated"
+
+
 def test_stop_when_default_is_gt_for_back_compat() -> None:
     """Omitting `stop_when` from configs falls through to ``"gt"``,
     preserving pre-existing behaviour."""

@@ -51,14 +51,15 @@ logger = logging.getLogger("run_normalization_experiment")
 
 
 # The external heuristic flags two-or-more variants of the same
-# entity in one column - the LLM-taxonomy definition of
-# ``text_inconsistency``. Tagging every emitted issue with this single
-# bucket keeps ``experiments.compare_runs`` (whose ERROR_TYPE_BUCKETS
-# table maps types onto buckets) able to diff the heuristic against
-# the LLM directly. Refer to ``error_type.csv`` /
-# ``prompts/error_types.yaml`` for the canonical names.
-EXT_ERROR_TYPE = "text_inconsistency"
-EXT_ERROR_TYPE_NAME = "Text Inconsistency"
+# entity in one column - the "text" sub-pattern of the merged
+# ``inconsistency`` umbrella in the LLM taxonomy. Tagging every
+# emitted issue with this single bucket keeps
+# ``experiments.compare_runs`` (whose ERROR_TYPE_BUCKETS table maps
+# types onto buckets) able to diff the heuristic against the LLM
+# directly. Refer to ``error_type.csv`` / ``prompts/error_types.yaml``
+# for the canonical names.
+EXT_ERROR_TYPE = "inconsistency"
+EXT_ERROR_TYPE_NAME = "Inconsistency"
 EXT_ERROR_TYPE_CATEGORY = "Single-Column / Inconsistency"
 EXT_CATEGORY = EXT_ERROR_TYPE_CATEGORY.lower()
 

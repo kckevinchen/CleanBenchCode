@@ -88,7 +88,8 @@
           <legend>LLM</legend>
           <label>
             <span>Model</span>
-            <input id="model" type="text" placeholder="gpt-5.2" />
+            <input id="model" type="text" placeholder="gpt-5.2,gpt-5.4,gpt-5.5 (GPT-5 family)" />
+            <small class="hint">Single name (e.g. <code>gpt-5.2</code>) sends every call to that model. A comma-separated list spreads calls across the family round-robin within ONE run, so concurrent calls aren't bottlenecked on a single deployment's quota. Empty defaults to the GPT-5 family.</small>
           </label>
           <label>
             <span>Reasoning effort</span>
@@ -325,6 +326,47 @@
           </p>
         </fieldset>
 
+        <!-- Multi-table cross-sheet pipeline (only relevant when inter_table_inconsistency is selected) -->
+        <fieldset id="mt-block" class="mt-block" hidden>
+          <legend>Multi-table cross-sheet <span class="muted" style="font-weight: normal;">(only relevant when <code>inter_table_inconsistency</code> is selected)</span></legend>
+          <p class="muted" style="grid-column: 1 / -1; margin: 0 0 4px 0; font-size: 12px;">
+            End-to-end pipeline triggered automatically when
+            <code>inter_table_inconsistency</code> is in the selected
+            error types and at least 2 CSV sheets share a workbook
+            directory. Steps: priors &rarr; LLM-confirm groups &rarr;
+            per-row violation detection (semantic LLM detector by
+            default; switch to compiler+verifier for cheaper LLM
+            spend). Outputs land in this run's
+            <code>multi_table_groups.jsonl</code> +
+            <code>multi_table_violations.jsonl</code> alongside the
+            single-table findings.
+          </p>
+          <label>
+            <span>Reuse groups from <span class="muted">(skip steps 1+2)</span></span>
+            <input id="mt-from" type="text" placeholder="run id or directory with multi_table_groups.jsonl" />
+          </label>
+          <label>
+            <span>Strategy</span>
+            <select id="mt-strategy">
+              <option value="">(default: semantic)</option>
+              <option value="semantic">semantic&nbsp;&mdash; one LLM call per (group, page); catches semantic variants</option>
+              <option value="compiler">compiler&nbsp;&mdash; deterministic compiler + LLM verifier; cheaper but blind to abbreviation/format drift</option>
+            </select>
+          </label>
+          <label>
+            <span>Semantic max rows per page</span>
+            <input id="mt-semantic-rows" type="number" min="1" placeholder="50" />
+          </label>
+          <label>
+            <span>Semantic max pages per group</span>
+            <input id="mt-semantic-max-pages" type="number" min="1" placeholder="(all)" />
+          </label>
+          <label class="checkbox" style="grid-column: 1 / -1;">
+            <input id="mt-no-verify" type="checkbox" />
+            <span>Skip step 4 LLM verifier <span class="muted">(compiler strategy only)</span></span>
+          </label>
+        </fieldset>
+
         <!-- Dry-run preview + submit -->
         <div class="form-actions">
           <button type="button" id="show-cmd">Preview command</button>
@@ -372,7 +414,8 @@
           <legend>LLM</legend>
           <label>
             <span>Model</span>
-            <input id="rel-model" type="text" placeholder="gpt-5.2" />
+            <input id="rel-model" type="text" placeholder="gpt-5.2,gpt-5.4,gpt-5.5 (GPT-5 family)" />
+            <small class="hint">Single name sends every call to that model. A comma-separated list spreads calls across the family round-robin within ONE run. Empty defaults to the GPT-5 family.</small>
           </label>
           <label>
             <span>Reasoning effort</span>

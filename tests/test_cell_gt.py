@@ -34,7 +34,7 @@ def test_iter_species_keys_excludes_error_type_from_cell_id() -> None:
 def test_same_cell_different_error_types_is_one_species() -> None:
     runs = [
         [_det("a.csv", "typo", 5)],
-        [_det("a.csv", "casing_inconsistency", 5)],
+        [_det("a.csv", "inconsistency", 5)],
     ]
     species = list(aggregate_runs(runs).values())
     est = estimate(species, num_runs=2)
@@ -44,8 +44,8 @@ def test_same_cell_different_error_types_is_one_species() -> None:
     assert est.good_turing_missing_mass == 0.0
 
     only = species[0]
-    assert sorted(only.error_types) == ["casing_inconsistency", "typo"]
-    assert only.runs_by_error_type == {"typo": [0], "casing_inconsistency": [1]}
+    assert sorted(only.error_types) == ["inconsistency", "typo"]
+    assert only.runs_by_error_type == {"typo": [0], "inconsistency": [1]}
 
 
 def test_singleton_survives_when_only_one_run_finds_a_cell() -> None:
@@ -66,7 +66,7 @@ def test_dedup_within_a_single_run() -> None:
     runs = [
         [
             _det("a.csv", "typo", 3, col="c"),
-            _det("a.csv", "casing_inconsistency", 3, col="c"),
+            _det("a.csv", "inconsistency", 3, col="c"),
         ],
         [],
     ]
@@ -87,7 +87,7 @@ def test_dedup_within_a_single_run() -> None:
 def test_per_error_type_breakdown() -> None:
     runs = [
         [_det("a.csv", "typo", 5)],
-        [_det("a.csv", "casing_inconsistency", 5)],
+        [_det("a.csv", "inconsistency", 5)],
     ]
     species = list(aggregate_runs(runs).values())
     by_type = estimate_by_group(species, num_runs=2, key="error_type")
@@ -95,7 +95,7 @@ def test_per_error_type_breakdown() -> None:
     # Each type sees the cell in exactly one run -> per-type singleton.
     assert by_type["typo"].n_observed == 1
     assert by_type["typo"].frequency_counts[1] == 1
-    assert by_type["casing_inconsistency"].frequency_counts[1] == 1
+    assert by_type["inconsistency"].frequency_counts[1] == 1
 
 
 def test_per_source_breakdown_partitions_cells() -> None:

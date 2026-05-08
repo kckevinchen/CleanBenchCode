@@ -242,8 +242,9 @@ def flatten_issues(
                     row in frame.index,
                 )
             # Optional group-level listing of all rows sharing this defect
-            # (used by text_inconsistency / pattern_inconsistency in the
-            # simple taxonomy). Normalise to a list of ints and drop the
+            # (used by inconsistency in the simple taxonomy, where the
+            # text / pattern sub-patterns naturally produce group-level
+            # findings). Normalise to a list of ints and drop the
             # ones that don't reference an actual row in the source frame
             # (defends against LLM hallucinations like "row 9999" in a
             # 100-row CSV - those would otherwise propagate into clusters

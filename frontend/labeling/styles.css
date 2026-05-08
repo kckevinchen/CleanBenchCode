@@ -33,11 +33,73 @@ html, body {
 body {
   display: grid;
   grid-template-columns: 320px 1fr 380px;
-  grid-template-rows: 56px 1fr 32px;
+  /* Header row is ``auto`` so the title + progress pills + actions
+     can wrap onto a second line on narrow viewports without clipping
+     under ``body { overflow: hidden }``. The footer keeps its fixed
+     32px; the centre row eats the rest. */
+  grid-template-rows: auto 1fr 32px;
   grid-template-areas:
     "header header header"
     "sidebar center detail"
     "footer footer footer";
+}
+
+/* Responsive shrinks: the workbench is a 3-pane desktop layout, but
+   the side panels need to give ground when the viewport narrows so
+   the centre CSV viewer stays usable. We tighten the sidebar +
+   detail at two breakpoints, then collapse them entirely on tablet-
+   sized screens. The body grid is the only place these widths are
+   declared; everything inside flows with the resulting column. */
+@media (max-width: 1400px) {
+  body { grid-template-columns: 300px 1fr 340px; }
+  header { gap: 10px 16px; padding: 6px 16px; }
+  header h1 { font-size: 14px; }
+  header .actions { font-size: 12px; gap: 8px; }
+  header .actions a { padding: 5px 10px; }
+}
+@media (max-width: 1200px) {
+  body { grid-template-columns: 280px 1fr 300px; }
+  header { gap: 8px 14px; padding: 6px 14px; }
+  header .progress { font-size: 11.5px; }
+  header .progress .pill { padding: 2px 8px; }
+  header .actions { font-size: 11.5px; gap: 6px; }
+  header .actions a { padding: 4px 9px; border-radius: 5px; }
+  /* On the export dropdown shrink the select/anchor too so the
+     control fits next to the other links instead of stretching. */
+  header .actions .export-single select { font-size: 11px; }
+  header .actions .export-single a { font-size: 11px; }
+}
+@media (max-width: 1024px) {
+  body { grid-template-columns: 260px 1fr 280px; }
+  header h1 { font-size: 13px; }
+  header .meta { font-size: 11px; }
+}
+@media (max-width: 900px) {
+  /* Tablet / narrow window: stack the three panes vertically. The
+     sidebar (queue + filters) and the detail (metadata + verdict)
+     drop below the centre CSV viewer so neither chokes the grid. */
+  html, body { height: auto; overflow: auto; }
+  body {
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+  }
+  header { padding: 8px 12px; gap: 8px 12px; }
+  header .title { flex: 1 1 100%; }
+  header .progress { flex: 1 1 100%; order: 3; }
+  header .actions { flex: 0 1 auto; }
+  .sidebar { border-right: none; border-bottom: 1px solid var(--border); max-height: 50vh; }
+  .detail { border-left: none; border-top: 1px solid var(--border); }
+  .center { min-height: 50vh; }
+}
+@media (max-width: 600px) {
+  /* Phone-ish: drop the in-header docs/export anchors to a smaller,
+     wrappable grid so the row doesn't visually dominate the page. */
+  header { padding: 6px 10px; }
+  header .actions { width: 100%; justify-content: flex-start; }
+  header .actions a { padding: 3px 8px; font-size: 11px; }
+  header .progress .pill { font-size: 11px; padding: 2px 7px; }
+  footer { font-size: 10px; }
 }
 kbd {
   background: var(--panel-2);
@@ -77,32 +139,112 @@ body.saving #verdict-buttons button { opacity: 0.6; cursor: progress; }
 body.saving { cursor: progress; }
 
 /* -------- header -------- */
+/* The header is a flex row that wraps deterministically into TWO
+   logical rows on desktop:
+     row 1: [ title block (grows) ]                 [ actions ]
+     row 2: [ progress pills, span full width ]
+   The pills are forced to row 2 with ``flex: 1 1 100%; order: 99``
+   so they never share a row with the actions and never push the
+   actions off-screen on narrow viewports. */
 header {
   grid-area: header;
   display: flex;
   align-items: center;
-  gap: 20px;
-  padding: 0 20px;
+  flex-wrap: wrap;
+  column-gap: 16px;
+  row-gap: 4px;
+  padding: 6px 16px;
   border-bottom: 1px solid var(--border);
   background: linear-gradient(180deg, #0f172a, #0b1120);
+  /* min-width:0 ensures flex children can shrink past intrinsic
+     size when the viewport narrows; without it the long export
+     anchor / progress pill row force horizontal overflow. */
+  min-width: 0;
 }
-header h1 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: 0.2px; }
-header .meta { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
-header .title { display: flex; flex-direction: column; }
-header .progress { flex: 1; display: flex; gap: 8px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
+header h1 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: 0.2px; }
+header .meta { font-size: 11px; color: var(--muted); margin-top: 1px; }
+header .title {
+  display: flex;
+  flex-direction: column;
+  /* Title block grows and pushes actions to the right edge of
+     row 1; min-width:0 lets the inner ellipsis truncation work. */
+  flex: 1 1 220px;
+  min-width: 0;
+}
+header .title h1, header .title .meta {
+  /* Truncate the run id / annotator metadata gracefully when the
+     header gets squeezed instead of forcing the row to overflow. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+header .progress {
+  /* Always claims its own row by taking 100% basis with order:99,
+     so the title + actions row stays clean even when 8+ pills are
+     present. The pills themselves wrap inside the row as needed. */
+  flex: 1 1 100%;
+  order: 99;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  font-size: 11.5px;
+  color: var(--muted);
+  min-width: 0;
+}
 header .progress .pill {
-  padding: 3px 10px;
+  padding: 2px 8px;
   border-radius: 999px;
   background: var(--panel);
   border: 1px solid var(--border);
+  font-size: 11px;
+  white-space: nowrap;
 }
-header .progress .pill strong { color: var(--text); margin-right: 4px; font-weight: 600; }
-header .actions { display: flex; gap: 10px; font-size: 12.5px; }
+header .progress .pill strong { color: var(--text); margin-right: 3px; font-weight: 600; }
+header .actions {
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+  flex-wrap: wrap;
+  align-items: center;
+  /* Stays on row 1 next to the title; never grows. */
+  flex: 0 0 auto;
+}
 header .actions a {
-  padding: 6px 12px;
+  padding: 4px 10px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--panel);
+}
+/* Per-error-type export dropdown + download anchor live inside an
+   inline-flex group so they look like a single control even though
+   the <select> and the <a> are separate DOM nodes. */
+header .actions .export-single {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  overflow: hidden;
+}
+header .actions .export-single select {
+  border: 0;
+  border-right: 1px solid var(--border);
+  padding: 4px 8px;
+  background: transparent;
+  font: inherit;
+  color: var(--text);
+  max-width: 14em;
+}
+header .actions .export-single a {
+  border: 0;
+  border-radius: 0;
+  padding: 6px 10px;
+  background: transparent;
+}
+header .actions .export-single a[aria-disabled="true"] {
+  pointer-events: none;
+  opacity: 0.55;
 }
 
 /* -------- sidebar -------- */
@@ -115,13 +257,85 @@ header .actions a {
   overflow: hidden;
 }
 .filters {
-  padding: 10px 12px;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
+  padding: 8px 10px;
+  /* Stack filters vertically so each multi-select dropdown gets the
+     full 320 px sidebar width. Splitting Status + Column status into
+     a 50/50 grid was cramped enough that long-ish facet labels wrap
+     and the trigger buttons truncate. With a single column, each row
+     has a clear label/control pair and consistent spacing. */
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   border-bottom: 1px solid var(--border);
 }
-.filters label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--muted); }
+.filters label,
+.filters .filter-cell {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  /* Two-column row: short fixed-width label on the left, the multi-
+     filter trigger eating the remaining width on the right. The
+     label keeps its muted micro-text styling. */
+  gap: 6px 10px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.filters .filter-cell > span:first-child {
+  flex: 0 0 100px;
+  text-align: right;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  font-size: 10px;
+  /* Wrap long labels gracefully (e.g. "Column status") without
+     pushing the trigger button off-screen. */
+  word-break: break-word;
+}
+.filters .filter-cell .multi-filter { flex: 1 1 auto; min-width: 0; }
+.filters .filter-cell-wide { /* no-op now that all filters are full-width */ }
+/* Source filter cell can hold an extra ``xlsx-actions`` span (browse /
+   open-folder buttons for xlsx-backed runs). Allow that span to wrap
+   onto its own line below the trigger so it doesn't crowd the
+   multi-filter button on a 320 px sidebar. */
+.filters #filter-source-xlsx {
+  flex: 0 0 100%;
+  margin-left: 110px; /* aligns under the multi-filter, past the label gutter */
+}
+/* Inline help marker next to a filter label (e.g. "Column status").
+   Subtle by default; brightens on hover to invite reading the title
+   tooltip, which carries the explanation. */
+.filters .filter-cell .info {
+  display: inline-block;
+  margin-left: 3px;
+  cursor: help;
+  font-size: 10px;
+  opacity: 0.7;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.filters .filter-cell .info:hover { opacity: 1; color: var(--accent); }
+
+/* Narrow sidebar: at the 1200 / 1024 / 900 breakpoints above, the
+   horizontal "label | trigger" filter row gets cramped (the trigger
+   button compresses below the source filename ellipsis size). Drop
+   back to a label-above-trigger stack so each control gets the full
+   sidebar width. The label keeps its mini-caps treatment but
+   left-aligns once it isn't sharing the row with the trigger. */
+@media (max-width: 1200px) {
+  .filters { padding: 6px 8px; gap: 5px; }
+  .filters .filter-cell {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 2px;
+  }
+  .filters .filter-cell > span:first-child {
+    flex: 0 0 auto;
+    text-align: left;
+    font-size: 9.5px;
+  }
+  .filters #filter-source-xlsx { margin-left: 0; }
+  .multi-filter-btn { padding: 3px 6px; font-size: 11.5px; }
+}
 .filters select {
   background: var(--panel-2);
   color: var(--text);
@@ -130,6 +344,158 @@ header .actions a {
   padding: 4px 6px;
   font: inherit;
   font-size: 12px;
+}
+
+/* Multi-select checkbox dropdown widget. Used in the label sidebar so
+   the operator can filter the queue by multiple sources / statuses /
+   error types simultaneously. */
+.multi-filter { position: relative; }
+.multi-filter-btn {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+}
+.multi-filter-btn .caret { color: var(--muted); font-size: 10px; }
+.multi-filter-btn .multi-filter-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.multi-filter-pop {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  min-width: 100%;
+  width: 280px;
+  max-width: calc(100vw - 32px);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  z-index: 50;
+  max-height: 320px;
+  /* Two-row flex layout: a non-scrolling actions header on top and a
+     scrollable single-column options body below. The body scrolls in
+     both directions so long pills (full filenames,
+     ``inter_table_inconsistency``) remain reachable; the user can
+     also drag the bottom-right corner to grow the popover. */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  resize: both;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+/* The HTML ``hidden`` attribute defaults to ``display: none``, but
+   our explicit ``display: flex`` above wins over it. Restore the
+   intended hide-by-default behaviour so popovers stay closed until
+   the user clicks the trigger. */
+.multi-filter-pop[hidden] { display: none; }
+.multi-filter-actions {
+  display: flex;
+  gap: 4px;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+  flex: 0 0 auto;
+}
+.multi-filter-actions button {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 3px;
+  padding: 1px 6px;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.multi-filter-actions button:hover { color: var(--text); }
+.multi-filter-options {
+  padding: 6px;
+  /* Single column layout: each option pill occupies its own row.
+     ``align-items: flex-start`` lets each pill keep its natural
+     content width so long values overflow horizontally instead of
+     wrapping or truncating, with the body's ``overflow: auto``
+     producing both scrollbars on demand. */
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+/* Each option is a clickable pill. Selected pills get an accent
+   border + tinted fill; unselected pills are subtle and blend in
+   with the popover background. Shared by every filter list (Source,
+   Status, Column status, Error type) so the four sidebar facets all
+   look like the same widget. */
+.multi-filter-opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  user-select: none;
+  /* No max-width: pills size to their content so long labels extend
+     past the popover's visible width and trigger horizontal scroll
+     rather than wrapping/truncating. */
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: normal;
+  line-height: 1.4;
+}
+.multi-filter-opt:hover { border-color: var(--accent); }
+.multi-filter-opt.selected {
+  background: rgba(96, 165, 250, 0.18);
+  border-color: var(--accent);
+  color: var(--text);
+}
+.multi-filter-opt.selected::before {
+  content: "✓";
+  color: var(--accent);
+  font-size: 10px;
+  margin-right: 2px;
+}
+.multi-filter-opt .opt-label {
+  /* Stay on one line so the pill width tracks the full label; the
+     options body provides horizontal scroll when needed. */
+  white-space: nowrap;
+}
+/* Column-status filter pills share the same font, size, padding and
+   selected styling as every other filter list. The ``col-status-*``
+   classes added by label.js are kept on the DOM (so future tweaks
+   could reintroduce per-state cues) but currently render no extra
+   styling to keep the four sidebar lists visually unified. */
+/* Source / Error type filter pills keep the same column-stack +
+   horizontal-scroll behaviour as the other filters; long labels
+   (full filenames, ``inter_table_inconsistency``) overflow rather
+   than truncate. */
+.multi-filter-group {
+  align-self: stretch;
+  font-size: 10.5px;
+  color: var(--muted);
+  padding: 6px 4px 2px;
+  border-top: 1px solid var(--border);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-top: 2px;
+}
+.multi-filter-group:first-child {
+  border-top: none;
+  margin-top: 0;
+  padding-top: 2px;
 }
 .queue { flex: 1; overflow-y: auto; }
 .queue .group-header {
@@ -222,16 +588,150 @@ header .actions a {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  min-height: 0;
 }
 .csv-head {
   padding: 8px 14px;
   border-bottom: 1px solid var(--border);
   display: flex;
   justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  /* Don't let a long workbook/sheet path force the centre pane to
+     overflow horizontally; the spans inside truncate via ellipsis. */
+  min-width: 0;
+}
+.csv-head > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.csv-head #csv-source { flex: 1 1 auto; }
+.csv-head #csv-pos { flex: 0 0 auto; max-width: 50%; text-align: right; }
+
+/* Exclusion bar: lives just under the CSV viewer header. Lets the
+   operator mark whole CSVs / rows / columns as too messy to label.
+   Records persist to <run_dir>/exclusions.jsonl. */
+.exclude-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
   font-size: 12px;
 }
+.exclude-bar .exclude-btn,
+.exclude-bar .exclude-input button,
+.exclude-active button {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 8px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.exclude-bar .exclude-btn:hover,
+.exclude-bar .exclude-input button:hover,
+.exclude-active button:hover { border-color: var(--accent); }
+.exclude-bar .exclude-input {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.exclude-bar .exclude-input label {
+  color: var(--muted);
+  font-size: 11px;
+}
+.exclude-bar input[type="text"] {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 6px;
+  font: inherit;
+  font-size: 12px;
+  width: 160px;
+}
+.exclude-active {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-left: auto;
+  align-items: center;
+}
+.exclude-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(248, 113, 113, 0.14);
+  border: 1px solid rgba(248, 113, 113, 0.5);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 11px;
+}
+.exclude-chip button {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  padding: 0 2px;
+}
+.exclude-chip button:hover { color: var(--text); }
+
+/* Visual marks for excluded slices. Strikethrough + dim so the
+   operator can still see content but knows it's been opted out. */
+.csv-viewer tr.row-excluded td,
+.csv-viewer td.col-excluded {
+  background: repeating-linear-gradient(
+    -45deg,
+    rgba(248, 113, 113, 0.06) 0,
+    rgba(248, 113, 113, 0.06) 6px,
+    transparent 6px,
+    transparent 12px
+  );
+  color: var(--muted);
+  text-decoration: line-through;
+}
+.csv-viewer th.col-excluded {
+  background: rgba(248, 113, 113, 0.18);
+  text-decoration: line-through;
+  color: var(--muted);
+}
+.csv-viewer.csv-excluded {
+  position: relative;
+}
+.csv-viewer.csv-excluded::before {
+  content: "this CSV is excluded";
+  position: sticky;
+  top: 0;
+  display: block;
+  text-align: center;
+  background: rgba(248, 113, 113, 0.25);
+  border-bottom: 1px solid rgba(248, 113, 113, 0.6);
+  padding: 4px 8px;
+  font-size: 12px;
+  color: var(--text);
+  z-index: 10;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.csv-viewer.csv-excluded table { opacity: 0.55; }
+
+/* Queue rows whose cluster lives on an excluded slice get the same
+   strikethrough treatment so the operator can spot them while
+   scrolling without hiding them entirely. */
+.queue .row.cluster-excluded .main { text-decoration: line-through; opacity: 0.6; }
 .muted { color: var(--muted); }
-.csv-viewer { flex: 1; overflow: auto; }
+.csv-viewer { flex: 1; overflow: auto; min-height: 0; }
 .csv-viewer table {
   border-collapse: collapse;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -275,6 +775,77 @@ header .actions a {
 }
 .csv-viewer td.clickable { cursor: pointer; }
 .csv-viewer td.clickable:hover { box-shadow: inset 0 0 0 2px var(--accent); }
+
+/* -------- whitespace markers --------
+   Surface leading/trailing spaces, multi-space runs, tabs, NBSP,
+   embedded newlines, and zero-width characters in CSV cells. Without
+   these markers a value like "Smith  " (trailing spaces) is visually
+   indistinguishable from "Smith", which makes typo / inconsistency
+   labelling guesswork. Rules match ``renderCsvCellHtml`` in label.js.
+
+   Regular spaces are PRESERVED inside the marker span so copy/paste
+   still produces the literal whitespace - the background colour is
+   the only visual change. Tabs / NBSP / line breaks / zero-width
+   characters are REPLACED with a glyph (->, NBSP, arrow, dot)
+   because they have no visible width otherwise. */
+.csv-viewer .ws-marker {
+  /* Make every marker visually distinct against any cell-state
+     background (cell-fp / cell-tp / etc.) without looking too loud. */
+  border-radius: 2px;
+  /* Preserve in-cell layout: don't let the marker push neighbouring
+     text around. */
+  padding: 0 1px;
+}
+/* Edge spaces are almost always a defect - paint them red. */
+.csv-viewer .ws-edge {
+  background: rgba(248, 113, 113, 0.35);
+  box-shadow: inset 0 -1px 0 rgba(248, 113, 113, 0.9);
+}
+/* Internal multi-space runs are suspicious but sometimes intentional
+   - paint them orange so the operator notices but isn't alarmed. */
+.csv-viewer .ws-internal {
+  background: rgba(245, 158, 11, 0.30);
+  box-shadow: inset 0 -1px 0 rgba(245, 158, 11, 0.9);
+}
+/* Tab / NBSP - visible glyph on a yellow chip. ``inline-block`` so
+   the glyph keeps a minimum width even when the column is squeezed
+   by ``text-overflow: ellipsis``. */
+.csv-viewer .ws-special {
+  display: inline-block;
+  min-width: 0.7em;
+  text-align: center;
+  background: rgba(245, 158, 11, 0.30);
+  color: #f59e0b;
+  font-weight: 700;
+}
+/* Line breaks inside a single-line cell are always a defect. */
+.csv-viewer .ws-newline {
+  display: inline-block;
+  min-width: 0.7em;
+  text-align: center;
+  background: rgba(167, 139, 250, 0.35);
+  color: #a78bfa;
+  font-weight: 700;
+}
+/* Zero-width characters - render as a thin red dot since the cell
+   would otherwise show nothing where they sit. */
+.csv-viewer .ws-zw {
+  display: inline-block;
+  min-width: 0.5em;
+  text-align: center;
+  background: rgba(248, 113, 113, 0.40);
+  color: #f87171;
+  font-weight: 700;
+}
+/* A small accent on cells that contain ANY whitespace anomaly so
+   the operator can spot them while scrolling, even when the markers
+   themselves are eaten by ``text-overflow: ellipsis`` on a narrow
+   column. The dotted underline is subtler than a full outline so it
+   doesn't compete with the .flagged / .cell-* state outlines. */
+.csv-viewer td.has-ws {
+  text-decoration: underline dotted rgba(248, 113, 113, 0.7);
+  text-underline-offset: 3px;
+}
 
 /* Floating popover for cell-level FN labelling and quick-correct on
    already-labelled cluster cells. Positioned by JS relative to the
@@ -391,9 +962,27 @@ header .actions a {
   overflow-y: auto;
   padding: 14px 16px;
 }
-.detail h2 { margin: 0 0 8px; font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.6px; color: var(--muted); }
+.detail h2 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+  /* Cluster ids like ``EDD47DD1.CSV__R00040-C000`` and long workbook
+     filenames must wrap on any character so they fit the narrow
+     detail pane instead of forcing a horizontal scrollbar. */
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
 .detail .block { margin-bottom: 14px; }
-.detail .cols { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.detail .cols {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  /* Long source / column lists shouldn't push past the pane edge. */
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
 .detail .sev-chip {
   display: inline-block; padding: 2px 8px; border-radius: 999px;
   font-size: 10.5px; font-weight: 700; letter-spacing: 0.5px;
@@ -411,6 +1000,60 @@ header .actions a {
 .detail .det-row .obs { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; color: var(--muted); margin: 4px 0; word-break: break-word; }
 .detail .det-row .fix { font-size: 11.5px; color: var(--text); }
 .detail .placeholder { color: var(--muted); padding: 20px; text-align: center; }
+
+/* Original / Fix block. Stacked rows per column ("Original: ..." then
+   "Fix: ...") so the panel stays readable when the LLM's fix is a
+   free-form instruction rather than a literal corrected value. */
+.detail .before-after .ba-row {
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+.detail .before-after .ba-row:last-child { margin-bottom: 0; }
+.detail .before-after .ba-col {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 4px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.detail .before-after .ba-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  margin-top: 4px;
+}
+.detail .before-after .ba-line:first-child { margin-top: 0; }
+.detail .before-after .ba-tag {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  font-weight: 600;
+  flex: none;
+  min-width: 56px;
+}
+.detail .before-after .ba-tag-fix { color: var(--accent); }
+.detail .before-after .ba-val {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--text);
+  word-break: break-word;
+  white-space: pre-wrap;
+  flex: 1 1 200px;
+  min-width: 0;
+}
+/* Fix value inherits the full styling of ``.ba-val`` above so the
+   Original and Fix rows render in the same monospace family and
+   size, keeping the before/after pair visually aligned. (Earlier
+   the fix had ``font-family: inherit`` because some LLM fixes are
+   free-form sentences; mono renders sentences fine and the
+   consistency is more important.) */
+.detail .before-after .ba-val.ba-empty { color: var(--muted); }
 
 /* -------- Web verification block --------
    Shown only when ``bundle.web_verification`` is non-null (the
@@ -434,6 +1077,28 @@ header .actions a {
 }
 .detail .block.web-verify .reasoning {
   font-size: 12px; color: var(--text); margin: 6px 0 8px;
+}
+/* Unreliable-reasoning warning: shown when the verifier downgraded
+   the agent's verdict to ambiguous because none of its claimed
+   evidence URLs were corroborated by real Web Search citations. The
+   reasoning text typically reads as confident ("Multiple authoritative
+   sources confirm...") despite being fabricated, so we wrap it in a
+   prominent amber banner instead of rendering it inline. */
+.detail .block.web-verify .reasoning.reasoning-warn {
+  border: 1px solid var(--sev-medium, #b45);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin: 6px 0 8px;
+  background: color-mix(in srgb, var(--sev-medium, #b45) 8%, transparent);
+}
+.detail .block.web-verify .reasoning.reasoning-warn .reasoning-warn-banner {
+  font-size: 11.5px; font-weight: 600;
+  color: var(--sev-medium, #b45);
+  margin-bottom: 6px;
+  line-height: 1.4;
+}
+.detail .block.web-verify .reasoning.reasoning-warn .reasoning-text {
+  font-size: 12px; color: var(--muted); font-style: italic;
 }
 .detail .block.web-verify ul.evidence {
   list-style: none; padding: 0; margin: 6px 0; font-size: 12px;
@@ -508,6 +1173,24 @@ header .actions a {
 }
 .field textarea { min-height: 60px; resize: vertical; }
 
+/* Corrected-value input prefilled from the LLM's ``synthesis.canonical_fix``
+   (or longest detection.suggested_fix). Visually distinct from a
+   value the operator typed: dashed-accent border, italicised text,
+   slightly muted background. As soon as the operator focuses or
+   types into the field, JS flips ``data-from-llm`` to ``"0"`` and
+   the styling reverts to the regular look. */
+.field input[data-from-llm="1"] {
+  border-style: dashed;
+  border-color: var(--accent);
+  font-style: italic;
+  color: var(--accent);
+  background: rgba(76, 134, 232, 0.08);
+}
+.field .llm-suggestion-hint {
+  color: var(--accent);
+  opacity: 0.85;
+}
+
 /* -------- footer -------- */
 footer.shortcuts {
   grid-area: footer;
@@ -539,11 +1222,12 @@ footer.shortcuts {
    viewer in the centre column so it shares the operator's main
    focus area without competing with the queue / detail panes. */
 .effort-panel {
+  flex: 0 0 auto;
   border-top: 1px solid var(--border);
   background: var(--panel);
   padding: 8px 12px 12px 12px;
   font-size: 12px;
-  max-height: 40vh;
+  max-height: 200px;
   overflow: auto;
 }
 .effort-panel > summary {
@@ -601,6 +1285,758 @@ footer.shortcuts {
 }
 .effort-table tr.effort-low td:nth-child(5) {
   color: var(--muted);
+}
+
+/* Column-audit action cell in the effort-table.
+   Hosts the "Verify column" button + the inline status badge that
+   shows in-flight job state OR cached audit counts. The button stays
+   compact so the audit column doesn't dominate the table; the badge
+   only takes space when there's something to show. */
+.effort-table td.audit-cell {
+  white-space: nowrap;
+}
+.audit-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.audit-btn {
+  font-size: 10px;
+  padding: 2px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(96, 165, 250, 0.08);
+  color: var(--text);
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.audit-btn:hover {
+  background: rgba(96, 165, 250, 0.20);
+  border-color: var(--accent);
+}
+.audit-btn:disabled {
+  opacity: 0.55;
+  cursor: progress;
+}
+/* Hot variant for budget-capped rows: the primary inspection target
+   per the user's "we want to do this for all the column that says
+   budget-capped" directive. */
+.audit-controls.audit-capped .audit-btn {
+  background: rgba(220, 38, 38, 0.16);
+  border-color: rgba(248, 113, 113, 0.55);
+  color: rgb(252, 165, 165);
+  font-weight: 600;
+}
+.audit-controls.audit-capped .audit-btn:hover {
+  background: rgba(220, 38, 38, 0.28);
+}
+.audit-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.audit-badge.running {
+  background: rgba(96, 165, 250, 0.18);
+  color: rgb(147, 197, 253);
+  /* Subtle pulse so a long-running job is visually alive. */
+  animation: audit-pulse 1.4s ease-in-out infinite;
+}
+@keyframes audit-pulse {
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 1.0; }
+}
+.audit-badge.failed {
+  background: rgba(220, 38, 38, 0.20);
+  color: rgb(252, 165, 165);
+}
+.audit-badge.fn-found {
+  background: rgba(220, 38, 38, 0.28);
+  color: rgb(254, 202, 202);
+  border: 1px solid rgba(248, 113, 113, 0.45);
+}
+.audit-badge.no-fn {
+  background: rgba(34, 197, 94, 0.16);
+  color: rgb(167, 243, 208);
+}
+
+/* Per-row mini progress bar - replaces the "Verify column" button +
+   badge while the audit job for that row is running. Layout:
+     [text - flex auto]  [bar - 60px]  [✕ - 14px]
+   Tight enough to fit the same column width as the idle-state
+   button so the table doesn't reflow on transition. */
+.audit-mini-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--muted);
+  white-space: nowrap;
+  /* Match the .audit-btn footprint so the column doesn't reflow
+     when we swap views. */
+  padding: 1px 4px;
+}
+.audit-mini-progress[hidden] { display: none; }
+.audit-mini-text {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: rgb(147, 197, 253);
+  min-width: 50px;
+}
+.audit-mini-bar {
+  display: inline-block;
+  width: 60px;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  position: relative;
+}
+.audit-mini-fill {
+  display: block;
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(
+    90deg,
+    rgba(96, 165, 250, 0.65) 0%,
+    rgba(248, 113, 113, 0.85) 100%
+  );
+  transition: width 0.4s ease-out;
+}
+.audit-mini-fill.indeterminate {
+  width: 100% !important;
+  background-image: linear-gradient(
+    90deg,
+    rgba(96, 165, 250, 0.55) 0%,
+    rgba(96, 165, 250, 0.10) 50%,
+    rgba(96, 165, 250, 0.55) 100%
+  );
+  background-size: 200% 100%;
+  animation: audit-indeterminate 1.4s linear infinite;
+}
+.audit-mini-cancel {
+  font-size: 10px;
+  line-height: 1;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 50%;
+  color: var(--muted);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.audit-mini-cancel:hover {
+  border-color: rgba(248, 113, 113, 0.55);
+  color: rgb(252, 165, 165);
+}
+/* Hot-tint for budget-capped rows mirrors the .audit-btn variant so
+   the row keeps its "important to audit" colour cue while running. */
+.audit-controls.audit-capped .audit-mini-text {
+  color: rgb(252, 165, 165);
+}
+.audit-controls.audit-capped .audit-mini-bar {
+  border-color: rgba(248, 113, 113, 0.45);
+}
+
+/* Bulk audit button in the effort-panel header. Right-aligned via
+   margin-left:auto so it sits to the right of the headline text. */
+.effort-panel .audit-all-btn {
+  margin-left: auto;
+  font-size: 11px;
+  padding: 3px 10px;
+  border: 1px solid rgba(248, 113, 113, 0.55);
+  background: rgba(220, 38, 38, 0.14);
+  color: rgb(252, 165, 165);
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.effort-panel .audit-all-btn:hover {
+  background: rgba(220, 38, 38, 0.26);
+}
+.effort-panel .audit-all-btn:disabled {
+  opacity: 0.55;
+  cursor: progress;
+}
+
+/* Live progress bar for an in-flight column-audit job. Sits between
+   the effort headline and the bulk button in the effort summary so
+   the operator sees real-time progress without expanding the panel.
+   Kept compact (single row, 11px text) to avoid cluttering the
+   summary; the bar itself is fixed-width so it doesn't reflow when
+   the headline text changes.
+
+   Layout:  [text - left]  [bar - 140px]  [cancel - optional] */
+.audit-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 12px;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  min-width: 0;
+}
+.audit-progress[hidden] {
+  display: none;
+}
+.audit-progress-text {
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 320px;
+}
+.audit-progress-bar {
+  display: inline-block;
+  flex: 0 0 140px;
+  height: 8px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.10);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  position: relative;
+}
+.audit-progress-fill {
+  display: block;
+  height: 100%;
+  /* Warm gradient: matches the budget-capped / FN-find palette so
+     the operator's eye associates "audit running" with the same
+     attention colour as the trigger buttons. */
+  background: linear-gradient(
+    90deg,
+    rgba(96, 165, 250, 0.55) 0%,
+    rgba(248, 113, 113, 0.75) 100%
+  );
+  width: 0%;
+  transition: width 0.4s ease-out;
+}
+.audit-progress-fill.indeterminate {
+  /* Animated stripes for the brief window before total_columns is
+     known. CSS-only so no JS animation tick is needed. */
+  width: 100% !important;
+  background-image: linear-gradient(
+    90deg,
+    rgba(96, 165, 250, 0.45) 0%,
+    rgba(96, 165, 250, 0.10) 50%,
+    rgba(96, 165, 250, 0.45) 100%
+  );
+  background-size: 200% 100%;
+  animation: audit-indeterminate 1.4s linear infinite;
+}
+@keyframes audit-indeterminate {
+  0%   { background-position: 0% 0; }
+  100% { background-position: -200% 0; }
+}
+.audit-progress-cancel {
+  font-size: 10px;
+  padding: 1px 6px;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: var(--muted);
+  border-radius: 3px;
+  cursor: pointer;
+}
+.audit-progress-cancel:hover {
+  border-color: rgba(248, 113, 113, 0.55);
+  color: rgb(252, 165, 165);
+}
+.audit-progress-cancel[hidden] {
+  display: none;
+}
+
+/* -------- per-cell audit verdict markers in the CSV viewer --------
+   Painted by ``paintAuditMarkerOnCell`` whenever an audited (source,
+   column, row) appears in the loaded CSV slice. The marker is a
+   small one-character glyph absolutely positioned in the top-right
+   of the cell, colour-coded by verdict. The same .audit-verdict-*
+   classes also tint the cell's left border so the operator can scan
+   a column at a glance without focusing on the corner glyph.
+
+   Painted ON TOP of the existing .cell-tp / .cell-fp / .cell-fn
+   verdict colours: the audit signal is independent of the LLM-
+   labelling state, so we can't reuse those backgrounds. We use a
+   left-side border accent instead so neither layer occludes the
+   other. */
+.csv-viewer td.audit-marked {
+  position: relative;
+  /* Reserve a tiny inset for the corner marker so very long values
+     don't run under it. The marker itself is positioned absolutely
+     so this padding only shows on cells that actually have one. */
+  padding-right: 18px;
+}
+.csv-viewer td.audit-verdict-confirmed_error {
+  border-left: 3px solid rgba(248, 113, 113, 0.85);
+}
+.csv-viewer td.audit-verdict-false_positive {
+  border-left: 3px solid rgba(34, 197, 94, 0.65);
+}
+.csv-viewer td.audit-verdict-ambiguous {
+  border-left: 3px solid rgba(255, 209, 128, 0.65);
+}
+.csv-viewer td.audit-verdict-errored {
+  border-left: 3px dashed rgba(160, 160, 160, 0.65);
+}
+/* FN-candidate cells (confirmed_error verdict on a cell the LLM did
+   NOT flag) get an additional pulse so the operator's eye is drawn
+   to them - this is the headline use case of the column-audit
+   feature. */
+.csv-viewer td.audit-fn-candidate-cell {
+  background: rgba(220, 38, 38, 0.10) !important;
+  border-left-width: 4px;
+  border-left-color: rgba(248, 113, 113, 1.0);
+  animation: audit-fn-pulse 2.4s ease-in-out infinite;
+}
+@keyframes audit-fn-pulse {
+  0%, 100% { box-shadow: inset 2px 0 0 rgba(248, 113, 113, 0.0); }
+  50%      { box-shadow: inset 4px 0 0 rgba(248, 113, 113, 0.55); }
+}
+
+/* The corner glyph itself. Rendered as a ``::after`` pseudo-element
+   on the <td> so it never appears in ``td.textContent`` or in
+   clipboard copies of the cell. The actual character is class-driven
+   so we don't have to thread a data-attribute through paintAuditMarkerOnCell.
+
+   Single character (E / check / ? / warn / !) placed in the top-right
+   of the cell. Colour comes from the verdict class on the parent <td>. */
+.csv-viewer td.audit-marked::after {
+  position: absolute;
+  top: 1px;
+  right: 2px;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 1px 3px;
+  border-radius: 2px;
+  pointer-events: none;
+  user-select: none;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  letter-spacing: 0;
+}
+.csv-viewer td.audit-verdict-confirmed_error::after {
+  content: "E";
+  background: rgba(220, 38, 38, 0.85);
+  color: #fff;
+}
+.csv-viewer td.audit-verdict-false_positive::after {
+  content: "\2713";
+  background: rgba(34, 197, 94, 0.75);
+  color: #052e1a;
+}
+.csv-viewer td.audit-verdict-ambiguous::after {
+  content: "?";
+  background: rgba(255, 209, 128, 0.85);
+  color: #3d2900;
+}
+.csv-viewer td.audit-verdict-errored::after {
+  content: "\26A0";
+  background: rgba(160, 160, 160, 0.55);
+  color: #fff;
+}
+/* FN-candidate cells (confirmed_error verdict on a cell the LLM did
+   NOT flag) get a brighter "!" punctuation so the operator's eye is
+   drawn to them - this is the headline use case of the column-audit
+   feature. The double-class selector raises specificity above the
+   plain ``audit-verdict-confirmed_error::after`` rule above. */
+.csv-viewer td.audit-fn-candidate-cell.audit-verdict-confirmed_error::after {
+  content: "!";
+  background: rgba(220, 38, 38, 1.0);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.30);
+  color: #fff;
+}
+
+/* Audited column header: small magnifying-glass glyph rendered via
+   ::after so we don't have to touch the renderer. Hover reveals a
+   tooltip with the FN-candidate count (set by the JS painter). */
+.csv-viewer th.audited {
+  position: relative;
+}
+.csv-viewer th.audited::after {
+  content: "\1F50D";  /* magnifying glass */
+  margin-left: 4px;
+  font-size: 9px;
+  color: var(--accent);
+  vertical-align: super;
+}
+
+/* -------- audit findings inside the cell popover --------
+   One block at the top of the popover, only painted when the
+   (source, column, row) appears in columnAuditCellLookup.
+   Layout matches .gt-stats so the two coexist visually. */
+.cell-popover .audit-pop-block {
+  margin: 8px 0 4px 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel-2);
+  font-size: 12px;
+}
+.cell-popover .audit-pop-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.cell-popover .audit-pop-label {
+  font-weight: 600;
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.cell-popover .audit-pop-row {
+  margin-top: 4px;
+  font-size: 11.5px;
+}
+.cell-popover .audit-pop-row .canon {
+  font-style: italic;
+  color: rgb(167, 243, 208);
+}
+.cell-popover .audit-fn-pill {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: rgba(220, 38, 38, 0.40);
+  color: rgb(254, 226, 226);
+  letter-spacing: 0.04em;
+}
+.cell-popover .audit-llm-flag-pill {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: rgba(96, 165, 250, 0.18);
+  color: rgb(147, 197, 253);
+}
+.cell-popover .audit-pop-reasoning {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.cell-popover .audit-pop-reasoning summary {
+  cursor: pointer;
+  user-select: none;
+}
+.cell-popover .audit-pop-reasoning .reasoning-text {
+  margin-top: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 180px;
+  overflow: auto;
+  border-left: 2px solid var(--border);
+  padding-left: 6px;
+}
+.cell-popover .audit-pop-evidence {
+  margin: 6px 0 0 0;
+  padding: 0 0 0 16px;
+  font-size: 11px;
+}
+.cell-popover .audit-pop-evidence li {
+  margin-bottom: 4px;
+  word-break: break-word;
+}
+.cell-popover .audit-pop-evidence a {
+  color: var(--accent);
+}
+.cell-popover .audit-pop-evidence .audit-evidence-quote {
+  color: var(--muted);
+  font-size: 10.5px;
+  font-style: italic;
+  margin-top: 1px;
+  border-left: 2px solid var(--border);
+  padding-left: 6px;
+}
+
+/* -------- column-audit panel --------
+   One collapsible block per audited (source, column). Lives below the
+   effort panel and is hidden until at least one audit has been run.
+   Each block shows a counts headline in its summary so the operator
+   can scan multiple pairs without expanding any. Expanding lazy-loads
+   the actual records into a table.
+
+   The whole panel is a <details> (in label.html) so the operator
+   can fully collapse it when many columns have been audited - the
+   summary stays a one-line, clickable headline that doubles as the
+   expand/collapse toggle. When expanded, the body is scrollable
+   inside a tight max-height so it never pushes the cluster detail
+   pane out of view. */
+.column-audit-panel {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+  font-size: 12px;
+}
+/* When closed the panel is just the one-line summary - no body
+   takes vertical space. */
+.column-audit-panel:not([open]) > .column-audit-head {
+  border-bottom: none;
+}
+.column-audit-head {
+  /* Sticky so the headline + collapse caret stay visible while the
+     body scrolls. */
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--panel);
+  cursor: pointer;
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  font-weight: 600;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  user-select: none;
+}
+.column-audit-head::-webkit-details-marker { display: none; }
+.column-audit-head .title::before {
+  /* Small caret driven by the parent <details>'s open state so the
+     toggle indicator is consistent with .effort-panel. */
+  content: "\25B8";  /* ▸ */
+  display: inline-block;
+  margin-right: 6px;
+  color: var(--muted);
+  transition: transform 0.15s ease-out;
+}
+.column-audit-panel[open] > .column-audit-head .title::before {
+  transform: rotate(90deg);
+}
+.column-audit-head #column-audit-headline {
+  font-weight: 400;
+  font-size: 11px;
+}
+/* Scrollable body. Fixed max-height keeps the panel from eating
+   the cluster-detail pane; tight inner padding keeps blocks dense
+   so 30+ audited columns are still browsable. */
+.column-audit-body {
+  max-height: 220px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 6px 12px 10px 12px;
+}
+.column-audit-block {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  margin-bottom: 4px;
+  background: var(--panel-2);
+}
+.column-audit-block.has-fn {
+  border-color: rgba(248, 113, 113, 0.45);
+  background: rgba(220, 38, 38, 0.06);
+}
+.column-audit-block > summary {
+  cursor: pointer;
+  padding: 6px 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.column-audit-block .audit-source {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--muted);
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.column-audit-block .audit-column {
+  font-weight: 600;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.column-audit-block summary .pill {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-weight: 600;
+  border: 1px solid transparent;
+}
+.column-audit-block summary .pill.pill-fn {
+  background: rgba(220, 38, 38, 0.28);
+  color: rgb(254, 202, 202);
+  border-color: rgba(248, 113, 113, 0.45);
+}
+.column-audit-block summary .pill.pill-ok {
+  background: rgba(34, 197, 94, 0.16);
+  color: rgb(167, 243, 208);
+}
+.column-audit-block summary .pill.pill-total {
+  background: rgba(96, 165, 250, 0.14);
+  color: rgb(147, 197, 253);
+}
+.column-audit-block summary .pill.pill-conf {
+  background: rgba(220, 38, 38, 0.16);
+  color: rgb(252, 165, 165);
+}
+.column-audit-block summary .pill.pill-fp {
+  background: rgba(34, 197, 94, 0.10);
+  color: rgb(167, 243, 208);
+}
+.column-audit-block summary .pill.pill-amb {
+  background: rgba(255, 209, 128, 0.16);
+  color: #ffd180;
+}
+.column-audit-block summary .pill.pill-err {
+  background: rgba(255, 209, 128, 0.10);
+  color: var(--muted);
+}
+.column-audit-detail {
+  padding: 4px 10px 10px 10px;
+}
+.audit-detail-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.audit-detail-table th, .audit-detail-table td {
+  text-align: left;
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.audit-detail-table th {
+  font-weight: 600;
+  color: var(--muted);
+}
+.audit-detail-table td.value {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.audit-detail-table td.canonical {
+  font-style: italic;
+  color: rgb(167, 243, 208);
+}
+.audit-detail-table td.evidence {
+  max-width: 320px;
+  overflow-wrap: anywhere;
+}
+.audit-detail-table td.rows .row-link {
+  cursor: pointer;
+  color: var(--accent);
+}
+.audit-detail-table td.rows .row-link:hover {
+  text-decoration: underline;
+}
+.audit-detail-table td.llm-flag {
+  font-weight: 600;
+  color: var(--muted);
+}
+.audit-verdict-pill {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 600;
+  border: 1px solid transparent;
+}
+.audit-verdict-pill.verdict-confirmed_error {
+  background: rgba(220, 38, 38, 0.20);
+  color: rgb(252, 165, 165);
+  border-color: rgba(248, 113, 113, 0.45);
+}
+.audit-verdict-pill.verdict-false_positive {
+  background: rgba(34, 197, 94, 0.14);
+  color: rgb(167, 243, 208);
+}
+.audit-verdict-pill.verdict-ambiguous {
+  background: rgba(255, 209, 128, 0.14);
+  color: #ffd180;
+}
+.audit-verdict-pill.verdict-errored {
+  background: rgba(120, 120, 120, 0.18);
+  color: var(--muted);
+}
+.fn-flag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 700;
+  background: rgba(220, 38, 38, 0.40);
+  color: rgb(254, 226, 226);
+  letter-spacing: 0.04em;
+}
+.audit-detail-table tr.audit-fn-candidate {
+  background: rgba(220, 38, 38, 0.08);
+}
+.audit-detail-table tr.audit-fn-candidate:hover {
+  background: rgba(220, 38, 38, 0.14);
+}
+.audit-row-actions {
+  white-space: nowrap;
+}
+.audit-row-actions button {
+  font-size: 10px;
+  padding: 1px 6px;
+  margin-right: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  border-radius: 3px;
+  cursor: pointer;
+}
+.audit-row-actions button:hover {
+  background: rgba(96, 165, 250, 0.18);
+  border-color: var(--accent);
+}
+.audit-row-actions button.audit-fn-btn {
+  border-color: rgba(248, 113, 113, 0.55);
+  background: rgba(220, 38, 38, 0.14);
+  color: rgb(252, 165, 165);
+  font-weight: 600;
+}
+.audit-row-actions button.audit-fn-btn:hover {
+  background: rgba(220, 38, 38, 0.28);
+}
+
+/* Compact responsive tweaks for narrow viewports: hide the evidence
+   column and shrink padding so the table doesn't horizontally
+   scroll on the inner panel. */
+@media (max-width: 1200px) {
+  .audit-detail-table td.evidence,
+  .audit-detail-table th:nth-child(6) {
+    display: none;
+  }
+}
+@media (max-width: 900px) {
+  .audit-detail-table td.canonical,
+  .audit-detail-table th:nth-child(5) {
+    display: none;
+  }
+  .effort-panel .audit-all-btn {
+    /* Drop to its own row at narrow widths so it doesn't squeeze
+       the headline's pills. */
+    flex: 1 1 100%;
+    margin-left: 0;
+    text-align: center;
+  }
+  .audit-progress {
+    /* Drop to its own row at narrow widths so the progress text
+       doesn't get clipped behind the bulk button. */
+    flex: 1 1 100%;
+    margin-left: 0;
+  }
+  .audit-progress-text {
+    max-width: none;
+    flex: 1 1 auto;
+  }
 }
 
 /* Per-(column, error_type) labelling-effort chips painted next to
@@ -719,6 +2155,16 @@ footer.shortcuts {
   color: var(--muted);
   border-color: var(--muted);
   font-style: italic;
+}
+/* Cross-sheet (multi-table) queue items. Tint slightly so the eye
+   can distinguish them from in-table cluster rows even before
+   reading the badge. */
+.queue .row.row-mt {
+  background: linear-gradient(
+    to right,
+    rgba(167, 139, 250, 0.06),
+    transparent 70%
+  );
 }
 /* Duplicate-group badge in the queue list: signals that the cluster
    spans multiple rows (row_duplication). Amber to match the

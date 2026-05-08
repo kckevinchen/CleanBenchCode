@@ -265,8 +265,12 @@ def is_saturated_by_estimate(
                      ``p_0 <= epsilon``.
     * ``"chao1"`` -- Chao1 upper-95 CI on missing count, normalised
                      by ``S_obs``, ``<=  epsilon_chao1``. When
-                     ``S_obs == 0`` the estimator is degenerate and
-                     this branch is treated as failing-safe (False).
+                     ``S_obs == 0`` the Chao1 estimator is degenerate
+                     (no f1/f2 to extrapolate from); the ratio is
+                     defined as 0.0, so K consecutive empty passes
+                     are read as "no species exist." The k_min /
+                     two-consecutive guards on the caller prevent a
+                     premature stop on a single empty draw.
     * ``"both"``  -- conjunction of the above.
 
     Returns ``True`` if the configured criterion is met, else
@@ -278,7 +282,7 @@ def is_saturated_by_estimate(
         f0_upper = max(0.0, chao1_ci_95_high - n_observed)
         chao1_ratio = f0_upper / n_observed
     else:
-        chao1_ratio = float("inf")
+        chao1_ratio = 0.0
     chao1_ok = chao1_ratio <= epsilon_chao1
 
     if stop_when == "gt":

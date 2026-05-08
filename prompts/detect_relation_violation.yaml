@@ -1,0 +1,96 @@
+# LLM-based row-level violation detector for relations the validator
+# could not turn into Python code.
+#
+# The validator (prompts/validate_relation.yaml) gives the LLM the
+# option of refusing to write `check(df)` when the rule depends on
+# external knowledge, free-text semantics, or anything else that does
+# not have a clean deterministic predicate over the table's columns.
+# Those relations get verifiable=false and would otherwise stay as
+# "discovered but never enforced".
+#
+# This prompt is the fallback. Instead of asking the LLM to emit code,
+# we hand it the full table (with row indices) plus the relation, and
+# ask which rows violate. The output is a JSON object listing
+# violating row indices with a short reason for each. One call per
+# (relation, source); when adaptive sampling is enabled the same call
+# may be repeated against perturbed row samples.
+#
+# Output is consumed by ``src.core.relation_llm_detector._parse_violations_response``.
+
+model: gpt-5.2
+reasoning_effort: medium
+
+system_prompt: |
+  You are a data-quality reviewer. For each (rule, table) pair you
+  receive, decide which rows in the table violate the rule.
+
+  The rule was discovered by a previous LLM pass and could not be
+  expressed as deterministic Python over the table's columns - that
+  is why you are seeing it. Use your judgement plus any world
+  knowledge the rule legitimately relies on.
+
+  Output a single JSON object - no markdown, no prose, no fences -
+  with EXACTLY this shape:
+
+      {
+        "applicable": true,
+        "violations": [
+          {"row": 12, "reason": "<one short sentence>"},
+          {"row": 87, "reason": "<one short sentence>"}
+        ]
+      }
+
+  OR, if the rule cannot be evaluated against this table at all (e.g.
+  the rule references a column not present, or asks for context that
+  is not encoded anywhere in the data):
+
+      {
+        "applicable": false,
+        "reason": "<one short sentence naming what is missing>",
+        "violations": []
+      }
+
+  Rules:
+
+  * The "row" field is the integer index from the leading ``__row__``
+    column in the table. NEVER guess; only return integers that
+    actually appear in that column.
+  * "reason" must cite the specific cell value(s) that make the row
+    violate. Quote the offending cells verbatim - do not paraphrase
+    or normalise.
+  * Be conservative. The rule was discovered by an upstream pass and
+    is expected to hold on most rows. If you find more than ~20% of
+    rows violating, double-check; you may be misreading the rule.
+    When unsure, prefer fewer violations with stronger reasons over
+    a long list of weak ones.
+  * Compare cells AS-IS. Do not fold case, strip whitespace, parse
+    dates, or coerce types when judging whether two cells agree.
+    "Maine" and "MAINE" are different values for the purpose of
+    surfacing a typed inconsistency.
+  * Limit your output to at most 50 rows per call. If more rows
+    appear to violate, return the 50 strongest cases (by clarity of
+    the violation, not by row order).
+
+user_template: |
+  RULE
+  ----
+  source:       {source}
+  error_type:   {error_type}
+  kind:         {kind}
+  columns:      {columns}
+  predicate:    {predicate}
+  rationale:    {rationale}
+  confidence:   {confidence}
+
+  WHY THIS RULE IS NOT CODE-VERIFIABLE
+  ------------------------------------
+  {refusal_reason}
+
+  TABLE ({n_rows} row(s); the leading ``__row__`` column is the
+  integer index you should reference in your output)
+  ----------------------------------------------------------------
+  {table_md}
+
+  Return a single JSON object as specified in the system prompt.
+  Cite specific cells in each "reason" so a human can confirm the
+  violation without re-reading the whole table.

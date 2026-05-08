@@ -93,14 +93,25 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--concurrency", type=int, default=4)
     p.add_argument("--max-clusters", type=int, default=None,
                    help="Cap on clusters to verify (after gating). Useful for smoke tests.")
-    p.add_argument("--include-person", action="store_true",
-                   help="Also verify person-name columns (off by default for privacy).")
+    p.add_argument("--error-types", default=None,
+                   help="Comma-separated error_type whitelist. When set, only "
+                        "clusters whose error_types intersect this list are "
+                        "considered (gate still applies on top). Example: "
+                        "--error-types typo,inconsistency.")
     p.add_argument("--dry-run", action="store_true",
                    help="Print gate verdict and exit without making web/agent calls.")
     p.add_argument("--force", action="store_true",
                    help="Ignore on-disk web cache + existing web_verifications.json.")
     p.add_argument("--verbose", "-v", action="store_true")
     return p.parse_args(argv)
+
+
+def _parse_error_types(raw: Optional[str]) -> Optional[frozenset[str]]:
+    """Parse the --error-types CLI value into a frozenset, or None."""
+    if not raw:
+        return None
+    items = [t.strip() for t in raw.split(",") if t.strip()]
+    return frozenset(items) if items else None
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +231,8 @@ def verify_single_cluster(
     agent_id: Optional[str] = None,
     model: str = "gpt-5.2",
     reasoning_effort: str = "medium",
-    include_person: bool = False,
+    include_person: bool = True,
+    retry_errored: bool = False,
 ) -> "Verification":
     """Verify ONE cluster on demand and append the result to
     ``run_dir/web_verifications.json`` atomically.
@@ -232,6 +244,12 @@ def verify_single_cluster(
     Raises :class:`VerifyError` for non-transient problems; transient
     agent errors surface as a :class:`Verification` whose ``.error``
     is set (exactly as in batch mode).
+
+    ``retry_errored`` is the UI's "retry" affordance: when set, an
+    existing record whose ``error`` is non-null (e.g. an Azure agent
+    timeout / DecodeError) is treated as if it didn't exist - we
+    re-run the agent and overwrite the prior record. A non-errored
+    prior record is still refused (refuse-to-clobber).
     """
     from src.verifier.verify import (  # noqa: WPS433  (local import)
         Verification,
@@ -255,13 +273,21 @@ def verify_single_cluster(
 
     # Refuse to clobber an existing verification - the UI shouldn't
     # offer the button in that case, but this guards stale clients.
+    # Exception: when ``retry_errored`` is set AND the prior record
+    # is itself errored, allow the retry (the operator explicitly
+    # asked for it).
     prior_path = run_dir / "web_verifications.json"
     prior = load_verifications(prior_path)
-    if any(v.cluster_id == cluster_id for v in prior):
-        raise VerifyError(
-            "already_verified",
-            f"cluster {cluster_id!r} already has a verification",
-        )
+    prior_match = next(
+        (v for v in prior if v.cluster_id == cluster_id), None,
+    )
+    if prior_match is not None:
+        prior_errored = bool(getattr(prior_match, "error", None))
+        if not (retry_errored and prior_errored):
+            raise VerifyError(
+                "already_verified",
+                f"cluster {cluster_id!r} already has a verification",
+            )
 
     # CSV access (frame loader) so we can resolve the cell + row.
     summary: Mapping[str, Any] = {}
@@ -333,9 +359,18 @@ def verify_single_cluster(
     # Re-read the file before writing so we don't clobber a parallel
     # write from another operator clicking at the same time.
     final = load_verifications(prior_path)
-    if any(v.cluster_id == cluster_id for v in final):
-        # Someone else got there first. Treat their record as canon.
-        return next(v for v in final if v.cluster_id == cluster_id)
+    existing = next(
+        (v for v in final if v.cluster_id == cluster_id), None,
+    )
+    if existing is not None:
+        existing_errored = bool(getattr(existing, "error", None))
+        if not (retry_errored and existing_errored):
+            # Someone else got there first with a non-errored record.
+            # Treat their record as canon.
+            return existing
+        # Replace the prior errored record in-place. Sorting at the
+        # end keeps the file deterministic.
+        final = [v for v in final if v.cluster_id != cluster_id]
     final.append(record)
     final.sort(key=lambda v: v.cluster_id)
     write_verifications(prior_path, final)
@@ -354,8 +389,9 @@ def verify_run(
     reasoning_effort: str = "medium",
     concurrency: int = 4,
     max_clusters: Optional[int] = None,
-    include_person: bool = False,
+    include_person: bool = True,
     force: bool = False,
+    error_types: Optional[frozenset[str]] = None,
     progress: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Run the verifier over a finished detection run.
@@ -382,9 +418,24 @@ def verify_run(
 
     gate_cfg = GateConfig(verify_person=include_person)
 
+    # Pre-filter by --error-types whitelist before applying the gate,
+    # so a caller asking for e.g. "typo only" doesn't pay for any
+    # other web-verifiable types in the same run.
+    pool: List[Mapping[str, Any]] = list(clusters)
+    if error_types:
+        pool = [
+            c for c in pool
+            if isinstance(c, Mapping)
+            and any(t in error_types for t in (c.get("error_types") or []))
+        ]
+        logger.info(
+            "error_types filter %s: %d / %d clusters retained",
+            sorted(error_types), len(pool), len(clusters),
+        )
+
     # Gate.
     eligible: List[Mapping[str, Any]] = []
-    for c in clusters:
+    for c in pool:
         if not isinstance(c, Mapping):
             continue
         shape = cluster_shape(c)
@@ -489,9 +540,21 @@ def main(argv: Optional[list[str]] = None) -> int:
         csv_paths = (summary.get("config") or {}).get("csv_paths") or []
         frames = _frame_loader(csv_paths)
         cell_lookup, _, _ = _build_lookups(frames)
-        gate_cfg = GateConfig(verify_person=args.include_person)
+        gate_cfg = GateConfig()
+        et_filter = _parse_error_types(args.error_types)
+        pool = list(clusters)
+        if et_filter:
+            pool = [
+                c for c in pool
+                if isinstance(c, Mapping)
+                and any(t in et_filter for t in (c.get("error_types") or []))
+            ]
+            logger.info(
+                "error_types filter %s: %d / %d clusters retained",
+                sorted(et_filter), len(pool), len(clusters),
+            )
         eligible: List[Mapping[str, Any]] = []
-        for c in clusters:
+        for c in pool:
             if not isinstance(c, Mapping):
                 continue
             cols = c.get("columns") or []
@@ -529,8 +592,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         reasoning_effort=args.reasoning_effort,
         concurrency=args.concurrency,
         max_clusters=args.max_clusters,
-        include_person=args.include_person,
         force=args.force,
+        error_types=_parse_error_types(args.error_types),
     )
     out_path = result["output_path"]
     rel = (out_path.relative_to(PROJECT_ROOT)

@@ -742,6 +742,13 @@ def _load_full(path: Path) -> Optional[pd.DataFrame]:
             encoding_errors="replace",
             on_bad_lines="skip",
         )
+    except pd.errors.EmptyDataError:
+        # Whitespace-only / zero-byte CSVs are common in the bing21
+        # corpus; report them as a distinct outcome instead of a
+        # generic load failure so the manifest stays informative and
+        # the operator log doesn't spam misleading WARNINGs.
+        logger.debug("Empty CSV (no columns to parse): %s", path)
+        return None
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to load %s: %s", path, exc)
         return None
@@ -792,9 +799,28 @@ def _evaluate_table(
 
     Returns ``(eval, None)`` on accept or ``(None, reason)`` on reject.
     """
+    # Fast path: zero-byte or whitespace-only files are surprisingly
+    # common in the bing21 corpus (a few thousand sheets). Handle them
+    # explicitly so the manifest carries a precise reason instead of
+    # the catch-all ``empty_or_unreadable`` and the rejection happens
+    # before pandas gets a chance to raise ``EmptyDataError``.
+    try:
+        if path.stat().st_size == 0:
+            return None, "empty_csv"
+        # Tiny files might still be all whitespace (e.g. four CRLFs).
+        # Anything bigger than a small header is assumed non-empty
+        # and falls through to the full loader.
+        if path.stat().st_size <= 256 and not path.read_bytes().strip():
+            return None, "empty_csv"
+    except OSError:
+        # Fall through; ``_load_full`` will surface the read error.
+        pass
+
     df = _load_full(path)
-    if df is None or df.empty:
-        return None, "empty_or_unreadable"
+    if df is None:
+        return None, "unreadable_csv"
+    if df.empty:
+        return None, "empty_csv"
 
     orig_rows = len(df)
     orig_cols = len(df.columns)
@@ -950,7 +976,7 @@ def curate(
     language_min_english_prob: float = 0.5,
     language_min_confidence: float = 0.6,
     language_llm_model: str = "gpt-5.2",
-    language_llm_effort: str = "minimal",
+    language_llm_effort: str = "low",
     language_cache_dir: Optional[Path] = None,
     max_cell_chars: Optional[int] = 200,
     max_cell_words: Optional[int] = 40,
@@ -1293,7 +1319,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--language-min-english-prob", type=float, default=0.5)
     p.add_argument("--language-min-confidence", type=float, default=0.6)
     p.add_argument("--language-llm-model", default="gpt-5.2")
-    p.add_argument("--language-llm-effort", default="minimal")
+    p.add_argument("--language-llm-effort", default="low")
     p.add_argument("--language-cache-dir", type=Path, default=None)
     p.add_argument("--max-non-latin-chars", type=int, default=0)
     p.add_argument("--max-empty-ratio", type=float, default=0.1)

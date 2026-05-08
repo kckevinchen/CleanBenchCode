@@ -89,17 +89,13 @@ def _write_run(tmp_path: Path, run_id: str, issues: List[Dict[str, Any]]) -> Pat
 # ---------------------------------------------------------------------------
 
 
-# Source of truth: the canonical 13-type taxonomy from
+# Source of truth: the canonical 9-type taxonomy from
 # ``prompts/error_types.yaml``. If a new type is added there, it must
 # also be added to ``ERROR_TYPE_BUCKETS`` (this test enforces it).
 _CANONICAL_ERROR_TYPES = frozenset({
     # single-column
     "typo",
-    "text_inconsistency",
-    "casing_inconsistency",
-    "pattern_inconsistency",
-    "punctuation_inconsistency",
-    "number_format_inconsistency",
+    "inconsistency",
     "semantic_incompatible",
     "numeric_outlier",
     # multi-column
@@ -131,12 +127,24 @@ def test_bucket_map_no_unknown_fallback_for_canonical_types():
         assert b != "unknown"
 
 
-def test_bucket_map_known_folds_are_preserved():
-    """``number_format_inconsistency`` is deliberately folded into
-    ``pattern_inconsistency`` because the heuristics treat them as
-    one class. Keep that fold pinned so a refactor doesn't silently
-    split them."""
-    assert _bucket("number_format_inconsistency") == "pattern_inconsistency"
+def test_bucket_map_no_legacy_folds():
+    """The legacy ``*_inconsistency`` keys (text / casing / pattern /
+    punctuation / number_format) were merged into a single
+    ``inconsistency`` umbrella at the prompt level, so no fold should
+    remain in ``ERROR_TYPE_BUCKETS``. If any of these legacy keys
+    re-appears, the merge has regressed."""
+    legacy = {
+        "text_inconsistency", "casing_inconsistency",
+        "pattern_inconsistency", "punctuation_inconsistency",
+        "number_format_inconsistency",
+    }
+    assert not (legacy & set(ERROR_TYPE_BUCKETS)), (
+        "ERROR_TYPE_BUCKETS still references legacy inconsistency keys: "
+        f"{sorted(legacy & set(ERROR_TYPE_BUCKETS))}. They were merged "
+        "into the single 'inconsistency' bucket."
+    )
+    # The merged key itself maps identity.
+    assert _bucket("inconsistency") == "inconsistency"
 
 
 def test_unknown_error_type_passes_through_as_its_own_bucket():
@@ -155,14 +163,13 @@ def test_heuristic_buckets_cover_each_shipped_heuristic():
     the set in sync with ``src/heuristics/`` + the row-duplication
     detector under ``src/core/``."""
     expected_subset = {
-        # src/heuristics/
-        "casing_inconsistency",         # casing.py
+        # src/heuristics/ (every *_inconsistency-style detector now
+        # emits the merged ``inconsistency`` bucket).
+        "inconsistency",                # casing.py / pattern_minority.py
+                                        # / unicode_norm.py / whitespace.py
         "fd_violation",                 # fd_violation.py
         "typo",                         # key_collision.py
         "numeric_outlier",              # numeric_outlier.py
-        "pattern_inconsistency",        # pattern_minority.py
-        "punctuation_inconsistency",    # unicode_norm.py
-        "text_inconsistency",           # whitespace.py
         # src/core/row_duplication_detector.py
         "row_duplication",
     }

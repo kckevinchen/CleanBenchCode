@@ -5,7 +5,8 @@
   /*__RELATION_DATA_JSON__*/ is replaced at build time with a JSON
   payload of the form:
     { run_metadata, summary, relations, sources, gt_summary?,
-      discovery_reports?, multi_table_groups?, multi_table_violations? }
+      discovery_reports?, multi_table_groups?,
+      multi_table_violations?, multi_table_verifications? }
   No network calls are made at runtime; open the generated report.html
   directly in a browser.
 
@@ -824,7 +825,8 @@
     }
     .mt-violations .mt-vio-row {
       display: grid;
-      grid-template-columns: 130px minmax(180px, 1fr) minmax(140px, 220px) 80px 1fr;
+      grid-template-columns:
+        130px 130px minmax(180px, 1fr) minmax(140px, 220px) 80px 1fr;
       gap: 10px; align-items: start;
       padding: 6px 8px; border-radius: 6px;
       background: var(--panel);
@@ -836,6 +838,15 @@
     .mt-violations .mt-vio-row.kind-duplicate_row   { border-left: 3px solid var(--accent); }
     .mt-violations .mt-vio-row.kind-attribute_conflict { border-left: 3px solid var(--bad); }
     .mt-violations .mt-vio-row.kind-fk_orphan       { border-left: 3px solid var(--kind-other); }
+    /* Semantic-detector kinds (Shape-1 strategy). Coloured to
+       loosely echo the deterministic kinds: warn=surface/format
+       (rendering-only), accent-2=unit (numeric drift),
+       muted=null/snapshot (often benign). */
+    .mt-violations .mt-vio-row.kind-surface_drift       { border-left: 3px solid var(--warn); }
+    .mt-violations .mt-vio-row.kind-unit_drift          { border-left: 3px solid var(--accent-2); }
+    .mt-violations .mt-vio-row.kind-format_drift        { border-left: 3px solid var(--warn); }
+    .mt-violations .mt-vio-row.kind-null_placeholder    { border-left: 3px solid var(--muted); }
+    .mt-violations .mt-vio-row.kind-snapshot_aggregation { border-left: 3px solid var(--muted); }
     .mt-violations .mt-vio-kind {
       font-size: 10.5px; font-weight: 600; letter-spacing: 0.4px;
       text-transform: uppercase; color: var(--muted);
@@ -857,6 +868,145 @@
     }
     .mt-violations .mt-vio-rationale {
       color: var(--muted); font-size: 11.5px; line-height: 1.4;
+    }
+    /* Step-4 verdict pill that prefixes each violation row. The
+       verdict is the LLM verifier's call ("real inconsistency?"),
+       NOT the compiler's mechanical detection. The colour map
+       deliberately matches the rest of the dashboard's semantics:
+       red/orange = problem, yellow = ambiguous, gray = false alarm,
+       blue = LLM uncertain, neutral = pass-through (kinds that the
+       step-4 verifier does not weigh in on). */
+    .mt-vio-verdict {
+      font-size: 10px; font-weight: 700; letter-spacing: 0.4px;
+      text-transform: uppercase;
+      padding: 2px 6px; border-radius: 999px;
+      white-space: nowrap;
+      align-self: start;
+    }
+    .mt-vio-verdict.confirmed_inconsistency {
+      background: rgba(239,68,68,0.18); color: var(--bad);
+    }
+    .mt-vio-verdict.benign_variation {
+      background: rgba(245,158,11,0.18); color: var(--warn);
+    }
+    .mt-vio-verdict.not_a_violation {
+      background: rgba(148,163,184,0.18); color: var(--muted);
+    }
+    .mt-vio-verdict.uncertain {
+      background: rgba(96,165,250,0.18); color: var(--accent);
+    }
+    .mt-vio-verdict.not_verified {
+      background: rgba(148,163,184,0.10); color: var(--muted);
+      border: 1px dashed var(--border);
+    }
+    .mt-vio-verdict.errored {
+      background: rgba(239,68,68,0.10); color: var(--bad);
+      border: 1px dashed var(--bad);
+    }
+    /* Confidence prefix (high/med/low) shown next to verdict label. */
+    .mt-vio-verdict .mt-vio-conf {
+      opacity: 0.75; margin-right: 4px;
+      font-weight: 600;
+    }
+    /* When a verifier rationale is present, replace the compiler
+       rationale and dim it slightly so the pill drives the eye. */
+    .mt-violations .mt-vio-rationale.from-verifier {
+      color: var(--text);
+      border-left: 2px solid var(--border);
+      padding-left: 8px;
+    }
+    /* Side-by-side comparison panel rendered under each violation
+       card. Shows the actual cells from each linked (sheet, row) so
+       the reader can SEE the disagreement (e.g. "USA" vs "United
+       States") instead of inferring it from the rationale. Cells
+       that differ across panels are highlighted; cells that agree
+       fade into the background. */
+    .mt-violations .mt-vio-card {
+      display: block;
+      padding: 8px 10px;
+    }
+    .mt-violations .mt-vio-card > * + * {
+      margin-top: 6px;
+    }
+    .mt-violations .mt-vio-head {
+      display: grid;
+      grid-template-columns:
+        130px 130px minmax(180px, 1fr) minmax(140px, 1fr);
+      gap: 10px; align-items: start;
+    }
+    .mt-violations .mt-snapshots {
+      display: grid; gap: 8px;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      width: 100%;
+    }
+    .mt-violations .mt-snapshot {
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      background: var(--panel-2);
+      padding: 6px 8px;
+      font-size: 11.5px;
+    }
+    .mt-violations .mt-snap-head {
+      display: flex; justify-content: space-between; align-items: baseline;
+      gap: 6px; margin-bottom: 4px;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 11px;
+      border-bottom: 1px dashed var(--border);
+      padding-bottom: 3px;
+    }
+    .mt-violations .mt-snap-sheet {
+      color: var(--text); font-weight: 600;
+      word-break: break-all;
+    }
+    .mt-violations .mt-snap-row {
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .mt-violations .mt-snap-cells {
+      display: grid; grid-template-columns: max-content 1fr;
+      gap: 2px 8px; align-items: baseline;
+    }
+    .mt-violations .mt-snap-cells .mt-snap-key {
+      color: var(--muted); font-size: 10.5px;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      text-align: right;
+    }
+    .mt-violations .mt-snap-cells .mt-snap-val {
+      color: var(--text);
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 11px;
+      word-break: break-word;
+    }
+    /* Highlight cells that disagree across panels. The agreeing
+       cells are dimmed so the eye lands on the actual conflict. */
+    .mt-violations .mt-snap-cells .mt-snap-val.differ {
+      background: rgba(239,68,68,0.12);
+      color: var(--bad);
+      padding: 0 4px; border-radius: 3px;
+      font-weight: 600;
+    }
+    .mt-violations .mt-snap-cells .mt-snap-val.agree {
+      opacity: 0.65;
+    }
+    .mt-violations .mt-snap-empty {
+      color: var(--muted); font-style: italic;
+      font-size: 11px;
+    }
+    /* Per-workbook verdict summary strip rendered above the groups. */
+    .mt-wb-verdict-summary {
+      display: flex; gap: 6px; flex-wrap: wrap;
+      margin: 6px 0 4px 0;
+      font-size: 11px;
+    }
+    .mt-wb-verdict-summary .mt-verdict-count {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 2px 8px; border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--panel-2);
+    }
+    .mt-wb-verdict-summary .mt-verdict-count b {
+      color: var(--text);
+      font-variant-numeric: tabular-nums;
     }
     .mt-vio-more {
       text-align: center; padding: 4px;
@@ -1026,6 +1176,19 @@
           <option value="duplicate_row">duplicate_row</option>
           <option value="attribute_conflict">attribute_conflict</option>
           <option value="fk_orphan">fk_orphan</option>
+          <option value="surface_drift">surface_drift</option>
+          <option value="unit_drift">unit_drift</option>
+          <option value="format_drift">format_drift</option>
+          <option value="null_placeholder">null_placeholder</option>
+          <option value="snapshot_aggregation">snapshot_aggregation</option>
+        </select>
+        <select id="mt-filter-verdict">
+          <option value="">All verdicts</option>
+          <option value="confirmed_inconsistency">Confirmed inconsistency</option>
+          <option value="benign_variation">Benign variation</option>
+          <option value="not_a_violation">Not a violation</option>
+          <option value="uncertain">Uncertain</option>
+          <option value="not_verified">Not verified (other kinds)</option>
         </select>
         <select id="mt-filter-confirm">
           <option value="">Confirmed + rejected groups</option>
@@ -1140,6 +1303,9 @@
         ? DATA.multi_table_groups : [];
       var multiTableViolations = Array.isArray(DATA.multi_table_violations)
         ? DATA.multi_table_violations : [];
+      var multiTableVerifications =
+        Array.isArray(DATA.multi_table_verifications)
+        ? DATA.multi_table_verifications : [];
       // Index source detail by name for O(1) lookups when rendering
       // the per-source context strip in the Relations view.
       var sourceInfo = {};
@@ -1533,6 +1699,21 @@
       // ``summary.multi_table`` produced by run_relation_discovery.
       var mtSummary = summary.multi_table;
       if (mtSummary && mtSummary.n_workbooks != null) {
+        // Strategy badge: tells the user whether the violations
+        // came from the deterministic compiler+verifier path or
+        // the LLM-as-detector ("semantic") path. They have very
+        // different precision/recall profiles, so make the choice
+        // visible.
+        var strategyLabel = mtSummary.strategy === "semantic"
+          ? "LLM detector" : "compiler + verifier";
+        overviewCards.appendChild(makeCard(
+          "Multi-table strategy",
+          strategyLabel,
+          null,
+          mtSummary.strategy === "semantic"
+            ? "Shape-1: LLM finds inconsistencies in row samples"
+            : "Compiler emits, LLM verifies"
+        ));
         overviewCards.appendChild(makeCard(
           "Multi-table workbooks",
           mtSummary.n_workbooks || 0,
@@ -1550,6 +1731,38 @@
           mtSummary.n_violations || 0,
           (mtSummary.n_violations || 0) > 0 ? "warn" : null
         ));
+        // Step-4 verifier headline (compiler strategy) OR
+        // detector verdict roll-up (semantic strategy). Both live
+        // in summary.multi_table.* but under different keys; the
+        // dashboard treats them uniformly here.
+        var ver = mtSummary.verification;
+        var sem = mtSummary.semantic;
+        var byVerdict = null;
+        if (ver && ver.n_verifications) byVerdict = ver.by_verdict || {};
+        else if (sem && sem.n_findings) byVerdict = sem.by_verdict || {};
+        if (byVerdict) {
+          var nReal = byVerdict.confirmed_inconsistency || 0;
+          var nBenign = byVerdict.benign_variation || 0;
+          var nFalse = byVerdict.not_a_violation || 0;
+          overviewCards.appendChild(makeCard(
+            "Verified inconsistencies",
+            nReal,
+            nReal > 0 ? "bad" : "ok",
+            nReal + " real · " + nBenign + " benign · "
+              + nFalse + " false alarm"
+          ));
+        }
+        // Semantic strategy: surface LLM call cost so the user can
+        // judge whether the precision win is worth it.
+        if (sem && sem.n_calls) {
+          overviewCards.appendChild(makeCard(
+            "Semantic LLM calls",
+            sem.n_calls,
+            null,
+            (sem.n_errored || 0) + " errored · "
+              + (sem.n_parse_errored || 0) + " parse-errored"
+          ));
+        }
       }
 
       // Bars
@@ -2852,12 +3065,18 @@
 
       // ---------------------------------------------------------------
       // Multi-table cross-sheet view (only when the run produced
-      // multi_table_groups.jsonl / multi_table_violations.jsonl).
+      // multi_table_groups.jsonl / multi_table_violations.jsonl
+      // / multi_table_verifications.jsonl).
       // Renders one workbook card per ResolvedWorkbook, with each
       // confirmed group expanded inline showing its column mapping
       // (synonyms highlighted), primary key, and per-row violations
-      // grouped by the violation kind. Filtering is text + violation
-      // kind + confirmed/rejected.
+      // grouped by the violation kind. Each violation row is
+      // prefixed with a verdict pill from the step-4 LLM verifier
+      // (confirmed_inconsistency / benign_variation / not_a_violation
+      // / uncertain / not_verified), and the verifier's rationale -
+      // which explains *why* it's a real or fake error - replaces
+      // the compiler's mechanical rationale when present. Filtering
+      // is text + violation kind + verdict + confirmed/rejected.
       // ---------------------------------------------------------------
       if ((multiTableGroups && multiTableGroups.length) ||
           (multiTableViolations && multiTableViolations.length)) {
@@ -2873,10 +3092,24 @@
           (vioByGroup[key] = vioByGroup[key] || []).push(v);
         });
 
-        var mtListEl  = document.getElementById("mt-list");
-        var mtQEl     = document.getElementById("mt-q");
-        var mtKindEl  = document.getElementById("mt-filter-kind");
-        var mtConfEl  = document.getElementById("mt-filter-confirm");
+        // Index step-4 verifications by violation_id. The verifier
+        // emits one record per unique violation_id (linked rows
+        // share the same id), so this is a flat dict and *not* a
+        // list-of-lists. Records carrying a parse/transport error
+        // get verdict=uncertain with .error populated; UI shows
+        // them with the "errored" pill style.
+        var verByVid = {};
+        multiTableVerifications.forEach(function (rec) {
+          if (rec && rec.violation_id) {
+            verByVid[rec.violation_id] = rec;
+          }
+        });
+
+        var mtListEl    = document.getElementById("mt-list");
+        var mtQEl       = document.getElementById("mt-q");
+        var mtKindEl    = document.getElementById("mt-filter-kind");
+        var mtVerdictEl = document.getElementById("mt-filter-verdict");
+        var mtConfEl    = document.getElementById("mt-filter-confirm");
 
         function fmtCols(cols) {
           var out = h("span");
@@ -2886,47 +3119,265 @@
           return out;
         }
 
-        function renderViolationRow(v) {
-          var sheet = v.sheet || "?";
-          var rowLabel = (v.row != null && v.row >= 0)
-            ? "row " + v.row : "header";
-          var linkedTxt = (v.linked || []).map(function (l) {
-            var sh = l && l.sheet ? l.sheet : "?";
-            var rn = (l && l.row != null && l.row >= 0) ? l.row : "—";
-            return sh + ":" + rn;
-          }).join(", ");
-          return h("div",
-            { class: "mt-vio-row kind-" + (v.kind || "unknown") },
-            [
-              h("div", { class: "mt-vio-kind",  text: v.kind || "?" }),
-              h("div", { class: "mt-vio-where" }, [
-                h("span", { text: sheet }),
-                h("span", { class: "mt-row-num", text: rowLabel })
-              ]),
-              h("div", { class: "mt-vio-cols" }, [fmtCols(v.columns)]),
-              h("div", { class: "mt-vio-linked",
-                text: linkedTxt ? "↔ " + linkedTxt : "" }),
-              h("div", { class: "mt-vio-rationale",
-                text: v.rationale || "" })
-            ]);
+        // Pull display-friendly cell values from a violation's
+        // ``values`` payload. Compiler-strategy and semantic-
+        // strategy use different shapes:
+        //   * semantic detector stores actual cells under
+        //     ``row_snapshot``;
+        //   * compiler attribute_conflict stores conflicting
+        //     columns directly as keys, plus ``primary_key``;
+        //   * compiler duplicate_row stores only ``primary_key``
+        //     (in which case we fall back to PK-named cells).
+        // Returns an object {col: stringified-value}.
+        var META_KEYS = {
+          row_snapshot: 1, primary_key: 1, raw_header: 1,
+          canonical: 1, evidence: 1, kind_detail: 1
+        };
+        function extractCells(v) {
+          var values = (v && v.values) || {};
+          var snap = values.row_snapshot;
+          if (snap && typeof snap === "object" && !Array.isArray(snap)) {
+            // Semantic detector path: row_snapshot is the source of
+            // truth; preserve insertion order (which mirrors the
+            // group's primary-key + flagged columns ordering).
+            var out1 = {};
+            Object.keys(snap).forEach(function (k) { out1[k] = snap[k]; });
+            return out1;
+          }
+          // Compiler path: pick non-meta scalar keys.
+          var out = {};
+          Object.keys(values).forEach(function (k) {
+            if (META_KEYS[k]) return;
+            var val = values[k];
+            if (val === null || typeof val === "object") return;
+            out[k] = val;
+          });
+          // Fall back to PK columns when the values payload is
+          // light (compiler duplicate_row stores only primary_key).
+          if (Object.keys(out).length === 0
+              && Array.isArray(values.primary_key)
+              && Array.isArray(v.columns)) {
+            v.columns.forEach(function (col, i) {
+              if (i < values.primary_key.length) {
+                out[col] = values.primary_key[i];
+              }
+            });
+          }
+          return out;
+        }
+
+        function fmtCellValue(val) {
+          if (val === null || val === undefined) return "—";
+          if (typeof val === "number") {
+            return Number.isInteger(val) ? String(val)
+                                          : String(val);
+          }
+          if (typeof val === "boolean") return val ? "true" : "false";
+          var s = String(val);
+          if (s.length > 80) s = s.slice(0, 77) + "…";
+          return s;
+        }
+
+        // Render the side-by-side comparison panel for a finding.
+        // ``rows`` is an array of MultiTableViolation records that
+        // share a violation_id (= same finding, one record per
+        // affected (sheet, row)). Returns an element or null when
+        // there's nothing meaningful to compare.
+        function renderSnapshots(rows) {
+          if (!rows || rows.length === 0) return null;
+          var snaps = rows.map(function (v) {
+            return {
+              sheet: v.sheet || "?",
+              row: (v.row != null && v.row >= 0) ? v.row : null,
+              cells: extractCells(v),
+            };
+          });
+          var hasAny = snaps.some(function (s) {
+            return Object.keys(s.cells).length > 0;
+          });
+          if (!hasAny) return null;
+
+          // Union of all column keys across panels, preserving
+          // first-seen order so the rows align across panels.
+          var keyOrder = [];
+          var seen = {};
+          snaps.forEach(function (s) {
+            Object.keys(s.cells).forEach(function (k) {
+              if (!seen[k]) { seen[k] = 1; keyOrder.push(k); }
+            });
+          });
+
+          // Per-key: do the values agree across all panels that
+          // have it? Used to dim agreeing cells and highlight
+          // disagreements (the actual "this row says USA, that
+          // row says United States" eye-catch).
+          var keyDiffers = {};
+          keyOrder.forEach(function (k) {
+            var seenVal;
+            var first = true;
+            var differ = false;
+            for (var i = 0; i < snaps.length; i++) {
+              var c = snaps[i].cells;
+              if (!(k in c)) continue;
+              var s = String(c[k]).trim().toLowerCase();
+              if (first) { seenVal = s; first = false; }
+              else if (s !== seenVal) { differ = true; break; }
+            }
+            keyDiffers[k] = differ;
+          });
+
+          var wrap = h("div", { class: "mt-snapshots" });
+          snaps.forEach(function (s) {
+            var panel = h("div", { class: "mt-snapshot" });
+            var rowLabel = (s.row !== null) ? ("row " + s.row) : "header";
+            panel.appendChild(h("div", { class: "mt-snap-head" }, [
+              h("span", { class: "mt-snap-sheet", text: s.sheet }),
+              h("span", { class: "mt-snap-row", text: rowLabel })
+            ]));
+            if (Object.keys(s.cells).length === 0) {
+              panel.appendChild(h("div",
+                { class: "mt-snap-empty",
+                  text: "(no cell snapshot for this row)" }));
+            } else {
+              var cells = h("div", { class: "mt-snap-cells" });
+              keyOrder.forEach(function (k) {
+                if (!(k in s.cells)) return;
+                cells.appendChild(h("span",
+                  { class: "mt-snap-key", text: k + ":" }));
+                var valClass = "mt-snap-val "
+                  + (keyDiffers[k] ? "differ" : "agree");
+                cells.appendChild(h("span",
+                  { class: valClass,
+                    text: fmtCellValue(s.cells[k]) }));
+              });
+              panel.appendChild(cells);
+            }
+            wrap.appendChild(panel);
+          });
+          return wrap;
+        }
+
+        // Render one finding as a card. ``rows`` is the list of
+        // MultiTableViolation records that share a violation_id
+        // (so 1 record for solo findings, 2+ for multi-row ones
+        // like duplicate_row / attribute_conflict).
+        function renderViolationCard(rows) {
+          if (!rows || rows.length === 0) return null;
+          var primary = rows[0];
+
+          // Verdict pill: prefer LLM verifier output, fall back to
+          // "not_verified" for kinds the verifier deliberately
+          // skips (header_synonym/dtype_drift/fk_orphan are
+          // mechanical so the verifier passes them through).
+          var verRec = primary.violation_id
+            ? verByVid[primary.violation_id] : null;
+          var verdict, conf, vRat, isErrored;
+          if (verRec) {
+            verdict = verRec.verdict || "uncertain";
+            conf = verRec.confidence || "";
+            vRat = verRec.rationale || "";
+            isErrored = !!(verRec.error || verRec.parse_error);
+          } else {
+            verdict = "not_verified";
+            conf = ""; vRat = ""; isErrored = false;
+          }
+          var verdictClass =
+            "mt-vio-verdict " + verdict + (isErrored ? " errored" : "");
+          var verdictPill = h("div", { class: verdictClass });
+          if (conf) {
+            verdictPill.appendChild(h("span",
+              { class: "mt-vio-conf", text: conf + "·" }));
+          }
+          var label = verdict.replace(/_/g, " ");
+          if (verdict === "confirmed_inconsistency") label = "real";
+          else if (verdict === "benign_variation")   label = "benign";
+          else if (verdict === "not_a_violation")    label = "false";
+          else if (verdict === "uncertain")          label = "uncertain";
+          else if (verdict === "not_verified")       label = "—";
+          verdictPill.appendChild(document.createTextNode(label));
+          if (verRec && (verRec.rationale || verRec.error)) {
+            verdictPill.title =
+              (verRec.error ? "[" + verRec.error + "] " : "") +
+              (verRec.rationale || "");
+          }
+
+          // "Where" cell: list every linked (sheet, row) so the
+          // reader sees the location count up-front, even before
+          // expanding the snapshots.
+          var whereEl = h("div", { class: "mt-vio-where" });
+          rows.forEach(function (v, i) {
+            if (i > 0) whereEl.appendChild(document.createTextNode(", "));
+            whereEl.appendChild(h("span",
+              { text: v.sheet || "?" }));
+            whereEl.appendChild(h("span", {
+              class: "mt-row-num",
+              text: (v.row != null && v.row >= 0) ? (":" + v.row) : ":hdr"
+            }));
+          });
+
+          var headEl = h("div", { class: "mt-vio-head" }, [
+            verdictPill,
+            h("div", { class: "mt-vio-kind",
+                       text: primary.kind || "?" }),
+            h("div", { class: "mt-vio-cols" },
+              [fmtCols(primary.columns)]),
+            whereEl,
+          ]);
+
+          var children = [headEl];
+          var snapsEl = renderSnapshots(rows);
+          if (snapsEl) children.push(snapsEl);
+
+          var ratText = vRat || primary.rationale || "";
+          if (ratText) {
+            var ratClass = "mt-vio-rationale"
+              + (vRat ? " from-verifier" : "");
+            children.push(h("div", { class: ratClass, text: ratText }));
+          }
+
+          return h("div", {
+            class: "mt-vio-row mt-vio-card kind-"
+              + (primary.kind || "unknown")
+          }, children);
         }
 
         function renderViolations(parent, vios) {
-          var INITIAL = 30;
+          // Group rows by violation_id so multi-row findings
+          // (duplicate_row, attribute_conflict) collapse into a
+          // single side-by-side card. Solo findings keep a 1-row
+          // card. Order is preserved by first-occurrence.
+          var grouped = [];
+          var seen = {};
+          vios.forEach(function (v) {
+            var vid = v && v.violation_id
+              ? v.violation_id
+              : (v && v.workbook + "::" + v.group_id + "::"
+                  + v.sheet + "::" + v.row + "::" + (v.kind || ""));
+            if (seen[vid] == null) {
+              seen[vid] = grouped.length;
+              grouped.push([v]);
+            } else {
+              grouped[seen[vid]].push(v);
+            }
+          });
+
+          var INITIAL = 20;
           var listEl = h("div", { class: "mt-violations" });
-          vios.slice(0, INITIAL).forEach(function (v) {
-            listEl.appendChild(renderViolationRow(v));
+          grouped.slice(0, INITIAL).forEach(function (rows) {
+            var card = renderViolationCard(rows);
+            if (card) listEl.appendChild(card);
           });
           parent.appendChild(listEl);
-          if (vios.length > INITIAL) {
-            var remaining = vios.length - INITIAL;
+          if (grouped.length > INITIAL) {
+            var remaining = grouped.length - INITIAL;
             var moreEl = h("div", { class: "mt-vio-more" });
             var btn = h("button", {
-              text: "Show " + remaining + " more violation"
+              text: "Show " + remaining + " more finding"
                     + (remaining === 1 ? "" : "s"),
               onclick: function () {
-                vios.slice(INITIAL).forEach(function (v) {
-                  listEl.appendChild(renderViolationRow(v));
+                grouped.slice(INITIAL).forEach(function (rows) {
+                  var card = renderViolationCard(rows);
+                  if (card) listEl.appendChild(card);
                 });
                 moreEl.remove();
               }
@@ -2940,27 +3391,44 @@
           var key = (wb || "") + "::" + (g.group_id || "");
           var allVios = vioByGroup[key] || [];
 
-          // Apply violation-kind filter at render time (pure
-          // client-side filtering; the underlying arrays are not
-          // mutated, so toggling filters re-renders fast).
-          var kindFilter = mtKindEl.value || "";
+          // Apply violation-kind + verdict filter at render time
+          // (pure client-side filtering; the underlying arrays are
+          // not mutated, so toggling filters re-renders fast).
+          var kindFilter    = mtKindEl.value || "";
+          var verdictFilter = mtVerdictEl.value || "";
           var qRaw = (mtQEl.value || "").trim().toLowerCase();
           var vios = allVios.filter(function (v) {
             if (kindFilter && v.kind !== kindFilter) return false;
+            if (verdictFilter) {
+              var rec = v.violation_id ? verByVid[v.violation_id] : null;
+              var verdict = rec ? (rec.verdict || "uncertain")
+                                : "not_verified";
+              if (verdict !== verdictFilter) return false;
+            }
             if (!qRaw) return true;
+            var rec2 = v.violation_id ? verByVid[v.violation_id] : null;
             var hay = [
               v.sheet || "",
               v.kind || "",
               (v.columns || []).join(" "),
               v.rationale || "",
+              rec2 ? (rec2.rationale || "") : "",
               JSON.stringify(v.values || {})
             ].join(" ").toLowerCase();
             return hay.indexOf(qRaw) >= 0;
           });
 
-          // Per-kind tally.
+          // Per-kind tally - count unique findings (per
+          // violation_id), not raw rows, so multi-row findings
+          // don't inflate the kind pills.
           var byKind = {};
+          var seenKindVid = {};
           allVios.forEach(function (v) {
+            var vid = v.violation_id
+              || ((v.workbook || "") + "::" + (v.sheet || "")
+                  + "::" + (v.row || "") + "::" + (v.kind || ""));
+            if (seenKindVid[vid]) return;
+            seenKindVid[vid] = 1;
             byKind[v.kind] = (byKind[v.kind] || 0) + 1;
           });
 
@@ -3087,6 +3555,17 @@
           var qRaw = (mtQEl.value || "").trim().toLowerCase();
           var confFilter = mtConfEl.value || "";
 
+          // Stable order for verdict pills in the per-workbook
+          // summary strip - severity-first so the dashboard's eye
+          // lands on real inconsistencies before benigns/false-alarms.
+          var VERDICT_ORDER = [
+            "confirmed_inconsistency",
+            "uncertain",
+            "benign_variation",
+            "not_a_violation",
+            "not_verified"
+          ];
+
           var anyShown = false;
           multiTableGroups.forEach(function (wb) {
             if (!workbookMatchesQuery(wb, qRaw)) return;
@@ -3112,7 +3591,55 @@
               stats
             ]);
 
+            // Build a verdict-tally for *this* workbook so users
+            // can see the LLM verifier's headline numbers without
+            // expanding individual groups. We count unique findings
+            // (one per violation_id), not raw rows, so multi-row
+            // findings (duplicate_row / attribute_conflict) don't
+            // double-count.
+            var wbVerdictCounts = {};
+            var wbVioCount = 0;
+            var seenVid = {};
+            groups.forEach(function (g) {
+              var key2 = (wb.workbook || "") + "::" + (g.group_id || "");
+              (vioByGroup[key2] || []).forEach(function (v) {
+                var vid = v.violation_id
+                  || ((v.workbook || "") + "::" + (v.group_id || "")
+                      + "::" + (v.sheet || "") + "::" + (v.row || ""));
+                if (seenVid[vid]) return;
+                seenVid[vid] = 1;
+                wbVioCount += 1;
+                var rec = v.violation_id ? verByVid[v.violation_id] : null;
+                var verdict = rec ? (rec.verdict || "uncertain")
+                                  : "not_verified";
+                wbVerdictCounts[verdict] =
+                  (wbVerdictCounts[verdict] || 0) + 1;
+              });
+            });
+
             var wbCard = h("div", { class: "mt-workbook" }, [wbHead]);
+            if (wbVioCount > 0) {
+              var summaryEl = h("div", { class: "mt-wb-verdict-summary" });
+              VERDICT_ORDER.forEach(function (verdict) {
+                var n = wbVerdictCounts[verdict] || 0;
+                if (!n) return;
+                var label = verdict.replace(/_/g, " ");
+                if (verdict === "confirmed_inconsistency") label = "real";
+                else if (verdict === "benign_variation")   label = "benign";
+                else if (verdict === "not_a_violation")    label = "false";
+                else if (verdict === "not_verified")       label = "not verified";
+                var pill = h("span", {
+                  class: "mt-verdict-count"
+                }, [
+                  h("span", { class: "mt-vio-verdict " + verdict,
+                              text: label }),
+                  h("b", { text: String(n) })
+                ]);
+                summaryEl.appendChild(pill);
+              });
+              wbCard.appendChild(summaryEl);
+            }
+
             groups.forEach(function (g) {
               wbCard.appendChild(renderGroup(wb.workbook || "", g));
             });
@@ -3129,6 +3656,7 @@
 
         mtQEl.addEventListener("input", renderMultiTable);
         mtKindEl.addEventListener("change", renderMultiTable);
+        mtVerdictEl.addEventListener("change", renderMultiTable);
         mtConfEl.addEventListener("change", renderMultiTable);
         renderMultiTable();
       }

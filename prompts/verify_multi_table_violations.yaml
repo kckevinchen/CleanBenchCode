@@ -1,0 +1,140 @@
+# Cross-sheet violation verification prompt.
+#
+# This is "step 4" in the multi-table inconsistency pipeline:
+#
+#   1. Structural priors (Python)
+#   2. Group + canonical-mapping confirmation (LLM, prompts/confirm_union_join.yaml)
+#   3. Deterministic violation compilation (Python, multi_table_violations.py)
+#   4. Per-violation semantic verification (LLM, this prompt)  <-- here
+#
+# Step 3 emits four kinds of records: `header_synonym`, `dtype_drift`,
+# `duplicate_row`, `attribute_conflict`, `fk_orphan`. The first two are
+# purely structural and were already approved at step 2 (canonical
+# name + dtype kind). `fk_orphan` is mechanical (parent/child
+# containment).
+#
+# `duplicate_row` and `attribute_conflict` are the two kinds where
+# the LLM can add genuine signal: a deterministic `==` on attribute
+# columns cannot tell whether a difference is a real data-quality
+# inconsistency or a benign variation (snapshot at different times,
+# unit/format drift declared elsewhere, NULL placeholder vs. value,
+# legitimate cross-sheet copy, etc.).
+#
+# This prompt is called ONCE per (workbook, group) with up to N
+# violations bundled together. The LLM returns a verdict per
+# violation_id with a brief rationale.
+#
+# Output format (strict JSON, no prose, no fences):
+#   {
+#     "verifications": [
+#       {
+#         "violation_id": "<sha-prefix>",
+#         "verdict": "confirmed_inconsistency"
+#                  | "benign_variation"
+#                  | "not_a_violation"
+#                  | "uncertain",
+#         "confidence": "high" | "medium" | "low",
+#         "rationale": "<one sentence>"
+#       }
+#     ]
+#   }
+#
+# Verdict rubric:
+#   - `confirmed_inconsistency`: the rows clearly describe the same
+#     entity AND the disagreement is a data-quality bug (typo,
+#     stale value, conflicting source-of-truth).
+#   - `benign_variation`: same entity, but the difference is
+#     expected (different time-snapshot, different unit/scale that
+#     a sibling column declares, format drift on a free-text field,
+#     legitimate duplication between summary and detail sheets).
+#   - `not_a_violation`: the rows actually describe different
+#     entities and the PK collision is spurious (the PK column is
+#     not really a key, or two rows happen to share an id by
+#     coincidence).
+#   - `uncertain`: the evidence in front of you cannot decide;
+#     err on the side of `uncertain` rather than guessing.
+#
+# Confidence rubric:
+#   - `high`: the evidence settles the question without external
+#     knowledge.
+#   - `medium`: defensible reading but a reasonable analyst might
+#     disagree.
+#   - `low`: weak evidence; consider `uncertain`.
+
+model: gpt-5.2
+reasoning_effort: medium
+reasoning_summary: detailed
+
+system: |
+  You are a data-integration reviewer auditing pre-flagged
+  cross-sheet inconsistencies. Each candidate has already been
+  through (a) structural priors and (b) an LLM confirmation that
+  the two sheets describe the same kind of entity. Your job here
+  is narrower: for each violation, decide whether the disagreement
+  is a real data-quality bug, a benign variation, or a spurious
+  flag — given ONLY the rows shown.
+
+  Adopt the precision-over-recall stance from step 2: when the
+  evidence is thin, return `uncertain` rather than `confirmed_
+  inconsistency`. False positives at this stage propagate into
+  the user-facing dashboard.
+
+  COMMON TRAPS
+  ------------
+  * `attribute_conflict` on two sheets that legitimately store
+    snapshots at different times → `benign_variation`.
+  * `attribute_conflict` where one side is empty / NaN /
+    "N/A" / "—" → `benign_variation` (NULL placeholder), unless
+    the column is required.
+  * `attribute_conflict` where the two values are surface variants
+    of the same underlying value (case, whitespace, punctuation,
+    "USA" vs "U.S.A.", "1,000" vs "1000") → `benign_variation`
+    (format drift, not a quality bug at this scope).
+  * `duplicate_row` on a sheet pair where one is clearly a master
+    list and the other a transactional/detail subset → 
+    `benign_variation` (expected overlap), unless the rows
+    disagree on attributes (in which case it would have been
+    classified as attribute_conflict already).
+  * Numeric values within rounding tolerance of each other on a
+    derived/computed column → `benign_variation`.
+  * The "PK" column is not actually a key (e.g. a generic
+    "Type" / "Category" column got picked at step 2) → the rows
+    aren't really the same entity → `not_a_violation`.
+
+  RETURN STRICT JSON. No prose, no markdown fences, no comments.
+  Every violation_id from the input MUST appear in the output
+  exactly once.
+
+user_template: |
+  WORKBOOK: {workbook!r}
+  GROUP:    group_id={group_id} kind={group_kind} sheets={sheets}
+  PRIMARY KEY: {primary_key}
+
+  ----- COLUMN MAPPING (canonical -> raw variants) -----
+  {column_mapping_block}
+
+  ----- VIOLATIONS TO VERIFY -----
+  Each violation references one or more (sheet, row) locations
+  inside this group; the rows are reproduced verbatim below the
+  header so you can see the disagreement directly.
+
+  {violations_block}
+
+  TASK
+  ----
+  For each violation_id above, return one verification record.
+  Use the rubric in the system prompt. Keep the rationale to
+  one short sentence.
+
+  OUTPUT (strict JSON):
+  {{
+    "verifications": [
+      {{
+        "violation_id": "...",
+        "verdict": "confirmed_inconsistency" | "benign_variation"
+                 | "not_a_violation" | "uncertain",
+        "confidence": "high" | "medium" | "low",
+        "rationale": "..."
+      }}
+    ]
+  }}

@@ -4,6 +4,9 @@ datasets/
 outputs/
 checkpoints/
 notebooks/
+label_result/
+docs/
+benchmark/
 logs/
 runs/
 wandb/
@@ -41,3 +44,4 @@ outputs/
 .idea/
 *.swp
 .DS_Store
+.claude/

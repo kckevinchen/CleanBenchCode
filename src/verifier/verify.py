@@ -261,15 +261,264 @@ def _format_records_under_review(
     return "\n".join(lines)
 
 
-def _format_task_block(pattern: str, columns: Sequence[str], n_rows: int) -> str:
+def _audit_error_type_focus(error_types: Sequence[str]) -> str:
+    """Build the column-audit "FOCUS" preamble for one or more
+    detector error types.
+
+    The labelling-effort artifact records every column whose
+    Good-Turing arm hit ``status="exhausted"``; that arm IS the
+    error type we want the agent to look hardest for. We surface a
+    short, taxonomy-aware blurb so the agent's queries (and its
+    confirmed_error bar) match the defect class the detector
+    couldn't fully exhaust.
+
+    Returns an empty string when the cluster carries no error_types
+    (legacy callers); otherwise returns a paragraph that ENDS with
+    a blank line so the caller can splice it in front of the verdict
+    rubric without extra glue. """
+    et = [str(t).strip().lower() for t in error_types if str(t).strip()]
+    if not et:
+        return ""
+    # Per-defect blurbs. Keys are the canonical error_type strings
+    # written by the detector / per-arm artifact (see data/error_type.csv
+    # and the run_good_turing pipeline). Each blurb tells the agent
+    # WHAT to look for and WHAT counts as confirmed_error / false_positive
+    # for that defect class.
+    BLURBS: Dict[str, str] = {
+        "typo": (
+            "  - typo: a misspelling of a real-world entity name (org, "
+            "place, product, person). Confirmed_error requires the web "
+            "to surface a single dominant canonical spelling that "
+            "differs from the suspect_value by a small edit distance "
+            "(swapped / missing / extra letters)."
+        ),
+        "casing_inconsistency": (
+            "  - casing_inconsistency: the value uses a casing pattern "
+            "that disagrees with the dominant casing convention shown "
+            "in OTHER VALUES IN THIS COLUMN. Confirmed_error requires "
+            "BOTH that the dominant convention is clear (e.g. >80% of "
+            "siblings agree) AND that the web confirms the canonical "
+            "casing for this specific entity (e.g. \"iPhone\", "
+            "\"USA\", \"McDonald's\")."
+        ),
+        "pattern_inconsistency": (
+            "  - pattern_inconsistency: the value's structural shape "
+            "(separators, digit groups) disagrees with the dominant "
+            "pattern in OTHER VALUES IN THIS COLUMN (e.g. "
+            "\"800-123-4567\" vs. \"8001234567\"). Confirmed_error "
+            "requires the web (or a clear majority of siblings) to "
+            "back the canonical pattern. When the value's CONTENT is "
+            "correct and only its formatting differs, prefer "
+            "false_positive unless the column header strongly implies "
+            "a single required format."
+        ),
+        "punctuation_inconsistency": (
+            "  - punctuation_inconsistency: the value uses different "
+            "punctuation / whitespace from the dominant convention "
+            "(e.g. en-dash vs. hyphen, double space vs. single)."
+        ),
+        "number_format_inconsistency": (
+            "  - number_format_inconsistency: the value mixes numeric "
+            "encodings (e.g. \"15%\" alongside \"0.15\", or \"1,000\" "
+            "alongside \"1000\"). Use the column header + sibling "
+            "values - not the web - to decide which encoding is "
+            "canonical for this column."
+        ),
+        "text_inconsistency": (
+            "  - text_inconsistency: the value is a less-common text "
+            "variant of the same entity that appears with a more "
+            "canonical name elsewhere in the column (e.g. \"USA\" vs. "
+            "\"United States\"). Confirmed_error requires the web to "
+            "confirm the canonical name for this specific entity."
+        ),
+        "inconsistency": (
+            "  - inconsistency: the value disagrees with the dominant "
+            "convention in OTHER VALUES IN THIS COLUMN (umbrella "
+            "covering text / casing / pattern / punctuation / number-"
+            "format variants). Name the sub-pattern in your reasoning."
+        ),
+        "semantic_incompatible": (
+            "  - semantic_incompatible: the value is out-of-domain for "
+            "this column (e.g. a phone number in a NAME column, a "
+            "date in a SALARY column). Confirmed_error requires the "
+            "web (or the column header semantics) to make the "
+            "incompatibility unambiguous."
+        ),
+        "numeric_outlier": (
+            "  - numeric_outlier: the numeric value deviates strongly "
+            "from the bulk distribution. Confirmed_error requires "
+            "external evidence that the value is wrong (e.g. the web "
+            "shows a salary band, a price range, a known cap). Do "
+            "NOT flag a value just because it's rare - only flag it "
+            "when authoritative evidence contradicts it."
+        ),
+    }
+    DEFAULT_BLURB = (
+        "  - {et}: focus your check on this defect class as defined "
+        "in the project's error-type taxonomy."
+    )
+    blurbs = []
+    seen: set = set()
+    for t in et:
+        if t in seen:
+            continue
+        seen.add(t)
+        blurbs.append(BLURBS.get(t, DEFAULT_BLURB.format(et=t)))
+    label = (
+        "FOCUS - this column was budget-capped on the following "
+        "detector error type"
+        + ("s" if len(blurbs) > 1 else "")
+        + ", so its run-budget was exhausted while still finding new "
+        "defects of this kind. Search and reason WITH THIS DEFECT "
+        "CLASS IN MIND - prefer queries and evidence that adjudicate "
+        "it, and apply the verdict criteria below in light of it:"
+    )
+    return label + "\n" + "\n".join(blurbs) + "\n\n"
+
+
+def _format_task_block(
+    pattern: str,
+    columns: Sequence[str],
+    n_rows: int,
+    *,
+    entity_kind: str = "other",
+    error_types: Sequence[str] = (),
+) -> str:
     """Pattern-specific TASK instructions slotted into the prompt.
 
     The verifier composes this in code (rather than in the YAML)
     because each pattern asks the agent a fundamentally different
-    question about the records under review.
+    question about the records under review. ``entity_kind`` is
+    used to specialise the single-cell block - notably, person-name
+    typos use a flipped-default policy (any web hit on the suspect
+    spelling is strong evidence of a false positive).
+
+    ``error_types`` is the cluster's detector error_type list. It
+    currently only specialises the ``column_audit`` block (so the
+    audit prompt focuses on the SAME defects the column was budget-
+    capped on), but it is plumbed in from the call site so other
+    pattern blocks can adopt the same convention if needed.
     """
     cols = [c for c in columns if c]
     cols_str = ", ".join(cols) if cols else ""
+    et_list = [str(t).strip() for t in error_types if str(t).strip()]
+
+    if pattern == "single_cell" and entity_kind == "person":
+        # Person-name typos are systematically over-flagged: a name
+        # that *looks* misspelled (e.g. "Murry" vs "Murray", "Catherin"
+        # vs "Catherine") is often a real, less-common spelling that
+        # SOMEONE - somewhere in the world - actually uses. We do NOT
+        # need to confirm the row's specific person; we only need to
+        # confirm the spelling is in real-world use as a person name.
+        # The web is the authoritative arbiter: any plausible match
+        # for the EXACT suspect spelling on a person profile,
+        # directory, news article, publication, or social-media bio
+        # is enough to mark this a false_positive.
+        return (
+            "Person-name typo verification.\n"
+            "\n"
+            "The detector flagged the suspect_value as a possible "
+            "misspelling of a more common name (suggested_fix). "
+            "Names are unusual: rare and unconventional spellings "
+            "exist for almost every name. We therefore use a LENIENT "
+            "criterion - the suspect spelling is valid as long as "
+            "AT LEAST ONE real human, ANYWHERE in the world, uses "
+            "the EXACT same spelling. We do NOT need to verify the "
+            "specific person referenced by the row.\n"
+            "\n"
+            "Use the Web Search tool. Run AT LEAST one query for "
+            "the suspect_value as written (in quotes). You may add "
+            "context terms like ``name``, ``person``, or ``profile`` "
+            "if the bare query is too noisy, but DO NOT narrow with "
+            "row-specific fields (employer, address, etc.). The "
+            "question is \"does this spelling exist as a real human "
+            "name?\" - not \"is this the right person for this row?\"\n"
+            "\n"
+            "Decide:\n"
+            "  * \"false_positive\" - your search returned ONE OR "
+            "MORE plausible matches for the EXACT suspect spelling "
+            "as a real person's name (any human, anywhere). Cite "
+            "the URL(s) used as evidence in the ``evidence`` array "
+            "(person profile, directory, news article, publication, "
+            "social-media bio, obituary, faculty page, etc.). Set "
+            "``canonical_value`` to null. The bar is LOW: a single "
+            "credible match is enough. Genealogy / surname-history "
+            "pages and name-meaning sites also count if they show "
+            "the spelling is in actual use.\n"
+            "  * \"confirmed_error\" - the EXACT suspect spelling "
+            "has NO web presence as a real person's name. This bar "
+            "is HIGH: you must have run at least one quoted search "
+            "and seen zero plausible person-name results. Cite the "
+            "supporting URL for the suggested_fix as the canonical "
+            "alternative.\n"
+            "  * \"ambiguous\" - the search returned no useful "
+            "evidence either way (the agent's tool returned 0 "
+            "results, or only off-topic hits). Set "
+            "``canonical_value`` to null and explain in "
+            "``reasoning``.\n"
+            "\n"
+            "When in doubt between false_positive and confirmed_error, "
+            "prefer false_positive. A name that produces ANY "
+            "plausible web hit is more likely a real rare-spelling "
+            "name than a true typo. Do NOT return confirmed_error "
+            "unless the suspect spelling truly has no web presence."
+        )
+
+    if pattern == "column_audit":
+        # Column-wide audit. The detector either never flagged this
+        # cell or flagged it without enough budget to fully explore
+        # the column - we are auditing the WHOLE column for missed
+        # errors, so the agent has NO prior suspicion to anchor on.
+        # The bar for confirmed_error is therefore HIGHER than the
+        # standard single_cell case: we do not want to manufacture
+        # false positives just because the operator asked us to scan.
+        #
+        # ``error_types`` (when present) tells the agent which defect
+        # categories the column was budget-capped on. We surface them
+        # explicitly so the agent's queries + verdict criteria match
+        # the run-budget-capped detector. When no error types are
+        # supplied (legacy callers) the audit reverts to a generic
+        # "is the value correct?" framing.
+        et_focus = _audit_error_type_focus(et_list)
+        return (
+            "Column-wide audit. The detector flagged this column "
+            "as under-explored (its run-budget cap was hit while it "
+            "was still finding new defects), so we are auditing every "
+            "distinct value in the column for missed errors. The "
+            "suspect_value below was NOT necessarily flagged by the "
+            "detector - your job is to decide whether the value is "
+            "correct as written, using the web as the authoritative "
+            "arbiter.\n"
+            "\n"
+            f"{et_focus}"
+            "Use the Web Search tool. Run AT LEAST one query for the "
+            "suspect_value (in quotes), optionally combined with the "
+            "column header and any high-signal sibling columns from "
+            "the RECORDS UNDER REVIEW block. Then:\n"
+            "  * \"confirmed_error\" - the web returned authoritative "
+            "evidence (official directory, government registry, "
+            "Wikipedia, established news source, vendor's own site) "
+            "that the suspect spelling / value is WRONG, AND a single "
+            "canonical alternative is supported by at least one "
+            "quoted snippet. Provide it as ``canonical_value``. Be "
+            "conservative: when the web is silent or returns only "
+            "weak / off-topic hits, do NOT flag the cell - prefer "
+            "false_positive or ambiguous.\n"
+            "  * \"false_positive\" - the value is consistent with "
+            "the web (i.e. the search returned at least one credible "
+            "match for the EXACT suspect spelling). Set "
+            "``canonical_value`` to null. The bar is LOW: a single "
+            "credible match is enough.\n"
+            "  * \"ambiguous\" - the web does not adjudicate the "
+            "value either way (zero relevant hits, or only off-topic "
+            "results). Set ``canonical_value`` to null and explain "
+            "in ``reasoning``.\n"
+            "\n"
+            "When in doubt between confirmed_error and any other "
+            "verdict, pick the other verdict. This is an audit, not "
+            "a screen - we surface confirmed_error only when the "
+            "web evidence is unambiguous."
+        )
 
     if pattern == "single_cell":
         return (
@@ -283,7 +532,14 @@ def _format_task_block(pattern: str, columns: Sequence[str], n_rows: int) -> str
             "  * \"false_positive\" - the suspect value is in fact "
             "correct. Set ``canonical_value`` to null.\n"
             "  * \"ambiguous\" - evidence is missing or contradictory. "
-            "Set ``canonical_value`` to null."
+            "Set ``canonical_value`` to null.\n"
+            "Notes for person-name columns: the suspect_value may be a "
+            "private individual rather than a public figure. If the "
+            "Web Search tool surfaces no authoritative public record "
+            "for the person, return verdict=\"ambiguous\" with a brief "
+            "``reasoning`` that says so. Use the OTHER row fields (e.g. "
+            "company, address, role) shown in RECORDS UNDER REVIEW to "
+            "scope the search before falling back to ambiguous."
         )
     if pattern == "multi_row":
         return (
@@ -399,19 +655,68 @@ class Verifier:
         source = str(cluster.get("source") or "")
 
         shape = cluster_shape(cluster)
-        pattern = shape["pattern"]
+        shape_pattern = shape["pattern"]
         all_rows: List[int] = list(shape["rows"])
         all_cols: List[str] = list(shape["columns"])
+
+        # Pattern-routing intent. ``cluster_shape`` is purely
+        # structural: any cluster whose ``detections[*].affected_rows``
+        # list >=2 entries gets shaped ``multi_row``, even when the
+        # error is a per-cell typo / pattern_inconsistency and the
+        # extra rows are sibling evidence rather than candidate
+        # duplicate records. Routing the prompt purely on shape would
+        # ask the agent the wrong question ("are these rows the same
+        # real-world entity?") for typo / inconsistency clusters. The
+        # multi-row / composite prompts are only appropriate when the
+        # detector itself claims the rows are duplicates - i.e.
+        # ``row_duplication`` appears in the cluster's error_types.
+        et_list = [str(t) for t in (cluster.get("error_types") or []) if t]
+        has_duplication = "row_duplication" in et_list
+        pattern = shape_pattern
+        if pattern == "multi_row" and not has_duplication:
+            pattern = "single_cell"
+        elif pattern == "composite" and not has_duplication:
+            pattern = "multi_column" if len(all_cols) >= 2 else "single_cell"
 
         # Apply caps from the gate config so we never blast a
         # 200-row dup group into one prompt.
         capped_rows = all_rows[: max(1, self.cfg.gate.multi_row_cap)] if all_rows else []
         capped_cols = all_cols[: max(1, self.cfg.gate.multi_col_cap)] if all_cols else []
 
-        primary_row = capped_rows[0] if capped_rows else (
-            cluster.get("row") if isinstance(cluster.get("row"), int) else None
+        # Anchor on ``cluster.row`` (the LLM's primary suspect) when
+        # available - ``cluster_shape`` sorts rows, so
+        # ``capped_rows[0]`` is the smallest index, not necessarily
+        # the row the detector flagged. This matters for multi_row
+        # clusters demoted to single_cell above (typo with sibling
+        # rows): the primary cell to verify is the one the detector
+        # pointed at.
+        explicit_row = cluster.get("row")
+        if not isinstance(explicit_row, int):
+            explicit_row = None
+        primary_row = explicit_row if explicit_row is not None else (
+            capped_rows[0] if capped_rows else None
         )
         primary_col = capped_cols[0] if capped_cols else ""
+
+        # For demoted single_cell clusters the prompt should only show
+        # the primary row (the suspect cell), not the full sibling
+        # list - we already decided this is a per-cell defect and
+        # showing 10 sibling rows would re-introduce the duplication
+        # framing we just demoted away from.
+        prompt_rows: List[int]
+        if pattern == "single_cell":
+            prompt_rows = [primary_row] if isinstance(primary_row, int) else []
+        elif pattern == "multi_column":
+            # multi_column verifies one record's column relationships,
+            # not multiple rows. Even when ``shape_pattern`` was
+            # ``composite`` and we demoted (no ``row_duplication``
+            # error_type), we anchor on the LLM's primary row.
+            prompt_rows = (
+                [primary_row] if isinstance(primary_row, int)
+                else capped_rows[:1]
+            )
+        else:  # multi_row / true composite (row_duplication intent)
+            prompt_rows = list(capped_rows)
 
         kind = classify_cluster(cluster, cfg=self.cfg.gate)
 
@@ -451,8 +756,11 @@ class Verifier:
             suspect_value_for_record = cell_val
         else:
             # Multi-row, multi-column, or composite: one snapshot
-            # per affected row.
-            for r in capped_rows:
+            # per affected row. ``prompt_rows`` already encodes the
+            # routing decision - for ``multi_column`` we iterate
+            # exactly one row (the LLM's anchor) instead of every
+            # sibling row carried by the structural shape.
+            for r in prompt_rows:
                 row_dict = {}
                 if self.row_lookup is not None:
                     try:
@@ -552,14 +860,31 @@ class Verifier:
         # ---- prompt construction ---------------------------------
         records_block = _format_records_under_review(
             records=records,
-            rows=capped_rows or ([primary_row] if isinstance(primary_row, int) else []),
+            rows=prompt_rows,
             cluster_columns=capped_cols,
             suspect_column=primary_col if pattern == "single_cell" else "",
         )
+        # ``verify_mode`` is an opt-in cluster marker that overrides
+        # the task-block framing without touching the rest of the
+        # prompt. The column-wide audit script (run_web_verify_column)
+        # sets ``verify_mode="column_audit"`` on synthetic single-
+        # cell clusters so the agent gets neutral "is this value
+        # correct?" framing instead of the "the detector flagged
+        # this cell - confirm or refute" framing.
+        verify_mode = str(cluster.get("verify_mode") or "").strip()
+        task_pattern = (
+            "column_audit"
+            if verify_mode == "column_audit" and pattern == "single_cell"
+            else pattern
+        )
         task_block = _format_task_block(
-            pattern=pattern,
+            pattern=task_pattern,
             columns=capped_cols,
-            n_rows=max(len(capped_rows), 1),
+            n_rows=max(len(prompt_rows), 1),
+            entity_kind=kind.value,
+            error_types=[
+                str(t) for t in (cluster.get("error_types") or []) if t
+            ],
         )
 
         prompt = self._prompt["user_template"].format(
@@ -568,7 +893,7 @@ class Verifier:
             column=primary_col or "(unknown)",
             columns=", ".join(capped_cols) if capped_cols else "(none)",
             row=primary_row if isinstance(primary_row, int) else "n/a",
-            rows=", ".join(str(r) for r in capped_rows) if capped_rows else "n/a",
+            rows=", ".join(str(r) for r in prompt_rows) if prompt_rows else "n/a",
             n_records=len(records),
             entity_kind=kind.value,
             error_types=", ".join(

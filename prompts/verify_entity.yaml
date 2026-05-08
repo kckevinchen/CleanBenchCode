@@ -69,8 +69,16 @@ system: >
   and never cite a URL you did not actually retrieve. Quote evidence
   verbatim from the pages the tool returns. If the evidence is
   insufficient or contradictory, say so by returning
-  verdict="ambiguous" - do NOT guess. Respond with strictly valid
-  JSON, no markdown fences, no prose outside the JSON payload.
+  verdict="ambiguous" - do NOT guess. You MUST always reply with one
+  strictly valid JSON object matching the OUTPUT FORMAT below, with
+  no markdown fences and no prose outside the JSON payload. This is
+  non-negotiable: even if you decide not to call the Web Search tool
+  (e.g. the value looks like a private individual's name with no
+  authoritative public source, the request seems out of scope, or
+  any other reason), you MUST STILL respond with a JSON object whose
+  ``verdict`` is "ambiguous" and whose ``reasoning`` field briefly
+  states why no web check was attempted. Returning an empty message
+  or refusing to answer is a protocol violation.
 
 user_template: |
   CONTEXT

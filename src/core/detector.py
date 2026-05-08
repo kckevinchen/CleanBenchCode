@@ -225,6 +225,13 @@ class PerTypeCleaningDetector:
         report.raw_text = response.text
         report.reasoning_summary = response.reasoning_summary
         report.error = response.error
+        # When ``self.model`` is a comma-list rotation pool, record the
+        # specific family member that actually served this call so
+        # downstream attribution shows ``gpt-5.4`` rather than the
+        # full pool string. Empty (e.g. on hard failure) stays as the
+        # pool spec so the run record is still labelled.
+        if response.model:
+            report.model = response.model
 
         if response.ok:
             issues, parse_err = parse_llm_json(response.text)

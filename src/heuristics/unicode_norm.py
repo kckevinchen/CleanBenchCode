@@ -40,7 +40,7 @@ _FANCY_DASHES = {"\u2010", "\u2011", "\u2012", "\u2013", "\u2014",
 @register_detector
 class UnicodeNormalizationDetector(HeuristicDetector):
     name = "unicode_norm"
-    default_error_type = "punctuation_inconsistency"
+    default_error_type = "inconsistency"
 
     def detect(self, frame: pd.DataFrame, *, source: str) -> List[HeuristicMatch]:
         out: List[HeuristicMatch] = []
@@ -73,22 +73,22 @@ class UnicodeNormalizationDetector(HeuristicDetector):
         if any(c in _SMART_QUOTES for c in text):
             signals.append({"code": "smart_quote",
                             "msg": "uses curly/smart quote",
-                            "error_type": "punctuation_inconsistency"})
+                            "error_type": "inconsistency"})
         if any(c in _FANCY_DASHES for c in text):
             signals.append({"code": "fancy_dash",
                             "msg": "uses en/em-dash or minus-sign instead of hyphen",
-                            "error_type": "punctuation_inconsistency"})
+                            "error_type": "inconsistency"})
         nfc = unicodedata.normalize("NFC", text)
         if nfc != text:
             signals.append({"code": "nfc_mismatch",
                             "msg": "decomposed combining marks (NFC mismatch)",
-                            "error_type": "text_inconsistency"})
+                            "error_type": "inconsistency"})
         nfkc = unicodedata.normalize("NFKC", nfc)
         if nfkc != nfc:
             # NFKC differs from NFC: fullwidth, ligature, compatibility.
             signals.append({"code": "nfkc_compat",
                             "msg": "compatibility characters (fullwidth / ligature / etc.)",
-                            "error_type": "pattern_inconsistency"})
+                            "error_type": "inconsistency"})
         return signals
 
     def _fix(self, text: str) -> str:

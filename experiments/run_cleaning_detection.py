@@ -103,7 +103,7 @@ from src.adaptive.scoped_gt import (  # noqa: E402
     render_per_arm_markdown,
     resolve_arm_config,
 )
-from src.core.llm_client import LLMClient  # noqa: E402
+from src.core.llm_client import GPT5_FAMILY, LLMClient  # noqa: E402
 from src.adaptive.perturbations import perturb_frames  # noqa: E402
 from src.adaptive.prompt_variants import (  # noqa: E402
     PromptVariantGenerator,
@@ -217,7 +217,20 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
             "directory of CSVs is provided. Defaults to '*.csv'."
         ),
     )
-    parser.add_argument("--model", type=str, help="Override llm.model.")
+    parser.add_argument(
+        "--model",
+        type=str,
+        help=(
+            "Override llm.model. Accepts a single model (e.g. "
+            "'gpt-5.2') or a comma-separated list to spread LLM calls "
+            f"across the GPT-5 family ({','.join(GPT5_FAMILY)}). When "
+            "given a list, every chunk-type call picks one model from "
+            "the pool round-robin, so a single unified run finishes "
+            "faster than any one model could on its own deployment "
+            "quota. Default (nothing on CLI / config) is the full "
+            "GPT-5 family rotation."
+        ),
+    )
     parser.add_argument(
         "--chunk-size",
         type=int,
@@ -244,8 +257,8 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
             "(useful for cross-column error types). "
             "'single' = one call per (row-slice, column) pair "
             "(use for single-column error types like typo, "
-            "text_inconsistency, pattern_inconsistency, "
-            "semantic_incompatible). 'auto' = dispatcher picks per "
+            "inconsistency, semantic_incompatible). "
+            "'auto' = dispatcher picks per "
             "error-type scope: single-column types run in 'single', "
             "multi-column / multi-row / multi-table types run in "
             "'all'. Overrides data.column_mode."
@@ -313,14 +326,6 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help=(
             "Skip Phase-B LLM synthesis of multi-type clusters. Phase-A "
             "deterministic clustering is always performed."
-        ),
-    )
-    parser.add_argument(
-        "--synthesis-concurrency",
-        type=int,
-        help=(
-            "Max concurrent Phase-B synthesis calls. Defaults to "
-            "min(8, #endpoints)."
         ),
     )
     parser.add_argument(
@@ -862,19 +867,119 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="Cap on clusters to verify (after gating). Useful for smoke tests.",
     )
     parser.add_argument(
-        "--web-include-person",
-        action="store_true",
-        help=(
-            "Also verify person-name columns. Off by default for "
-            "privacy (PII)."
-        ),
-    )
-    parser.add_argument(
         "--web-force",
         action="store_true",
         help=(
             "Re-verify even clusters that already have a prior "
             "verification, and clear the on-disk web cache first."
+        ),
+    )
+
+    # ---- Multi-table cross-sheet pass ----------------------------------
+    # End-to-end pipeline for ``inter_table_inconsistency``:
+    #   step 1 (priors) + step 2 (LLM-confirm groups) -> multi_table_groups.jsonl
+    #   step 3 (compiler OR semantic detector)        -> multi_table_violations.jsonl
+    #   step 4 (LLM verifier, compiler strategy only) -> multi_table_verifications.jsonl
+    # The whole pipeline runs automatically whenever
+    # ``inter_table_inconsistency`` is in --error-types (or in the
+    # selected scope) and >= 2 sheets share a workbook directory.
+    # To skip step 1+2 and reuse a previous discovery run's groups,
+    # pass ``--multi-table-from <run_id_or_dir>``.
+    parser.add_argument(
+        "--no-multi-table",
+        action="store_true",
+        help=(
+            "Skip the cross-sheet pass entirely, even when "
+            "inter_table_inconsistency is in --error-types. "
+            "Useful for ablations that compare with the legacy "
+            "single-table-only path."
+        ),
+    )
+    parser.add_argument(
+        "--multi-table-from",
+        type=str,
+        default=None,
+        help=(
+            "Reuse confirmed groups from a previous "
+            "run_relation_discovery run. Accepts either a run id "
+            "(directory name under --output-dir) or an explicit "
+            "directory path containing multi_table_groups.jsonl. "
+            "When given, steps 1+2 are skipped and the pipeline "
+            "starts from step 3 against this run's groups."
+        ),
+    )
+    parser.add_argument(
+        "--multi-table-prompt",
+        type=str,
+        default="prompts/confirm_union_join.yaml",
+        help=(
+            "Path to the union/join confirmation prompt YAML used "
+            "for step 2 when groups are discovered inline (default: "
+            "prompts/confirm_union_join.yaml)."
+        ),
+    )
+    parser.add_argument(
+        "--multi-table-strategy",
+        choices=["compiler", "semantic"],
+        default="semantic",
+        help=(
+            "How to detect cross-sheet inconsistencies once a group "
+            "is confirmed at step 2. 'semantic' (default) issues one "
+            "LLM call per (group, page) and finds inconsistencies "
+            "directly in the row samples - catches semantic variants "
+            "the compiler cannot see (e.g. 'USA' vs 'United States'). "
+            "'compiler' uses the deterministic Python compiler in "
+            "step 3 plus an LLM verifier in step 4 - cheap on LLM "
+            "calls but blind to unit / format / abbreviation drift."
+        ),
+    )
+    parser.add_argument(
+        "--multi-table-detect-prompt",
+        type=str,
+        default="prompts/detect_multi_table_inconsistency.yaml",
+        help=(
+            "Semantic strategy: prompt YAML used at step 3 (default: "
+            "prompts/detect_multi_table_inconsistency.yaml)."
+        ),
+    )
+    parser.add_argument(
+        "--multi-table-verify-prompt",
+        type=str,
+        default="prompts/verify_multi_table_violations.yaml",
+        help=(
+            "Compiler strategy: prompt YAML used at step 4 to verify "
+            "each compiled violation (default: "
+            "prompts/verify_multi_table_violations.yaml)."
+        ),
+    )
+    parser.add_argument(
+        "--no-multi-table-verify",
+        action="store_true",
+        help=(
+            "Compiler strategy: skip step 4 (per-violation LLM "
+            "verification). Has no effect under "
+            "--multi-table-strategy=semantic where step 3 already "
+            "emits per-finding verdicts."
+        ),
+    )
+    parser.add_argument(
+        "--multi-table-semantic-rows",
+        type=int,
+        default=50,
+        help=(
+            "Semantic strategy: max rows per sheet shown to the LLM "
+            "in one call. Sheets longer than this are split into "
+            "pages (one LLM call per page per group)."
+        ),
+    )
+    parser.add_argument(
+        "--multi-table-semantic-max-pages",
+        type=int,
+        default=None,
+        help=(
+            "Semantic strategy: hard cap on pages per group. Default: "
+            "process every page. Use this to bound LLM cost on huge "
+            "sheets."
         ),
     )
     return parser.parse_args(argv)
@@ -1410,7 +1515,7 @@ def _resolve_per_arm_config(
               typo:
                 epsilon: 0.03
             applicability:   # whitelist {scope_kind: [error_types]}
-              column: [typo, casing_inconsistency, unit_mismatch]
+              column: [typo, inconsistency, unit_mismatch]
 
     Missing block / fields => :meth:`ArmConfig.default` everywhere and
     no applicability filter (every observed (scope_kind, error_type)
@@ -1887,6 +1992,18 @@ def _run_adaptive_loop(
             stop_arm_table = aggregate_runs_by_scope(
                 detections_per_run, scope_kind=stop_scope  # type: ignore[arg-type]
             )
+            # Pre-register every arm we have actually scheduled an LLM
+            # call against, even when zero species came back. Without
+            # this, S_obs=0 (chunk, error_type) pairs are invisible to
+            # ``estimate_by_arm`` and therefore to ``evaluate_stop``;
+            # the chunk keeps consuming LLM budget every pass even
+            # though both saturation criteria (GT missing-mass and
+            # Chao1 missed-fraction) are trivially satisfied at S_obs=0.
+            # Once registered, the existing two-consecutive guard +
+            # ``k_min`` floor ensure they only saturate after the LLM
+            # has had two genuine chances to surface a species.
+            for arm_key in runs_probed_per_arm.keys():
+                stop_arm_table.setdefault(arm_key, {})
             # Per-arm K: prefer the per-arm probe count (which reflects
             # arm-level pruning when stop_scope is chunk-mappable) and
             # fall back to the per-type probe count for unobserved /
@@ -2347,6 +2464,59 @@ def _run_adaptive_loop(
     return all_reports, all_flat_issues, gt_artifacts
 
 
+def _resolve_model_spec(
+    cli_model: Optional[str], config_model: Any
+) -> str:
+    """Resolve ``--model`` / ``llm.model`` into the canonical model spec.
+
+    The spec is the string passed verbatim to
+    :meth:`LLMClient.query`. Single model -> ``"gpt-5.2"``; family
+    sweep -> ``"gpt-5.2,gpt-5.4,gpt-5.5"``. The LLM client interprets
+    a comma-list as a per-call rotation pool, so all models in the
+    list contribute LLM calls to one unified run rather than spawning
+    parallel runs.
+
+    Empty input falls back to :data:`GPT5_FAMILY`. Whitespace and
+    duplicate models in the input are normalised away so the run-id
+    suffix and the rotation pool stay stable.
+    """
+    raw: Optional[str] = None
+    if cli_model is not None and str(cli_model).strip():
+        raw = str(cli_model)
+    elif config_model is not None:
+        if isinstance(config_model, (list, tuple)):
+            raw = ",".join(str(m) for m in config_model)
+        elif str(config_model).strip():
+            raw = str(config_model)
+    if not raw:
+        return ",".join(GPT5_FAMILY)
+    out: List[str] = []
+    seen: set = set()
+    for tok in raw.split(","):
+        m = tok.strip()
+        if m and m not in seen:
+            out.append(m)
+            seen.add(m)
+    if not out:
+        return ",".join(GPT5_FAMILY)
+    return ",".join(out)
+
+
+def _run_id_tag_for_model_spec(spec: str) -> str:
+    """Compact, filesystem-safe tag for the run-id when ``model`` is a list.
+
+    A comma-separated spec would otherwise produce a directory name
+    like ``20260507T200000Z_gpt-5.2,gpt-5.4,gpt-5.5``; commas in
+    paths are awkward and the name balloons as the family grows. We
+    fold the family case to ``gpt5-family`` and leave single models
+    untouched so non-sweep runs stay diff-able with prior outputs.
+    """
+    parts = [p.strip() for p in spec.split(",") if p.strip()]
+    if len(parts) <= 1:
+        return parts[0] if parts else ""
+    return "gpt5-family"
+
+
 def _write_run_status(
     run_dir: "Optional[Path]",
     status: str,
@@ -2392,6 +2562,21 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     data_cfg = config.get("data", {})
     llm_cfg = config.get("llm", {})
+
+    # Resolve the model spec ONCE up front so the rest of main() sees
+    # the canonical comma-list (or single name). The LLM client
+    # interprets a comma-list by rotating the pool per call, so a
+    # family sweep produces ONE unified run dir rather than N -
+    # individual chunk-type calls just go to different family members
+    # round-robin, which makes the run finish faster as the call rate
+    # is not bottlenecked on a single model's deployment quota.
+    args.model = _resolve_model_spec(args.model, llm_cfg.get("model"))
+    _model_parts = [p for p in args.model.split(",") if p.strip()]
+    if len(_model_parts) > 1:
+        logger.info(
+            "Resolved model rotation pool (%d): %s",
+            len(_model_parts), ", ".join(_model_parts),
+        )
     prompts_cfg = config.get("prompts", {})
     output_cfg = config.get("output", {})
 
@@ -2533,14 +2718,6 @@ def main(argv: Optional[list[str]] = None) -> int:
     concurrency = args.concurrency if args.concurrency else llm_cfg.get("concurrency")
     if concurrency is not None:
         concurrency = int(concurrency)
-
-    synthesis_concurrency = (
-        args.synthesis_concurrency
-        if args.synthesis_concurrency
-        else llm_cfg.get("synthesis_concurrency")
-    )
-    if synthesis_concurrency is not None:
-        synthesis_concurrency = int(synthesis_concurrency)
 
     enable_synthesis = _resolve_synthesis_enabled(args, llm_cfg)
 
@@ -2697,6 +2874,22 @@ def main(argv: Optional[list[str]] = None) -> int:
     else:
         chunk_error_types = list(error_types)
 
+    # Hide ``inter_table_inconsistency`` from the per-chunk scanner -
+    # it's handled by the dedicated multi-table cross-sheet pipeline
+    # at the end of main(). The dispatcher would otherwise route it
+    # into ``column_mode='all'`` and produce per-chunk LLM calls that
+    # never see the OTHER sheets the type is supposed to compare
+    # against. ``--no-multi-table`` overrides this and runs the
+    # legacy per-chunk path instead.
+    if (
+        not bool(getattr(args, "no_multi_table", False))
+        and any(et.key == "inter_table_inconsistency" for et in chunk_error_types)
+    ):
+        chunk_error_types = [
+            et for et in chunk_error_types
+            if et.key != "inter_table_inconsistency"
+        ]
+
     logger.info("Project root: %s", PROJECT_ROOT)
     if len(csv_paths) == 1:
         logger.info("CSV: %s", csv_paths[0])
@@ -2721,7 +2914,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     logger.info(
         "Phase B synthesis: %s (concurrency=%s, effort=%s)",
         "ON" if enable_synthesis else "OFF",
-        synthesis_concurrency,
+        concurrency,
         synthesis_effort,
     )
 
@@ -2735,8 +2928,18 @@ def main(argv: Optional[list[str]] = None) -> int:
     if norm_opts.enabled:
         logger.info("Input normalization: ON (%s)", dict(norm_opts.describe()))
     source_frames: Dict[str, pd.DataFrame] = {}
+    skipped_csvs: List[Tuple[Path, str]] = []
     for path in csv_paths:
-        df_i = load_csv(path)
+        try:
+            df_i = load_csv(path)
+        except (pd.errors.EmptyDataError, pd.errors.ParserError) as exc:
+            # Corpus tables are sometimes blank or malformed (esp. the
+            # bing21 export, where a few sheets are whitespace-only).
+            # Skip with a warning rather than aborting the whole run;
+            # if every CSV ends up skipped we raise after the loop.
+            logger.warning("Skipping unreadable CSV %s: %s", path, exc)
+            skipped_csvs.append((path, str(exc)))
+            continue
         df_i = normalize_frame(df_i, norm_opts)
         # Recursive directory discovery can surface CSVs with the same
         # basename in different subdirectories (e.g. two spreadsheets
@@ -2758,6 +2961,17 @@ def main(argv: Optional[list[str]] = None) -> int:
             path.name,
             len(df_i),
             len(df_i.columns),
+        )
+    if skipped_csvs:
+        logger.warning(
+            "Skipped %d/%d CSV(s) that pandas could not parse "
+            "(empty header, malformed, or mid-file corruption).",
+            len(skipped_csvs), len(csv_paths),
+        )
+    if not source_frames:
+        raise RuntimeError(
+            f"No readable CSVs in {csv_path or csv_dir} "
+            f"(tried {len(csv_paths)}, all empty or malformed)."
         )
 
     # Whole-table digests (TABLE OVERVIEW block prepended to every
@@ -2907,7 +3121,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     if run_name:
         run_id = str(run_name)
     else:
-        run_id = f"{timestamp}_{model}"
+        # Comma-list ``model`` would produce a path with commas; fold
+        # the family case to ``gpt5-family`` so the run dir stays
+        # readable and shell-friendly.
+        run_id = f"{timestamp}_{_run_id_tag_for_model_spec(model)}"
     run_dir = output_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     _write_run_status(run_dir, "in_progress")
@@ -3128,7 +3345,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             model=model,
             reasoning_effort=synthesis_effort,
             reasoning_summary=reasoning_summary,
-            concurrency=synthesis_concurrency,
+            concurrency=concurrency,
         )
         clusters = synthesiser.run(clusters)
         synthesis_meta["concurrency"] = synthesiser.concurrency
@@ -3323,6 +3540,162 @@ def main(argv: Optional[list[str]] = None) -> int:
         ),
     )
 
+    # --- Multi-table cross-sheet pass ---------------------------------
+    # Runs the FULL pipeline (steps 1+2+3, plus step 4 in compiler
+    # strategy) end-to-end whenever ``inter_table_inconsistency`` is in
+    # the active error types and >= 2 sheets share a workbook
+    # directory. Pass ``--multi-table-from <run>`` to skip steps 1+2
+    # and reuse a previous discovery run's groups; pass
+    # ``--no-multi-table`` to disable the pass entirely. The cleaning
+    # runner owns step 3+4 because that's where per-row error findings
+    # belong; discovery only emits the relation
+    # (``multi_table_groups.jsonl``).
+    multi_table_enabled = (
+        not bool(getattr(args, "no_multi_table", False))
+        and any(et.key == "inter_table_inconsistency" for et in error_types)
+    )
+    if multi_table_enabled:
+        try:
+            from src.core.multi_table_pipeline import (
+                detect_violations_pass,
+                group_workbooks,
+                resolve_groups_pass,
+            )
+            from src.core.multi_table_resolver import (
+                read_resolved_workbooks_jsonl,
+            )
+
+            # Reuse the same source-key disambiguation rule the
+            # source_frames loop applies, so workbook → sheet keys
+            # line up with source_frames keys.
+            mt_csv_dir = (
+                csv_path
+                if (csv_path is not None and csv_path.is_dir())
+                else None
+            )
+            workbooks_map, _ = group_workbooks(
+                csv_paths, csv_dir=mt_csv_dir,
+            )
+            n_eligible = sum(
+                1 for sheets in workbooks_map.values() if len(sheets) >= 2
+            )
+            if n_eligible == 0:
+                logger.info(
+                    "Multi-table pass skipped: no workbook directory "
+                    "has >=2 CSV sheets among the discovered files."
+                )
+            else:
+                # Lazy-build digests if the cleaning detector ran with
+                # them disabled; the priors module needs digests to
+                # compute structural candidates.
+                if not digests:
+                    for name, df_i in source_frames.items():
+                        try:
+                            digests[name] = build_table_digest(
+                                df_i, source=name, sample_k_values=8,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning(
+                                "Multi-table: digest build failed for %s: %s",
+                                name, exc,
+                            )
+
+                if args.multi_table_from:
+                    src = Path(args.multi_table_from)
+                    candidates: list[Path] = []
+                    if src.is_absolute():
+                        candidates.append(src)
+                    else:
+                        candidates.extend([
+                            (PROJECT_ROOT / src),
+                            (output_dir / src),
+                        ])
+                    src_resolved = next(
+                        (
+                            c for c in candidates
+                            if (c / "multi_table_groups.jsonl").is_file()
+                        ),
+                        None,
+                    )
+                    if src_resolved is None:
+                        raise FileNotFoundError(
+                            "--multi-table-from: could not find "
+                            "multi_table_groups.jsonl under "
+                            f"{[str(c) for c in candidates]}"
+                        )
+                    groups_file = src_resolved / "multi_table_groups.jsonl"
+                    resolved = read_resolved_workbooks_jsonl(groups_file)
+                    # Mirror the groups file into our run dir so the
+                    # dashboard finds it without a cross-run lookup.
+                    (run_dir / "multi_table_groups.jsonl").write_text(
+                        groups_file.read_text(encoding="utf-8"),
+                        encoding="utf-8",
+                    )
+                    mt_resolve_stats: Dict[str, Any] = {
+                        "n_workbooks": len(resolved),
+                        "n_groups": sum(len(r.groups) for r in resolved),
+                        "n_confirmed_groups": sum(
+                            1 for r in resolved
+                            for g in r.groups if g.confirmed
+                        ),
+                        "n_workbooks_errored": sum(
+                            1 for r in resolved if r.error
+                        ),
+                        "from": str(src_resolved),
+                    }
+                    logger.info(
+                        "Multi-table: reusing groups from %s "
+                        "(%d workbook(s), %d confirmed group(s))",
+                        src_resolved,
+                        len(resolved),
+                        mt_resolve_stats["n_confirmed_groups"],
+                    )
+                else:
+                    resolved, mt_resolve_stats = resolve_groups_pass(
+                        run_dir=run_dir,
+                        workbooks=workbooks_map,
+                        source_frames=source_frames,
+                        digests=digests,
+                        llm=llm,
+                        model=model,
+                        prompt_path=_resolve(
+                            args.multi_table_prompt, PROJECT_ROOT,
+                        ),
+                        concurrency=concurrency or 4,
+                    )
+
+                mt_detect_stats = detect_violations_pass(
+                    run_dir=run_dir,
+                    resolved=resolved,
+                    source_frames=source_frames,
+                    llm=llm,
+                    model=model,
+                    strategy=args.multi_table_strategy,
+                    detect_prompt_path=_resolve(
+                        args.multi_table_detect_prompt, PROJECT_ROOT,
+                    ),
+                    verify_prompt_path=_resolve(
+                        args.multi_table_verify_prompt, PROJECT_ROOT,
+                    ),
+                    verify_enabled=not bool(args.no_multi_table_verify),
+                    semantic_n_sample_rows=args.multi_table_semantic_rows,
+                    semantic_max_pages=args.multi_table_semantic_max_pages,
+                    concurrency=concurrency or 4,
+                )
+
+                summary["multi_table"] = {**mt_resolve_stats, **mt_detect_stats}
+                # Re-write summary.json in place so the dashboard /
+                # downstream consumers see the merged stats.
+                artifacts["summary_json"].write_text(
+                    json.dumps(summary, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Multi-table cross-sheet pass failed; continuing without "
+                "multi-table artifacts."
+            )
+
     # --- Optional web verification post-pass --------------------------
     # Decoupled from the detection pipeline so users can opt-in per
     # run; failures here are logged but do not fail the whole run
@@ -3338,7 +3711,6 @@ def main(argv: Optional[list[str]] = None) -> int:
                 model=str(config.get("llm", {}).get("model", "gpt-5.2")),
                 concurrency=args.web_concurrency,
                 max_clusters=args.web_max_clusters,
-                include_person=args.web_include_person,
                 force=args.web_force,
             )
             logger.info(

@@ -22,16 +22,15 @@ experiment:
   description: >
     Per-type data-cleaning error detection: for each CSV chunk, ask a
     GPT-5 family model one question per error type in the taxonomy.
-    The taxonomy is the 13 fine-grained error types from
+    The taxonomy is the 9 fine-grained error types from
     error_type.csv, defined in prompts/error_types.yaml. Keys,
     grouped by Scope:
       Single-Column:
         - typo
-        - text_inconsistency
-        - casing_inconsistency
-        - pattern_inconsistency
-        - punctuation_inconsistency
-        - number_format_inconsistency
+        - inconsistency  (umbrella: text / casing / pattern /
+                          punctuation / number_format sub-patterns;
+                          each finding names its sub-pattern in the
+                          explanation)
         - semantic_incompatible
         - numeric_outlier
       Multi-Column (intra-row):
@@ -43,7 +42,7 @@ experiment:
       Multi-Table (cross-source):
         - inter_table_inconsistency
     Use prompts.error_types (or the CLI flag --error-types) to run
-    only a subset; the default subset below enables the 8 single-
+    only a subset; the default subset below enables the 4 single-
     column-friendly types. Per-chunk, per-type results are merged,
     clustered (Phase A), optionally synthesised (Phase B), and written
     to outputs/ as JSONL, Markdown, and an interactive HTML dashboard.
@@ -78,9 +77,7 @@ data:
   # 'single'= each LLM call sees one column at a time. Use this ONLY when
   #           every selected error type is single-column-friendly, i.e.
   #           a subset of:
-  #             typo, text_inconsistency, casing_inconsistency,
-  #             pattern_inconsistency, punctuation_inconsistency,
-  #             number_format_inconsistency, semantic_incompatible,
+  #             typo, inconsistency, semantic_incompatible,
   #             numeric_outlier.
   # Total detection LLM calls = chunks_per_row * (1 if all else len(columns))
   #                              * len(error_types).
@@ -92,7 +89,7 @@ data:
   # Cap on the number of chunks analysed (counts (row-slice, column)
   # pairs in single-column mode). Use null for "all chunks". With the
   # 100-row sample (33 columns), chunk_size=100, column_mode=single and
-  # the default 8 single-column error types, null => 1 * 33 * 8 = 264
+  # the default 4 single-column error types, null => 1 * 33 * 4 = 132
   # detection calls (plus any Phase-B synthesis).
   max_chunks: null
   # When true, prepend a compact whole-table TABLE OVERVIEW block to
@@ -111,7 +108,13 @@ data:
   include_table_digest: true
 
 llm:
-  model: gpt-5.2
+  # Default detection target. A single model name sends every call
+  # to that model; a comma-separated list (or omitting the field)
+  # rotates calls across the GPT-5 family WITHIN ONE RUN, spreading
+  # load across each model's deployment so the experiment isn't
+  # bottlenecked on a single quota. The family list lives in
+  # src/core/llm_client.py (GPT5_FAMILY).
+  model: gpt-5.2,gpt-5.4,gpt-5.5
   reasoning_effort: medium
   reasoning_summary: detailed
   # Max in-flight LLM calls for per-type detection. null => min(8,
@@ -126,13 +129,11 @@ llm:
   # "is_likely_false_positive" flag. Disable for a free, deterministic-only
   # run (clusters still materialise, just without canonical fields).
   enable_synthesis: true
-  # Max in-flight synthesis calls. null => min(8, #endpoints).
-  synthesis_concurrency: null
   # Reasoning effort for the synthesis call. Defaults to `reasoning_effort`.
   synthesis_effort: medium
 
 prompts:
-  # Taxonomy definition. The 20 fine-grained error types from
+  # Taxonomy definition. The 9 fine-grained error types from
   # error_type.csv live in prompts/error_types.yaml. There is only one
   # taxonomy file in the repo; override the path on the CLI with
   # --error-types-file if you want to experiment with a fork.
@@ -142,8 +143,7 @@ prompts:
   # Scope filter: keep only error types whose `category` starts with one
   # of these scope prefixes. Recognised scopes (drawn from the categories
   # in prompts/error_types.yaml):
-  #   - single-column   (typo, text/casing/pattern/punctuation/
-  #                      number-format inconsistency, semantic_incompatible,
+  #   - single-column   (typo, inconsistency, semantic_incompatible,
   #                      numeric_outlier)
   #   - multi-column    (fd_violation, row_calculation_inconsistency,
   #                      string_calculation_inconsistency)
@@ -162,11 +162,8 @@ prompts:
   # Available keys, grouped by Scope:
   #   Single-Column-friendly (work in column_mode=single):
   #     - typo
-  #     - text_inconsistency
-  #     - casing_inconsistency
-  #     - pattern_inconsistency
-  #     - punctuation_inconsistency
-  #     - number_format_inconsistency
+  #     - inconsistency  (umbrella; sub-patterns text / casing /
+  #                       pattern / punctuation / number_format)
   #     - semantic_incompatible
   #     - numeric_outlier
   #   Require column_mode=all:
@@ -178,15 +175,15 @@ prompts:
   #     - inter_table_inconsistency
   #
   # Examples:
-  #   error_types: [typo, text_inconsistency, pattern_inconsistency]
+  #   error_types: [typo, inconsistency]
   #   error_types: [semantic_incompatible, numeric_outlier]
   # Same thing from the CLI (comma-separated, no spaces):
-  #   --error-types typo,text_inconsistency,pattern_inconsistency
+  #   --error-types typo,inconsistency
   # Also: `python -m experiments.run_cleaning_detection --list-error-types`
   # prints every key in the currently-selected taxonomy.
   #
-  # Default null = all 13 keys; combine with `single_column_only: true`
-  # above to get exactly the 8 Single-Column types.
+  # Default null = all 9 keys; combine with `single_column_only: true`
+  # above to get exactly the 4 Single-Column types.
   error_types: null
 
 # Knobs specific to the row_duplication detector. Only consulted when
@@ -443,9 +440,7 @@ good_turing:
     # Whitelist: which error_types are applicable to each scope_kind.
     # Omit to mark every arm applicable.
     # applicability:
-    #   column: [typo, casing_inconsistency, pattern_inconsistency,
-    #            punctuation_inconsistency, number_format_inconsistency,
-    #            text_inconsistency, semantic_incompatible, numeric_outlier]
+    #   column: [typo, inconsistency, semantic_incompatible, numeric_outlier]
 
 output:
   directory: outputs

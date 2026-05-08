@@ -23,7 +23,7 @@ class CasingInjector(Injector):
     consistent (enums, statuses, country codes, etc.).
     """
     name = "casing"
-    error_type = "casing_inconsistency"
+    error_type = "inconsistency"
 
     def applicable(self, value: str) -> bool:
         # Need at least one letter to perturb the casing.

@@ -16,7 +16,7 @@ class WhitespaceInjector(Injector):
     ``op`` parameter lets the scorer track which subtype was injected.
     """
     name = "whitespace"
-    error_type = "text_inconsistency"
+    error_type = "inconsistency"
 
     def applicable(self, value: str) -> bool:
         return bool(value and value.strip()) and value == value.strip()

@@ -1,0 +1,283 @@
+/* Multi-table inconsistency labelling. Mirrors the cluster-label
+   page's 3-column layout (sidebar queue / center comparison /
+   detail panel) but the center is split horizontally into N
+   "row panels" - one per linked (sheet, row) - so the user can see
+   the disagreement directly instead of inferring it from rationale.
+*/
+
+.mt-body {
+  /* Inherit the same 3-column grid as the cluster page (320 / 1fr /
+     380) so the user's eye doesn't have to retrain when switching
+     between the two surfaces. */
+}
+
+/* ---- finding queue ---- */
+.queue .mt-q-item {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+.queue .mt-q-item:hover { background: var(--panel-2); }
+.queue .mt-q-item.active {
+  background: var(--panel-2);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.queue .mt-q-title {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11.5px;
+  word-break: break-all;
+}
+.queue .mt-q-sub {
+  grid-column: 1 / -1;
+  display: flex; flex-wrap: wrap; gap: 4px;
+  font-size: 10.5px; color: var(--muted);
+}
+.queue .mt-q-pill {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  font-size: 10px;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+.queue .mt-q-pill.kind-attribute_conflict { color: var(--sev-high); border-color: rgba(239,68,68,0.45); }
+.queue .mt-q-pill.kind-duplicate_row { color: var(--accent); border-color: rgba(96,165,250,0.45); }
+.queue .mt-q-pill.kind-surface_drift,
+.queue .mt-q-pill.kind-format_drift { color: var(--sev-medium); border-color: rgba(245,158,11,0.45); }
+.queue .mt-q-pill.kind-unit_drift { color: var(--unsure); border-color: rgba(167,139,250,0.45); }
+.queue .mt-q-pill.kind-null_placeholder,
+.queue .mt-q-pill.kind-snapshot_aggregation { color: var(--muted); }
+.queue .mt-q-pill.kind-fk_orphan { color: var(--sev-unknown); }
+
+.queue .mt-q-status {
+  font-size: 10px; letter-spacing: 0.3px; text-transform: uppercase;
+}
+.queue .mt-q-status.unlabeled { color: var(--muted); }
+.queue .mt-q-status.confirmed_inconsistency { color: var(--sev-high); }
+.queue .mt-q-status.benign_variation { color: var(--sev-medium); }
+.queue .mt-q-status.not_a_violation { color: var(--muted); }
+.queue .mt-q-status.unsure { color: var(--unsure); }
+
+/* Indicator next to the LLM verdict so users can spot agreement /
+   disagreement at a glance. */
+.queue .mt-q-llm {
+  font-size: 10px; opacity: 0.85;
+}
+.queue .mt-q-llm::before { content: "LLM "; opacity: 0.6; }
+
+/* ---- center: finding head + comparison panes ---- */
+.mt-finding-head {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  display: flex; gap: 12px; align-items: baseline;
+  background: var(--panel);
+}
+.mt-finding-head #finding-title {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  color: var(--text);
+  font-size: 12.5px;
+}
+.mt-finding-head #finding-pos {
+  margin-left: auto;
+  font-size: 11px;
+}
+
+.mt-compare {
+  flex: 1; overflow: auto; min-height: 0;
+  padding: 12px;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  align-content: start;
+  align-items: start;
+  background: var(--bg);
+}
+.mt-compare[hidden] {
+  display: none !important;
+}
+.mt-compare .placeholder {
+  color: var(--muted); padding: 20px; font-style: italic;
+  grid-column: 1 / -1; text-align: center;
+}
+
+/* One panel per linked row. */
+.mt-pane {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  display: flex; flex-direction: column;
+  min-width: 0;            /* allow content to wrap; otherwise long
+                              cell values blow up the grid track */
+}
+.mt-pane-head {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11.5px;
+  display: flex; justify-content: space-between; gap: 8px;
+}
+.mt-pane-head .mt-pane-sheet { color: var(--text); font-weight: 600; word-break: break-all; }
+.mt-pane-head .mt-pane-row   { color: var(--muted); }
+
+.mt-pane-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11.5px;
+}
+.mt-pane-table tr + tr td,
+.mt-pane-table tr + tr th { border-top: 1px solid var(--border); }
+.mt-pane-table th {
+  text-align: left;
+  padding: 4px 8px;
+  color: var(--muted);
+  font-weight: normal;
+  font-size: 10.5px;
+  white-space: nowrap;
+  background: var(--panel);
+}
+.mt-pane-table td {
+  padding: 4px 8px;
+  color: var(--text);
+  word-break: break-word;
+  vertical-align: top;
+}
+/* Cell that disagrees across panels - the user's eye should land here. */
+.mt-pane-table td.differ {
+  background: rgba(239,68,68,0.18);
+  color: var(--sev-high);
+  font-weight: 600;
+}
+.mt-pane-table td.agree { opacity: 0.55; }
+/* PK column gets a marker so the labeller knows the rows really
+   correspond to the same logical entity. */
+.mt-pane-table th.pk::after {
+  content: " ★";
+  color: var(--accent);
+  font-size: 10px;
+}
+/* Flagged column = the column the LLM said is the locus of the
+   inconsistency (always rendered first inside its panel). */
+.mt-pane-table tr.flagged th { color: var(--sev-medium); }
+
+.mt-pane-empty {
+  padding: 20px;
+  color: var(--muted);
+  font-style: italic;
+  text-align: center;
+  font-size: 11px;
+}
+
+/* ---- detail panel ---- */
+.detail .mt-detail {
+  padding: 12px;
+  display: flex; flex-direction: column; gap: 12px;
+  height: 100%; overflow: auto;
+}
+.mt-detail-section {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  padding: 8px 10px;
+}
+.mt-detail-section h3 {
+  margin: 0 0 6px 0;
+  font-size: 10.5px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+}
+.mt-detail-section p { margin: 0 0 4px 0; line-height: 1.5; font-size: 12px; }
+.mt-detail-section .meta {
+  font-size: 11px; color: var(--muted);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+.mt-llm-verdict-pill {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-right: 6px;
+}
+.mt-llm-verdict-pill.confirmed_inconsistency {
+  background: rgba(239,68,68,0.18); color: var(--sev-high);
+}
+.mt-llm-verdict-pill.benign_variation {
+  background: rgba(245,158,11,0.18); color: var(--sev-medium);
+}
+.mt-llm-verdict-pill.not_a_violation {
+  background: rgba(148,163,184,0.18); color: var(--muted);
+}
+.mt-llm-verdict-pill.uncertain {
+  background: rgba(96,165,250,0.18); color: var(--accent);
+}
+
+/* ---- verdict buttons ---- */
+.mt-verdict-bar {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
+}
+.mt-verdict-bar .vbtn {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+}
+.mt-verdict-bar .vbtn .key {
+  display: inline-block; min-width: 14px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  color: var(--muted); font-size: 10.5px;
+  margin-right: 6px;
+}
+.mt-verdict-bar .vbtn:hover { background: var(--panel); }
+.mt-verdict-bar .vbtn.active {
+  background: rgba(96,165,250,0.18);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.mt-verdict-bar .vbtn.confirmed_inconsistency.active { background: rgba(239,68,68,0.18); border-color: var(--sev-high); color: var(--sev-high); }
+.mt-verdict-bar .vbtn.benign_variation.active        { background: rgba(245,158,11,0.18); border-color: var(--sev-medium); color: var(--sev-medium); }
+.mt-verdict-bar .vbtn.not_a_violation.active         { background: rgba(148,163,184,0.22); border-color: var(--muted); color: var(--text); }
+.mt-verdict-bar .vbtn.unsure.active                  { background: rgba(167,139,250,0.18); border-color: var(--unsure); color: var(--unsure); }
+
+.mt-note-input {
+  width: 100%;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 6px 8px;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 12px;
+  resize: vertical;
+  min-height: 50px;
+}
+.mt-save-row {
+  display: flex; gap: 6px; align-items: center;
+}
+.mt-save-row .save-btn {
+  background: var(--accent);
+  color: #0b1120;
+  border: 0; border-radius: 4px;
+  padding: 7px 14px;
+  font-weight: 600; cursor: pointer;
+  font-size: 12px;
+}
+.mt-save-row .save-btn:disabled {
+  background: var(--panel-2); color: var(--muted); cursor: progress;
+}
+.mt-save-status { font-size: 11px; color: var(--muted); }

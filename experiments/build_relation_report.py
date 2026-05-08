@@ -81,12 +81,20 @@ def _build_payload(run_dir: Path) -> Dict[str, Any]:
     # column mapping + primary key. multi_table_violations.jsonl is
     # the flat list of MultiTableViolation rows produced by the
     # deterministic compiler in ``src.core.multi_table_violations``.
+    # multi_table_verifications.jsonl is one Verification record per
+    # violation_id from the step-4 verifier in
+    # ``src.core.multi_table_verifier``.
     multi_table_groups: List[Dict[str, Any]] = (
         _read_jsonl(multi_groups_path) if multi_groups_path.is_file() else []
     )
     multi_table_violations: List[Dict[str, Any]] = (
         _read_jsonl(multi_violations_path)
         if multi_violations_path.is_file() else []
+    )
+    multi_verifications_path = run_dir / "multi_table_verifications.jsonl"
+    multi_table_verifications: List[Dict[str, Any]] = (
+        _read_jsonl(multi_verifications_path)
+        if multi_verifications_path.is_file() else []
     )
 
     # Generalization output (optional). When the runner ran the
@@ -200,6 +208,7 @@ def _build_payload(run_dir: Path) -> Dict[str, Any]:
         "verifications": verifications,
         "multi_table_groups": multi_table_groups,
         "multi_table_violations": multi_table_violations,
+        "multi_table_verifications": multi_table_verifications,
     }
 
 

@@ -122,6 +122,35 @@ system: |
       at least one sheet - the downstream renderer needs a stable
       label and inventing one breaks traceability.
 
+  Make column_mapping COMPLETE for join groups. For a `join`
+  group the downstream semantic detector can ONLY reason about
+  columns that appear in `column_mapping`; anything you omit is
+  invisible to it. So in addition to the FK column(s), include
+  every NON-KEY attribute that exists on BOTH sheets and looks
+  like the same concept on each side - either:
+    - The raw header matches exactly across both sheets
+      (e.g. `customer_name` on parent and child), OR
+    - The raw headers are obvious synonyms / near-synonyms for
+      the same attribute (e.g. `city` on the parent and
+      `customer_city` on the child - both describe the
+      customer's city; or `address`/`street_address`,
+      `country`/`region`, `total`/`amount_total`).
+  Pick the cleanest variant as the canonical name (per the rules
+  above). Skip columns that are clearly different concepts even
+  if their headers happen to overlap (e.g. `date` meaning
+  `signup_date` on customers and `order_date` on orders is NOT
+  the same attribute - do not bundle them under one canonical).
+  When in doubt for an obvious synonym, INCLUDE it: the
+  downstream detector verifies each row pair before a finding
+  reaches the user dashboard, so a spurious mapping costs
+  recall-bounded LLM calls but never a hallucinated user-facing
+  alert.
+
+  For `union` groups the same completeness rule applies but
+  the bar is lower (sheets in a union are by definition the
+  same kind of entity), so just follow the surface-drift
+  canonicalisation guidance above.
+
   Pick the primary_key (canonical names) carefully:
     - It must uniquely identify a row within each sheet of the
       group (id-like column, or a tuple that does so).

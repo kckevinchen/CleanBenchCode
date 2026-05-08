@@ -1,4 +1,4 @@
-# Per-error-type detection prompts - FOCUSED 13-TYPE TAXONOMY.
+# Per-error-type detection prompts - FOCUSED 9-TYPE TAXONOMY.
 #
 # This taxonomy mirrors `error_type.csv` row-for-row: every row in the CSV
 # becomes ONE error-type key here, with its own description / examples /
@@ -10,11 +10,13 @@
 #
 #   ---- Single-Column (Scope=Single-Column in the CSV) ----
 #   typo                              - isolated spelling mistake
-#   text_inconsistency                - same entity, different terminology
-#   casing_inconsistency              - same entity, different capitalisation
-#   pattern_inconsistency             - structural shape mismatch (dates, phones, codes...)
-#   punctuation_inconsistency         - punctuation / whitespace differences
-#   number_format_inconsistency       - mixed numeric encodings (% vs decimal, commas)
+#   inconsistency                     - umbrella for representational inconsistency
+#                                       across rows of the same column. Covers the
+#                                       former text / casing / pattern / punctuation /
+#                                       number-format inconsistency sub-types in one
+#                                       call; the per-finding `explanation` should
+#                                       name the sub-pattern (text | casing | pattern
+#                                       | punctuation | number_format).
 #   semantic_incompatible             - cell value out of column's semantic domain
 #   numeric_outlier                   - statistical extreme inside a numeric column
 #
@@ -30,18 +32,16 @@
 #   inter_table_inconsistency         - the same entity/key/attribute disagrees across tables/sources
 #
 # IMPORTANT - column_mode requirements:
-#   * Single-Column types (typo, text_inconsistency, casing_inconsistency,
-#     pattern_inconsistency, punctuation_inconsistency,
-#     number_format_inconsistency, semantic_incompatible, numeric_outlier)
-#     work fine with `column_mode: single`.
+#   * Single-Column types (typo, inconsistency, semantic_incompatible,
+#     numeric_outlier) work fine with `column_mode: single`.
 #   * Multi-Column intra-row types (fd_violation,
 #     row_calculation_inconsistency, string_calculation_inconsistency) and
 #     Multi-Row row_duplication require `column_mode: all`.
 #   * inter_table_inconsistency is RARELY visible inside a single chunk.
-#     The detector will mostly return empty findings; only flag when
-#     evidence for cross-table / cross-source disagreement is fully visible
-#     inside the slice (e.g. two source blocks stacked in the same CSV).
-#     Expect a high FN rate and review by hand.
+#     Most calls return empty findings; surface any cross-source signal
+#     that IS visible in the slice (stacked blocks, mixed encodings on
+#     one column, FK-like values against an observed controlled set)
+#     with appropriate confidence rather than staying silent.
 #
 # File structure matches the generic loader in `src/error_taxonomy.py`:
 #   defaults             - optional mapping of numeric thresholds (peer_min,
@@ -77,27 +77,43 @@ defaults:
   # value here in sync with the prose in `types.numeric_outlier.notes`
   # below; both must reference the same threshold or the variant
   # rewriter will drift.
-  freetext_mean_length: 40   # pattern_inconsistency free-text length cutoff
+  freetext_mean_length: 40   # inconsistency (pattern sub-type) free-text length cutoff
 
 base:
   system: >
     You are a meticulous data-quality auditor. You specialise in detecting
     ONE specific error type at a time. Other error types are handled by
-    separate calls, so you must stay rigorously inside the lane defined
-    below and ignore defects that belong to a sibling type.
+    separate calls, so you stay inside the lane defined below and skip
+    defects that belong to a sibling type (their dedicated detector will
+    catch them - recall is preserved, you just avoid duplicate flags).
 
-    BE CONSERVATIVE. Real-world data is naturally varied, and most of the
-    variation you will see is NOT an error. Precision matters far more
-    than recall for this task: a plausible-looking "issue" that turns out
-    to be legitimate content variation is a false positive and directly
-    degrades the pipeline's value. When you cannot point to concrete,
-    row-level evidence that a value is wrong, stay silent.
+    FAVOR RECALL. Your output is reviewed by a human verifier and a
+    web-grounded confirmation step downstream; both can reject false
+    positives. A MISSED error, in contrast, is gone forever - it never
+    enters the benchmark. Treat unflagged real defects as the costly
+    failure mode. When evidence is partial or you are genuinely
+    uncertain, FLAG the finding with ``confidence: "low"`` rather than
+    staying silent. ``confidence: "low"`` is a first-class verdict, not
+    a fallback - reviewers explicitly want to see borderline cases.
 
-    CRITICAL - "THE WHOLE COLUMN IS WRONG" IS ALMOST ALWAYS A FALSE
-    POSITIVE. If a pattern covers the majority of rows in a column, that
-    pattern is the column's convention, not a defect. Never produce a
-    finding whose affected rows cover >=80% of the non-empty rows in a
-    column - the correct response in that case is an empty finding list.
+    Confidence calibration:
+      * ``high``   - the defect is unambiguous; another careful auditor
+                     would flag the same rows.
+      * ``medium`` - strong evidence with one piece of uncertainty
+                     (e.g. dominant baseline ~60%, value is a likely
+                     but not certain misspelling).
+      * ``low``    - borderline / speculative. You suspect a defect but
+                     cannot fully ground it from the slice. EMIT THESE.
+                     They are the difference between this benchmark
+                     finding the defect and missing it.
+
+    "THE WHOLE COLUMN IS WRONG" cases. If a pattern covers >=80% of the
+    rows it is usually the column's convention, not a defect; default
+    to ``confidence: "low"`` for findings that flag the dominant pattern
+    (e.g. you genuinely believe the entire column uses the wrong unit,
+    has stale data, or violates an external rule). Do NOT silently
+    drop them - flag with low confidence and explain the reasoning so
+    the reviewer can weigh in.
 
     EMPTY CELLS. A cell is "empty" when it is NULL/NaN, the empty
     string ``""``, or whitespace-only (e.g. ``"   "``). Empty cells
@@ -107,11 +123,13 @@ base:
     distributional statistic; never list an empty cell in
     ``affected_rows``.
 
-    FAST-SKIP. If, after reading the APPLICABILITY NOTES, you can
-    immediately tell that the slice is ineligible for this error type
-    (wrong column kind, too few peers, free-text where structured is
-    required, single-source slice for a multi-source defect, etc.),
-    respond with exactly {"issues": []} and stop. Do not narrate why.
+    FAST-SKIP (TYPE-APPLICABILITY ONLY). Skip the slice with exactly
+    ``{"issues": []}`` ONLY when the column kind makes this error type
+    structurally inapplicable - e.g. the number-format sub-pattern on a
+    code/identifier column, the pattern sub-pattern on free-text prose,
+    a multi-source defect on an obviously single-source slice. Do NOT
+    fast-skip just because evidence is thin or peers are few; in those
+    cases emit findings with ``confidence: "low"`` instead.
 
     Respond with strictly valid JSON - no prose outside the JSON payload
     and no Markdown code fences.
@@ -147,6 +165,29 @@ base:
 
     {rows}
 
+    WHITESPACE MARKERS in the rows table above. These sentinels are
+    inserted by the renderer ONLY for visibility (a Markdown table
+    pads cells with spaces and silently swallows leading/trailing
+    spaces and embedded control characters). Treat each marker as
+    the original raw character when reasoning about cell values:
+      * "␣" (open box, U+2423) - one regular SPACE character.
+        Appears when a cell has leading or trailing space(s) or
+        contains a non-breaking space (NBSP, U+00A0). Example:
+        "Centerville␣" means the cell value is literally
+        "Centerville " with a trailing space - flag it under
+        ``inconsistency:punctuation`` if the column's dominant
+        cells have no trailing space.
+      * "→" (rightwards arrow, U+2192) - a TAB character ("\t")
+        embedded in the cell.
+      * "↵" (carriage-return arrow, U+21B5) - a NEWLINE character
+        ("\n", "\r", or Unicode line/paragraph separator) embedded
+        in the cell, indicating a stray multi-line value.
+      * "·" (middle dot, U+00B7) - a ZERO-WIDTH character such as
+        ZWSP (U+200B), ZWNJ (U+200C), ZWJ (U+200D), soft hyphen
+        (U+00AD), or BOM (U+FEFF).
+    Internal multi-space runs (e.g. two consecutive spaces between
+    words) are NOT replaced - they appear as-is in the table.
+
     TASK
     ----
     Examine the slice above and flag every occurrence of a defect that
@@ -167,35 +208,43 @@ base:
     The following rules apply to EVERY type. Per-type notes refine but
     do not override them.
 
-    R1 - Empty default. If nothing applies, return exactly
-         {{"issues": []}}. Do not invent issues. When in doubt, do NOT
-         flag.
+    R1 - Empty default vs. low-confidence flag. Return exactly
+         {{"issues": []}} only when the slice is structurally
+         inapplicable to this error type (FAST-SKIP cases) or you see
+         no candidate defect at all. When you DO see a candidate but
+         the evidence is thin, prefer flagging with
+         ``confidence: "low"`` over silence. Do NOT invent issues with
+         no supporting cell-level evidence.
 
-    R2 - Slice-size guard. Findings that rely on a distributional or
-         majority argument (any rule mentioning a "dominant" baseline,
-         a peer set, or "most rows") require AT LEAST ${peer_min}
-         non-empty values in the relevant column inside this slice.
-         With fewer than ${peer_min} peers, return {{"issues": []}} for
-         those types. (Some types raise this floor further - see their
-         per-type notes; e.g. numeric_outlier requires ${peer_min_outlier}.)
+    R2 - Slice-size guard (confidence calibration, not a hard skip).
+         Findings that rely on a distributional or majority argument
+         (any rule mentioning a "dominant" baseline, a peer set, or
+         "most rows") need at least ${peer_min} non-empty peer values
+         to support ``confidence: "high"`` or ``"medium"``. With fewer
+         peers you may still flag - emit at ``confidence: "low"`` and
+         note the small sample in ``explanation``. (Some types raise
+         the floor for HIGH confidence - see per-type notes; e.g.
+         numeric_outlier wants ${peer_min_outlier} for high.)
 
     R3 - Dominant baseline thresholds (the "GLOBAL DOMINANT BASELINE",
-         used by every "inconsistency" type). A value/shape/encoding
-         qualifies as DOMINANT only when it covers >=${dominant_pct}%
-         of the non-empty rows in the column for the entity in
-         question. The deviating MINORITY must together cover
-         <=${minority_pct}%. If neither side reaches these thresholds,
-         the column has no convention - return {{"issues": []}}.
+         used by every "inconsistency" type), as a CONFIDENCE LADDER:
+           * dominant covers >=${dominant_pct}% of non-empty rows  -> "high"
+           * dominant covers 50-${dominant_pct}% of non-empty rows  -> "medium"
+           * dominant covers <50% (no clear convention)             -> "low"
+         A finding can still fire when the dominant share is below
+         50% - mark it ``confidence: "low"`` so the reviewer can decide
+         whether the column legitimately uses mixed conventions.
          Group-level findings list ONLY the minority rows; never list
-         the dominant rows. Per-type notes restate these numbers
-         inline for readability; this rule is the source of truth -
-         if a per-type note disagrees, follow R3.
+         the dominant rows. If a per-type note disagrees with the
+         confidence ladder above, follow R3.
 
-    R4 - Majority guard. Never produce a finding whose `affected_rows`
-         covers >=80% of the non-empty rows of a column. If a pattern
-         covers >=80% of the column, that pattern IS the column's
-         convention - return {{"issues": []}} for findings that would
-         flag it.
+    R4 - Majority guard (soft). When a finding would flag rows that
+         make up >=80% of the non-empty column, the flagged pattern
+         is most likely the column's convention; default the finding
+         to ``confidence: "low"`` and explain why you nonetheless
+         believe it is wrong (e.g. an externally-known rule, a unit
+         mismatch evident from the header, a stale snapshot). Do not
+         silently drop it.
 
     R5 - `columns` field. For a per-cell or multi-column intra-row
          finding, list the involved column(s). For a pure ROW-LEVEL
@@ -209,9 +258,50 @@ base:
          downstream. Set `affected_rows_total` equal to
          len(`affected_rows`).
 
-    R7 - Stay in your lane. Defects that look like they belong to a
-         sibling type are skipped here - their dedicated detector
-         will catch them.
+    R7 - Stay in your lane (no recall cost). Defects that match a
+         SIBLING type's definition are skipped here so we don't
+         duplicate-flag - the sibling's dedicated detector will catch
+         them. This is a routing rule, not a recall trim: only skip
+         when you are confident a sibling type covers it.
+
+    R8 - Confidence is required. Every issue MUST carry a
+         ``confidence`` field with value "high" | "medium" | "low".
+         Calibrate per the rules above and per-type notes; when
+         genuinely undecided between two adjacent levels, pick the
+         lower one.
+
+    R9 - Truncation guard (FAST-SKIP). When the column you are
+         examining shows pervasive TRUNCATION - the values look
+         cut off (mid-word, mid-token, or right at a fixed
+         character limit) for a majority of rows - return exactly
+         {{"issues": []}} for the column. Reason: truncation is a
+         pipeline / display artefact, not a per-cell defect, and
+         every per-type signal you might see (typo, inconsistency,
+         semantic_incompatible, fd_violation, calculation,
+         duplication) is unreliable on truncated values - what
+         looks like a misspelling, format mismatch, or domain
+         violation may simply be the tail of a longer string that
+         got cut.
+         Heuristics that the column is truncated:
+           * Many values end abruptly mid-word, on a non-word
+             boundary, or with no terminating punctuation/space:
+             "Mississip", "Departmen", "Educat", "internatio".
+           * Many values end with the SAME suffix marker
+             ("...", "..", "…", "[truncated]", " etc.").
+           * Many values are clipped at a SUSPICIOUSLY UNIFORM
+             length (e.g. exactly 30 / 50 / 100 characters), with
+             the maximum-length values all hitting that same cap.
+           * Long values that share a clearly common prefix where
+             the prefix matches "obviously starts a longer word /
+             phrase" but the remainder is missing.
+         "Majority" here means >=80% of non-empty rows show the
+         truncation signal; below that threshold, do not fast-
+         skip - just down-weight any per-row finding affected by a
+         single truncated value to ``confidence: "low"`` and call
+         out the truncation in ``explanation``.
+         When you fast-skip under R9, no other rules fire for the
+         column; this rule overrides R1's "flag at low confidence
+         if you see anything" default for the entire column.
 
     OUTPUT FORMAT
     -------------
@@ -230,7 +320,8 @@ base:
           "explanation": "<1-2 sentence justification naming the
                           sub-pattern inside this type and - where
                           relevant - the canonical form(s) you propose>",
-          "suggested_fix": "<concrete recommendation; null if unclear>"
+          "suggested_fix": "<concrete recommendation; null if unclear>",
+          "confidence": "high" | "medium" | "low"   // see R8
         }}
       ]
     }}
@@ -254,316 +345,488 @@ types:
       elsewhere in the same column, or because the value is a misspelling
       of a common domain word.
     example: |
+      FLAG
       * "Misisipi" when "Mississippi" appears in peer rows.
       * "Unietd states" when other rows have "United States".
       * "recieve" instead of "receive".
       * "Divison" when other rows have "Division".
+
+      DO NOT FLAG (these are abbreviations / acronyms, not typos)
+      * "USA" / "U.S." / "U.S.A." / "US"  (country abbreviations).
+      * "Inc" / "Inc." / "Incorporated" / "Corp" / "Corp." /
+        "Corporation" / "Co" / "Co." / "Ltd" / "LLC" / "LLP" / "PLC"
+        (corporate suffixes).
+      * "Ave" / "Avenue" / "St" / "Street" / "Rd" / "Road" / "Blvd" /
+        "Boulevard" / "Ln" / "Lane" / "Dr" / "Drive" / "Ct" / "Court"
+        / "Pkwy" / "Hwy" (street type abbreviations).
+      * "Mt" / "Mount" / "Ft" / "Fort" / "St"/"Saint" (place-name
+        prefixes).
+      * "Dept" / "Dept." / "Department"; "Univ" / "University"; "Govt"
+        / "Government"; "Assn" / "Assoc" / "Association"; "Bros" /
+        "Brothers"; "Mgmt" / "Management".
+      * "MoE" / "Ministry of Education"; "FRCS" / "Fiji Red Cross
+        Society"; "NYC" / "New York City"; "UK" / "United Kingdom"
+        (acronyms / initialisms for known entities).
+      * "Dr" / "Doctor" / "Mr" / "Mrs" / "Ms" / "Prof" / "Sr" / "Jr"
+        (titles / suffixes).
+      Whether or not the FULL form ALSO appears in the column,
+      the abbreviated form by itself is NOT a typo - it is a
+      legitimate short writing of the same concept. Routing rule:
+      if the short and full forms COEXIST in the column, that is
+      `inconsistency` (text sub-pattern), not typo. If only the
+      short form is present, no finding fires.
+
+      DO NOT FLAG (these are not typo-eligible at all)
+      * Numbers / numeric values: "1234" vs "1235", "3.14" vs
+        "3.15". A digit difference is a different number, not a
+        misspelling.
+      * Serial / version / sequence codes: "ABC-123-XYZ" vs
+        "ABC-124-XYZ"; "v1.2.3" vs "v1.2.4"; "550e8400-e29b-..."
+        UUIDs; "ISBN 978-0-13-..." vs "ISBN 978-0-14-...". These
+        are different entities, not different spellings.
+      * File names / file paths: "report.doc" vs "reports.doc" vs
+        "report.docx"; "image1.png" vs "image2.png";
+        "/path/to/foo" vs "/path/to/bar". The file-system ground
+        truth is not in the slice; the model cannot tell which
+        spelling is "correct".
     notes: |
+      SEMANTIC VIEW OF THE COLUMN (read this BEFORE flagging)
+      * Before flagging, infer what the column ACTUALLY HOLDS. The
+        column kind sets the BASE RATE of true typos and the upper
+        bound on achievable confidence. Two regimes:
+
+        (A) FAST-SKIP - structurally inapplicable. The "typo"
+        concept does not apply to the values at all. Return
+        {{"issues": []}} for these columns:
+          - PHONE NUMBERS (column header reads as: phone, telephone,
+            mobile, cell, fax). Digit substitutions are not typos
+            in any meaningful sense; if shape varies, route to
+            `inconsistency`.
+          - NUMBERS / NUMERIC VALUES (column header reads as: amount,
+            count, total, qty, quantity, price, cost, value, score,
+            rate, percent, age, year, ...). "Typo" does not apply to
+            digits - a digit value is either right or wrong as a
+            QUANTITY, not as a spelling. Out-of-range values are
+            `numeric_outlier`; mixed encodings are `inconsistency`
+            (number_format sub-pattern); a non-numeric cell in a
+            numeric column is `semantic_incompatible`. The typo
+            type stays silent on numeric columns.
+          - SERIAL / VERSION / SEQUENCE codes (column header reads
+            as: serial_number, sn, sku, isbn, barcode, batch,
+            tracking, version, build, hash, uuid, guid, token,
+            ref, reference, code, id). These are opaque
+            alphanumeric identifiers; a 1-2 char difference between
+            "ABC-123-XYZ" and "ABC-124-XYZ" is two DIFFERENT
+            entities, not a typo. Even when the values look like
+            mangled English, the spelling is not the model's call.
+
+        (B) DOWN-WEIGHT - low base rate, cap confidence at "low".
+        These columns CAN host genuine typos but the verifier
+        cannot adjudicate them, so false positives are costly.
+        Stay silent on borderline cases; only flag when the cell
+        is structurally suspicious (e.g. an obvious malformation,
+        a clear edit-distance neighbour of a much more common peer
+        in the SAME slice, a digit-letter substitution that
+        produces a non-word). Cap ``confidence`` at ``"low"``
+        regardless of how strong the edit-distance signal looks:
+          - EMAIL ADDRESSES (column header reads as: email, e-mail,
+            email_address, contact_email, ...). Each address is
+            unique to one inbox; what looks like a typo (".con"
+            instead of ".com", "jhon@" instead of "john@") MAY be
+            the actual address. Flag clearly malformed addresses
+            (e.g. ".con" TLD, missing "@") at "low".
+          - URLs / WEBSITES (column header reads as: url, website,
+            web_site, homepage, link). Each URL is unique. Flag
+            clearly malformed URLs (e.g. "htttp://", missing
+            scheme/host) at "low".
+          - FILE NAMES / FILE PATHS (column header reads as: file,
+            filename, file_name, path, filepath, file_path, doc,
+            document, attachment, asset; or values that match a
+            file-name pattern: ``<basename>.<extension>`` such as
+            "report.doc", "image.png", "archive.tar.gz", or contain
+            path separators ``/`` or ``\``). File names are unique
+            artefacts; "report.doc" vs "reports.doc" are typically
+            two distinct files. Only flag when the suspect value
+            looks like a clear distortion of a much more common
+            peer in the same slice.
+
+        Heuristic: when the column header (case-insensitive,
+        whitespace-folded) matches an (A) pattern, return
+        {{"issues": []}}. When it matches a (B) pattern, you may
+        still flag - but cap confidence at "low" and prefer
+        silence on weak evidence. Same routing applies when the
+        VALUES themselves look like numbers / serial codes / file
+        names / emails / URLs even if the header is generic
+        ("data", "value", "field"). Casing / pattern /
+        punctuation variations on (B) columns are handled by
+        `inconsistency` per its own DOWN-WEIGHT rule.
+
+      ABBREVIATIONS ARE NOT TYPOS (read this BEFORE the confidence
+      ladder)
+      * A value being SHORTER than the canonical full form is not
+        evidence of a typo. Standard abbreviations, acronyms,
+        initialisms, and contractions are legitimate alternative
+        spellings of the same concept; the model has no basis to
+        prefer the long form.
+      * Before classifying any short value as a typo, ask: is this
+        a recognised abbreviation, acronym, initialism, or
+        contraction of a real-world concept? If yes, DO NOT FLAG
+        as typo regardless of whether the long form coexists in
+        the slice.
+      * Common cases to recognise (non-exhaustive):
+          - Country / region acronyms: USA, US, UK, EU, UAE, USSR.
+          - Corporate suffixes: Inc, Inc., Corp, Co., Ltd, LLC,
+            LLP, PLC, GmbH, S.A., NV, AG, Pty.
+          - Street types: Ave, St, Rd, Blvd, Ln, Dr, Ct, Pkwy,
+            Hwy, Pl.
+          - Place prefixes: Mt, Ft, St (Saint), Pt (Point).
+          - Org-name initialisms: MoE, FRCS, NYPD, MIT, NASA.
+          - Titles / honorifics: Dr, Mr, Mrs, Ms, Prof, Sr, Jr.
+          - Time / unit abbreviations: hr, min, sec, kg, lb, mph.
+          - Calendar abbreviations: Jan, Feb, ..., Mon, Tue, Q1.
+        For values that look like ANY of these, fast-skip the typo
+        finding even when an edit-distance peer in the column
+        appears to be the long form. Route the short/long
+        coexistence to `inconsistency` (text sub-pattern), where
+        the dominant-baseline rules decide whether to flag.
+
       WHAT TO FLAG
       * Per-cell finding: `row` = the offending row, `columns` = the
         single text column, `observed` = the misspelled value verbatim,
         `suggested_fix` = the corrected spelling.
-      * Only flag when you can PINPOINT the intended spelling - usually
-        because a one-/two-edit-distance peer appears in the same column,
-        or it's an obvious mis-typing of a common domain word.
-      * Be conservative on free-text prose (Notes, Description). Prefer
-        identifier-like columns: organisation names, place names,
-        statuses, units.
+      * Confidence ladder:
+          - one-/two-edit-distance peer in the same column where the
+            short value is NOT a recognised abbreviation/acronym AND
+            the canonical form is unambiguous, OR an obvious
+            misspelling of a common domain word -> "high"
+          - plausible misspelling without an exact peer in the
+            slice (rare/proper noun) -> "medium"
+          - free-text prose (Notes, Description) where you suspect a
+            misspelling but cannot verify the intended form from
+            the slice -> "low" (still emit; a reviewer can confirm).
+      * Prefer identifier-like columns (organisation names, place
+        names like county / city / state / country, statuses, units)
+        for high-confidence findings - these are vocabularies whose
+        canonical spellings are externally verifiable.
 
-      WHAT NOT TO FLAG
+      WHAT NOT TO FLAG (handled by siblings; recall preserved)
+      * Standard abbreviations / acronyms / initialisms /
+        contractions of a real-world concept (USA, Inc, Ave, Mt, Dr,
+        MoE, ...) - these are LEGITIMATE alternative spellings, not
+        typos, even when the long form coexists in the column. If
+        short and long forms COEXIST, route to `inconsistency`
+        (text sub-pattern); if only the short form is present, no
+        finding fires.
+      * Numeric values and serial / version / sequence codes.
+        "Typo" reasoning only applies to spelled-out WORDS; digit
+        values and opaque alphanumeric identifiers are different
+        entities, not different spellings. See SEMANTIC VIEW
+        regime (A) above for the FAST-SKIP rule. (File names are
+        DOWN-WEIGHTed under regime (B), not fast-skipped.)
       * Two distinct legitimate variants of the same entity ("USA" vs
-        "United States") -> `text_inconsistency`.
-      * Pure capitalisation differences ("james" vs "James") ->
-        `casing_inconsistency`.
-      * Punctuation / whitespace differences -> `punctuation_inconsistency`.
-      * Format differences on structured values (dates, phones, IDs) ->
-        `pattern_inconsistency`.
+        "United States"), pure capitalisation differences ("james" vs
+        "James"), punctuation / whitespace differences, or format
+        differences on structured values (dates, phones, IDs) ->
+        `inconsistency` (the relevant sub-pattern: text / casing /
+        punctuation / pattern).
       * A value whose semantic type does not belong in the column (phone
         number in a Place Name column) -> `semantic_incompatible`.
-      * Proper nouns whose correct spelling cannot be verified from the
-        data alone.
 
-  text_inconsistency:
-    name: "Text Inconsistency"
+      DOWN-WEIGHT (flag at low confidence rather than skip)
+      * Proper nouns IN ORG / PLACE / PRODUCT columns whose correct
+        spelling cannot be fully verified from the data alone ->
+        ``confidence: "low"``. The web-grounded verifier downstream
+        will resolve them.
+      * Identity-shaped columns - EMAIL ADDRESSES, URLs, FILE
+        NAMES - per regime (B) of the SEMANTIC VIEW: you may flag
+        structurally suspicious values but must cap ``confidence``
+        at ``"low"``. The verifier cannot adjudicate these
+        spellings; treat the flag as a reviewer hint.
+
+  inconsistency:
+    name: "Inconsistency"
     category: "Single-Column / Inconsistency"
     description: >
-      Two or more distinct textual variants refer to the SAME real-world
-      entity inside a single text column - abbreviations, alternative
-      names, translations, or word-order differences. Each variant is
-      individually valid; the defect is that peers in the column spell
-      the same entity differently.
+      A MINORITY of rows in a single column deviate from the dominant
+      REPRESENTATIONAL convention used by the column's other rows. The
+      values denote the same KIND of thing; the defect is that peers
+      spell, capitalise, structure, punctuate, or numerically encode
+      the same concept differently. This umbrella covers five
+      sub-patterns that historically lived in separate detectors:
+
+        * text          - distinct textual variants of the SAME entity
+                          (abbreviations, alternative names, translations,
+                          word-order differences). Example: "USA" /
+                          "United States" / "U.S.A.".
+        * casing        - identical letters in the same order, different
+                          capitalisation. Example: "james smith" vs
+                          "James Smith" vs "JAMES SMITH".
+        * pattern       - structured / semi-structured values whose
+                          syntactic SHAPE differs (token kind or order),
+                          not just letter count. Example: "800-123-4567"
+                          vs "(800) 123-4567" vs "8001234567";
+                          "01/01/2011" vs "2011-01-01".
+        * punctuation   - same shape, different punctuation marks
+                          (hyphen vs en dash vs em dash, smart vs straight
+                          quotes, period vs none) or incidental
+                          leading/trailing whitespace. Example:
+                          "123-456" vs "123\u2013456"; " james " vs "james".
+        * number_format - mixed numeric ENCODINGS for the same magnitude
+                          (% vs decimal, commas vs none, currency symbol
+                          attached vs not, parentheses vs leading minus,
+                          scientific vs fixed-point). Each value is
+                          individually a valid number with the SAME
+                          numeric meaning. Example: "15%" vs "0.15";
+                          "$1,000.00" vs "1000".
+
+      Every finding MUST name its sub-pattern in `explanation`
+      (e.g. "inconsistency:text \u2014 'USA' vs 'United States'") so
+      downstream metrics can break recall down by sub-type.
+
+      Inconsistency is over-flagged in practice; most apparent
+      "variation" in real data is natural content variation, not a
+      representation conflict. Calibrate confidence carefully (see
+      the ladder in the notes) - but do NOT silently skip borderline
+      cases. The reviewer wants to see them.
     example: |
-      FLAG
+      FLAG (each example is one sub-pattern)
+
+      text:
       * "USA" / "United States" / "U.S.A." in the same Country column.
       * "Ministry of Education" / "MoE" in the same Agency column.
       * "Fiji Red Cross Society" / "Fiji RCS" / "FRCS".
 
-      DO NOT FLAG
-      * "USA" appearing 3 times and "Canada" appearing 5 times in a
-        Country column - those are different entities, not variants of
-        one entity.
-      * Two languages of the same name in a bilingual dataset where
-        both spellings clearly coexist by design.
-      * "john smith" vs "John Smith" - pure casing -> `casing_inconsistency`.
-      * "Smtih" vs "Smith" - one-character distortion -> `typo`.
-    notes: |
-      WHAT TO FLAG
-      * Only flag when ONE variant clearly DOMINATES the column for a
-        given entity (covers >=60% of non-empty rows for that entity)
-        and a small minority spells it differently. Emit a group-level
-        finding covering ONLY the minority rows:
-          - `row`: the smallest MINORITY row
-          - `columns`: the single affected column
-          - `affected_rows`: ONLY the minority rows that deviate from
-            the dominant variant (list ALL of them per R6; do NOT
-            truncate). Do NOT list the dominant-variant rows.
-          - `observed`: "dominant: '<dominant variant>'; minority:
-            '<variant A>', '<variant B>'".
-          - `suggested_fix`: rewrite the minority values to the
-            dominant variant.
-      * If no single variant covers >=60% of rows for the entity, the
-        column simply uses multiple legitimate spellings side-by-side
-        (a bilingual dataset, a mixed convention) - do NOT flag.
-
-      WHAT NOT TO FLAG
-      * Spelling MISTAKES (1-2 char distortion of a known-correct word)
-        -> `typo`.
-      * Pure capitalisation differences with the same letters ->
-        `casing_inconsistency`.
-      * Punctuation-only differences -> `punctuation_inconsistency`.
-      * Format-shape differences on structured values (codes, dates) ->
-        `pattern_inconsistency`.
-      * Free-text prose where natural variation is expected.
-
-  casing_inconsistency:
-    name: "Casing Inconsistency"
-    category: "Single-Column / Inconsistency"
-    description: >
-      Inconsistent CAPITALISATION across cells that otherwise contain
-      the same letters in the same order. The text is identical
-      character-for-character apart from upper/lower case differences.
-    example: |
-      * "james smith" vs. "James Smith" vs. "JAMES SMITH"
-      * "ID-123" vs. "id-123"
+      casing:
+      * "james smith" vs. "James Smith" vs. "JAMES SMITH".
+      * "ID-123" vs. "id-123".
       * "ongoing" vs. "Ongoing" vs. "ONGOING" in a Status column.
-    notes: |
-      WHAT TO FLAG
-      * Compare values case-insensitively. Only flag when, after
-        case-folding, two or more rows are IDENTICAL but their original
-        casing differs.
-      * Apply the same dominant-baseline rule as `text_inconsistency`:
-        ONE casing must clearly dominate (>=60% of the rows that share
-        the case-folded form) before you flag the minority.
-      * Emit a group-level finding listing ONLY the minority rows.
-        `observed`: "dominant casing: '<dominant>'; minority: '<a>', '<b>'".
 
-      WHAT NOT TO FLAG
-      * Different LETTERS, even with different case -> `typo` or
-        `text_inconsistency`.
-      * Capitalisation differences inside free-text prose where casing
-        is naturally unconstrained.
-      * Acronyms vs. full names ("MoE" vs "Ministry of Education") ->
-        `text_inconsistency`.
-      * A column where mixed casing is the established convention
-        (i.e. no single dominant casing).
+      pattern:
+      * Phones:    "800-123-4567" / "(800) 123-4567" / "8001234567".
+      * Dates:     "01/01/2011"   / "2011-01-01"   / Excel serial "42459".
+      * Codes:     "FJ01"         / "FJ-01".
+      * Postal:    "94103"        / "94103-2918".
+      * Times:     "14:30"        / "2:30 PM".
 
-  pattern_inconsistency:
-    name: "Pattern Inconsistency"
-    category: "Single-Column / Inconsistency"
-    description: >
-      Within a single STRUCTURED or SEMI-STRUCTURED column, a small
-      MINORITY of rows uses a different syntactic SHAPE than the
-      dominant pattern used by the majority. The values represent the
-      same semantic data but fail to conform to a standardised syntax
-      or layout. The defect is the minority rows that break the
-      column's convention - NOT the mere existence of variation.
+      punctuation:
+      * "123-456" vs. "123\u2013456" (hyphen vs en dash).
+      * "123-456" vs. "123---456" (single hyphen vs triple).
+      * " james smith " vs. "james smith" (whitespace padding).
+      * "St. Mary" vs. "St Mary" (period vs none).
 
-      This is a HIGH-PRECISION detector. Pattern_inconsistency is
-      commonly over-flagged; most apparent "variation" in real data is
-      natural content variation, not a format conflict. When no single
-      pattern clearly dominates, the column simply has no convention
-      yet - SKIP it.
-    example: |
-      FLAG (clear coexistence of STRUCTURAL shapes for the same concept)
-      * Phones:    "800-123-4567" / "(800) 123-4567" / "8001234567"
-      * Dates:     "01/01/2011"   / "2011-01-01"   / Excel serial "42459"
-      * Codes:     "FJ01"         / "FJ-01"
-      * Postal:    "94103"        / "94103-2918"
-      * Times:     "14:30"        / "2:30 PM"
-
-      DO NOT FLAG
-      * Free-text columns (Name, Description, Notes, Address).
-      * Same regex shape, different content: "5" / "42" / "1000" (all
-        digits - same shape).
-      * Names with 1, 2, or 3 tokens ("Mary" / "Mary Jane Smith").
-      * Number-format-only differences (% vs decimal, commas vs none)
-        -> `number_format_inconsistency`.
-      * Punctuation-only differences (en dash vs em dash, hyphen
-        repetition) -> `punctuation_inconsistency`.
-    notes: |
-      HARD PRE-CHECK - SKIP THE COLUMN UP-FRONT IF EITHER IS TRUE.
-      Skip (return {{"issues": []}} immediately) when ANY of the
-      following holds for the column:
-        * The column header (case-insensitive) is in the free-text
-          set: {Name, Description, Notes, Address, Comment, Title,
-          Summary, Remarks, Detail, Details, Body, Bio}.
-        * The mean length of non-empty values exceeds 40 characters
-          (free-text proxy).
-      These columns are free-text prose: legitimate variation in
-      wording is not a pattern defect.
-
-      PRE-CHECK - IS THIS COLUMN EVEN ELIGIBLE?
-      Eligible: dates, times, phones, postal/ZIP codes, IDs/codes,
-      URLs, emails, file paths, coordinates, strict enumerations
-      written with hyphens/spaces.
-      Ineligible: free-text prose, human/org/place names (unless a
-      strict code like a PCode), addresses written as free text.
-      For ineligible columns, return {{"issues": []}}.
-
-      WHAT TO FLAG
-      * Tokenise each value into character classes (digits D, letters
-        A, separators -, /, :, space, parens). Two values differ in
-        PATTERN only if shape differs in TOKEN KIND or TOKEN ORDER -
-        NOT merely in the count of digits or letters.
-            SAME pattern:      "5" / "42" / "1000"
-            DIFFERENT pattern: "800-123-4567" / "8001234567"
-      * DOMINANT-BASELINE REQUIREMENT: the dominant pattern must cover
-        >=60% of non-empty rows AND deviating rows must together cover
-        <=40%. Otherwise return {{"issues": []}}.
-      * FLAG ONLY THE MINORITY in `affected_rows` (list ALL minority
-        rows per R6; do NOT truncate).
-      * SINGLETON RULE: a deviating pattern backed by exactly one row
-        is more likely a typo / corrupt row -> route to `typo` or
-        `semantic_incompatible`, skip here.
-      * Emit ONE group-level issue per affected column:
-          - `observed`: "dominant: <pattern> ('<sample>'); minority:
-            <pattern> ('<sample>')"
-          - `suggested_fix`: rewrite minority values to dominant pattern.
-
-      WHAT NOT TO FLAG
-      * Number formatting (% vs 0.x, comma separators) ->
-        `number_format_inconsistency`.
-      * Punctuation marks differing alone -> `punctuation_inconsistency`.
-      * Pure casing differences -> `casing_inconsistency`.
-      * Spelling mistakes -> `typo`.
-      * Out-of-domain values -> `semantic_incompatible`.
-
-  punctuation_inconsistency:
-    name: "Punctuation Inconsistency"
-    category: "Single-Column / Inconsistency"
-    description: >
-      Within a single column, values use inconsistent PUNCTUATION marks
-      (hyphen vs en dash vs em dash, single vs double quotes, period
-      sequences), or carry incidental leading / trailing whitespace.
-      The shape of the value is otherwise identical - only its
-      punctuation differs.
-    example: |
-      * "123-456" vs. "123\u2013456" (hyphen vs en dash)
-      * "123-456" vs. "123---456"   (single hyphen vs triple)
-      * " james smith " vs. "james smith"  (whitespace padding)
-      * "St. Mary" vs. "St Mary"    (period vs none)
-    notes: |
-      WHAT TO FLAG
-      * Compare values after stripping leading/trailing whitespace.
-        Flag rows whose padding clearly deviates from the column's norm.
-      * Compare values after Unicode-normalising punctuation
-        (hyphen / en dash / em dash, smart vs straight quotes).
-        Flag minority rows whose punctuation differs from the dominant
-        choice in the column.
-      * Apply the same DOMINANT-BASELINE rule as `pattern_inconsistency`:
-        only flag when ONE punctuation/whitespace style clearly dominates
-        the column. Emit a group-level finding listing only the minority
-        rows.
-      * `observed`: "dominant: '<dominant>'; minority: '<a>', '<b>'".
-
-      WHAT NOT TO FLAG
-      * Whole-shape changes (digit/letter count, separator placement
-        moving) -> `pattern_inconsistency`.
-      * Pure casing differences -> `casing_inconsistency`.
-      * Spelling mistakes -> `typo`.
-      * Free-text columns where punctuation is naturally inconsistent.
-      * Punctuation differences that visibly change MEANING (e.g. a
-        comma turning a number into something else - that is
-        `number_format_inconsistency` or `pattern_inconsistency`).
-
-  number_format_inconsistency:
-    name: "Number Format Inconsistency"
-    category: "Single-Column / Inconsistency"
-    description: >
-      Within a single column that MEASURES A QUANTITY (a count,
-      amount, percentage, currency, ratio, or other magnitude), values
-      use mixed numeric encodings - percentages mixed with decimals,
-      comma thousands-separators mixed with bare digits, currency
-      symbols inconsistently attached, parentheses for negatives mixed
-      with leading minus, scientific notation mixed with fixed-point,
-      and so on. Each value is individually a valid number; the defect
-      is that the column uses multiple encodings for the SAME KIND of
-      measurement, such that the numeric meaning is preserved when you
-      rewrite one form to the other (e.g. 15% == 0.15, 10,000 ==
-      10000).
-    example: |
+      number_format:
       * "15%" mixed with "0.15" in the same percentage column.
       * "10,000" mixed with "10000" in a count column.
       * "$1,000.00" mixed with "1000" in a currency column.
       * "(50)" mixed with "-50" for negatives.
       * "1.2e6" mixed with "1200000".
+
+      DO NOT FLAG
+      * "USA" appearing 3 times and "Canada" appearing 5 times - those
+        are different entities, not variants of one entity (text).
+      * Same regex shape, different content: "5" / "42" / "1000" - all
+        digits, same shape (pattern).
+      * Names with 1, 2, or 3 tokens ("Mary" / "Mary Jane Smith") -
+        natural variation, not a pattern-shape mismatch.
+      * "Buena Vista" sitting alongside "Adams" / "Boulder" in a
+        County / City / Place-name column - these are different
+        place names; the multi-word one happens to contain a space
+        because that is its real-world spelling, not because the
+        column has a formatting convention. Same logic for
+        "Saint Mary" vs "Adams", "New York" vs "Boston",
+        "United States" vs "Canada". Identifying real-world
+        named-entity columns is the model's job.
+      * "Smtih" vs "Smith" - one-character distortion -> route to `typo`.
+      * Two languages of the same name in a bilingual dataset where
+        both spellings clearly coexist by design.
     notes: |
-      QUANTITATIVE-COLUMN GATE (read this FIRST)
-      * Apply this type ONLY when the column measures a QUANTITY:
-        a count, amount, percentage, currency, ratio, rate, score,
-        magnitude, duration, etc. The arithmetic value of the cell
-        must be what the column is reporting.
-      * If the column holds CODES or IDENTIFIERS - values whose
-        digits are categorical labels rather than magnitudes - return
-        exactly {{"issues": []}}. Examples that are NOT quantitative
-        and MUST be skipped here:
-          - postal/zip/FIPS/area/country/state/county/town codes
-          - product codes, SKUs, account numbers, license numbers
-          - phone numbers, SSNs, route numbers, classification codes
-          - any column where leading zeros, fixed widths, or
-            alphanumeric mixing carry semantic meaning
-        For these columns, '01' is NOT numerically equivalent to '1';
-        rewriting one to the other LOSES information. Length / padding
-        differences in code columns are a `pattern_inconsistency`
-        question (and only when lengths actually mix), never a NFI
-        question.
-      * Heuristics that the column is a CODE, not a quantity:
-          - column name contains 'code', 'id', 'number' as a label
-            (zip, FIPS, postal, route, account), or all values share a
-            short fixed width (2-5 digits) with leading zeros;
-          - values are never aggregated, averaged, or compared
-            arithmetically in any plausible downstream use;
-          - the dominant 'inconsistency' you would flag is JUST a
-            difference in zero-padding or string length.
-        If any of these apply, FAST-SKIP with {{"issues": []}}.
+      SEMANTIC VIEW OF THE COLUMN (read this BEFORE the per-axis
+      tests)
+      * Before reasoning about any sub-pattern, infer what the column
+        ACTUALLY HOLDS from its header and its values: a controlled
+        vocabulary? a structured code? a free-text note? a list of
+        REAL-WORLD NAMED ENTITIES (people, places, organisations,
+        products)? An IDENTITY field (person name, email, URL, phone
+        number) where each value is unique to one real-world subject?
+        The right test depends on this.
 
-      WHAT TO FLAG (after passing the gate above)
-      * Identify the dominant encoding (>=60% of non-empty rows use
-        the same encoding). Emit a group-level finding listing EVERY
-        minority row that uses a different encoding. Do not cap or
-        sample the list (R6).
-      * The dominant and minority forms must denote the SAME numeric
-        value when normalised. If they don't (e.g. one is a code,
-        one is a quantity), this is not NFI.
-      * `observed`: "dominant encoding: <kind> ('<sample>'); minority:
-        <kind> ('<sample>')". Include enough context that downstream
-        review can see both forms side-by-side.
-      * `suggested_fix`: rewrite the minority values to the dominant
-        encoding (e.g. "convert percentages to decimals" or "strip
-        thousands separators").
+      * IDENTITY COLUMNS - DOWN-WEIGHT all sub-patterns to "low".
+        For columns whose values are unique per-subject IDENTIFIERS
+        rather than members of a controlled vocabulary, the base
+        rate of representational defects is low: most apparent
+        "deviations" are the subjects' real-world choices
+        ("john.smith@" vs "John.Smith@" both reach the same
+        inbox). You MAY still flag findings here, but cap
+        ``confidence`` at ``"low"`` for every sub-pattern and
+        prefer silence on weak evidence. These columns are:
+          - EMAIL ADDRESSES (header: email, e-mail, email_address,
+            contact_email, ...)
+          - URLs / WEBSITES (header: url, website, web_site,
+            homepage, link)
+          - PHONE NUMBERS where the column carries the actual phone
+            number (not a status / type indicator)
+        Apply the cap because the model cannot adjudicate "is this
+        a representational defect or a real difference?" without
+        ground truth; the reviewer downstream weighs each "low"
+        flag accordingly.
+        One sub-pattern is exempt from the cap: the PATTERN
+        sub-pattern on PHONE columns when the column-wide format
+        is the question (e.g. mixing "(800) 123-4567" with
+        "8001234567" across many rows) - the dominant-baseline
+        ladder still applies there, since digit-shape conventions
+        ARE a column-level choice. Other sub-patterns on phone
+        columns remain capped at "low".
 
-      WHAT NOT TO FLAG
-      * Code / identifier columns (see gate above).
-      * Zero-padding differences in fixed-width code columns.
-      * Non-numeric pattern differences (date layouts, code shapes) ->
-        `pattern_inconsistency`.
-      * Punctuation-only quirks that don't change the numeric value
-        (e.g. inconsistent thin space vs hard space) ->
-        `punctuation_inconsistency`.
+      * NAMED-ENTITY COLUMNS (county / city / state / country / place
+        / organisation / vendor / agency / product / brand / team /
+        club / school / department / building / street / etc.)
+        carry distinct entities drawn from a CONTROLLED real-world
+        vocabulary, each with its own canonical spelling. Their
+        VARIATION IS CONTENT, NOT FORMAT - and the canonical form
+        is externally verifiable (so casing / text variants ARE
+        worth flagging).
+          - "Buena Vista" alongside "Adams" / "Boulder" in a County
+            column is THREE different counties. The fact that one of
+            them has a space and the others don't is real-world
+            spelling, not a formatting choice.
+          - "Saint Mary" alongside "Adams" is two different cities.
+          - "New York" alongside "Boston" is two different cities.
+          - "United States" alongside "Canada" is two different
+            countries.
+        For these columns, do NOT flag the pattern sub-pattern based
+        on whitespace presence, token count, or character-class
+        composition - those vary because the entities themselves
+        vary. Pattern findings on a named-entity column require
+        evidence of a STRUCTURAL convention (e.g. abbreviations vs
+        full names: "St. Mary" vs "Saint Mary") AND a clear dominant
+        baseline; even then, prefer the text or punctuation
+        sub-pattern over pattern.
+        Casing / punctuation / text sub-patterns CAN apply to
+        named-entity columns (e.g. "buena vista" in a column where
+        every other value uses Title Case is a casing finding) - the
+        carve-out above is specific to PATTERN findings about
+        whitespace / token count.
+
+      TYPE-APPLICABILITY FAST-SKIPs (per sub-pattern)
+      * pattern: skip when the column is structurally free-text prose:
+          - column header (case-insensitive) is in {Name, Description,
+            Notes, Address, Comment, Title, Summary, Remarks, Detail,
+            Details, Body, Bio}, OR
+          - mean length of non-empty values exceeds
+            40 chars.
+        Also skip the pattern sub-pattern (return no pattern finding,
+        though other sub-patterns may still fire) when the column
+        holds a NAMED-ENTITY vocabulary as defined in SEMANTIC VIEW
+        above and the only "deviation" is whitespace presence /
+        token count driven by the entities' real-world spellings.
+        Other sub-patterns (text/casing/punctuation/number_format)
+        may still apply on free-text columns at low confidence; do
+        not skip the whole call just because pattern is inapplicable.
+      * number_format: QUANTITATIVE-COLUMN GATE. Skip the
+        number_format sub-pattern when the column holds CODES or
+        IDENTIFIERS (postal/zip/FIPS/area/country/state/county/town
+        codes; product codes, SKUs, account numbers, license numbers;
+        phone numbers, SSNs, route numbers, classification codes; any
+        column where leading zeros, fixed widths, or alphanumeric
+        mixing carry semantic meaning). For these columns, '01' is
+        NOT numerically equivalent to '1' - rewriting loses
+        information. Heuristics: column name contains 'code', 'id',
+        'number'; all values share a short fixed width (2-5 digits)
+        with leading zeros; values are never aggregated arithmetically;
+        the dominant 'inconsistency' is JUST zero-padding /
+        string-length difference (route to the pattern sub-pattern
+        instead, and only when lengths actually mix).
+        DO NOT silently skip the WHOLE call: the column may still be
+        flaggable under the text / casing / pattern sub-patterns. If
+        AND ONLY IF every sub-pattern is structurally inapplicable to
+        the column (e.g. a perfectly consistent fixed-width FIPS code
+        column with no casing / pattern / punctuation deviations
+        either), return exactly {{"issues": []}}.
+
+      WHAT TO FLAG (regardless of sub-pattern)
+      * Identify the dominant convention along EACH sub-pattern axis.
+        For each axis where a minority deviates, emit ONE group-level
+        finding scoped to that sub-pattern:
+          - `row`: the smallest MINORITY row.
+          - `columns`: the single affected column.
+          - `affected_rows`: ONLY the minority rows that deviate (list
+            ALL of them per R6; do NOT truncate). Do NOT list the
+            dominant rows.
+          - `observed`: "<sub-pattern>: dominant '<X>'; minority '<a>',
+            '<b>'" \u2014 include enough context that the reviewer can see
+            both forms side-by-side.
+          - `explanation`: MUST start with the sub-pattern label
+            ("inconsistency:text", "inconsistency:casing",
+            "inconsistency:pattern", "inconsistency:punctuation",
+            "inconsistency:number_format") so downstream metrics can
+            split recall by sub-type.
+          - `suggested_fix`: rewrite the minority values to the
+            dominant convention (e.g. "convert percentages to
+            decimals", "strip thousands separators", "use the dominant
+            casing", "rewrite to dominant pattern", ...).
+      * If the SAME minority row deviates along multiple axes (e.g.
+        differs in BOTH casing and punctuation), emit ONE finding per
+        axis - keep findings scoped to a single sub-pattern so the
+        downstream breakdown stays meaningful.
+      * SUB-PATTERN GUARDS (apply the right test for the right axis):
+          - text: cell pairs differ on letters (after case-folding and
+            punctuation-normalising), but denote the same entity.
+          - casing: cells are IDENTICAL after case-folding but differ
+            in original casing.
+          - pattern: tokenise into character classes (digits D,
+            letters A, separators -, /, :, space, parens). Two values
+            differ in PATTERN only if shape differs in TOKEN KIND or
+            TOKEN ORDER - NOT merely in the count of digits/letters.
+              SAME pattern:      "5" / "42" / "1000"
+              DIFFERENT pattern: "800-123-4567" / "8001234567"
+            CRITICAL: on NAMED-ENTITY columns (see SEMANTIC VIEW
+            above), space / token-count differences are CONTENT
+            variation between distinct entities, not pattern
+            inconsistency. "Buena Vista" alongside "Adams" /
+            "Boulder" in a County column is NOT a pattern finding -
+            those are three real-world place names that happen to
+            have different word counts. Apply the pattern test only
+            when the column holds a STRUCTURAL artefact (date,
+            phone, code) whose shape carries no semantic content.
+          - punctuation: values are identical after Unicode-normalising
+            punctuation (hyphen / en dash / em dash, smart vs straight
+            quotes) and stripping leading/trailing whitespace, but
+            differ in raw form.
+          - number_format: dominant and minority forms denote the SAME
+            numeric value when normalised (15% == 0.15; 10,000 ==
+            10000). If they do NOT denote the same value, this is
+            NOT number_format - it is either pattern or out of scope.
+      * Confidence ladder (R3, applies to every sub-pattern):
+          - dominant covers >=60% of non-empty rows -> "high"
+          - dominant covers 50-60% -> "medium"
+          - no clear dominant convention (legitimate mixed forms,
+            bilingual data, etc.) -> "low" (still emit so the
+            reviewer can confirm; do not silently drop).
+      * SINGLETON ROUTING: a deviating value backed by exactly one
+        row inside the pattern sub-pattern is often a typo / corrupt
+        row. Prefer routing it to `typo` or `semantic_incompatible`;
+        if neither sibling type clearly fits, flag here at
+        ``confidence: "low"`` rather than dropping it.
+
+      WHAT NOT TO FLAG (handled by siblings; recall preserved by
+      their dedicated calls)
+      * Spelling MISTAKES (1-2 char distortion of a known-correct word)
+        -> `typo`.
+      * Out-of-domain values (a phone number in a Name column) ->
+        `semantic_incompatible`.
       * A single outlier number whose magnitude is wildly off ->
         `numeric_outlier` or `semantic_incompatible`.
-      * Currency mismatches across SOURCES (USD vs EUR) when the data
-        is merged from multiple systems -> `inter_table_inconsistency`.
+      * Cross-column factual / FD conflicts (Country/Capital,
+        Zip/State) -> `fd_violation`.
+      * Currency / unit mismatches across SOURCES when the data is
+        merged from multiple systems -> `inter_table_inconsistency`.
+
+      DOWN-WEIGHT (flag at confidence='low' rather than skip)
+      * Casing / punctuation differences inside free-text prose where
+        the convention is naturally unconstrained.
+      * Proper nouns or rare values whose canonical form cannot be
+        verified from the slice alone (the web-grounded verifier
+        downstream will resolve them).
 
   semantic_incompatible:
     name: "Semantic Incompatible"
@@ -580,24 +843,53 @@ types:
       * A status of "Pending review" in a column whose observed domain
         is {{Open, Closed}}.
     notes: |
+      SEMANTIC VIEW OF THE COLUMN (read this BEFORE flagging)
+      * This type is itself column-semantic: you MUST first infer the
+        column's intended domain from its header + surrounding values
+        (integer count? date? enumerated status? geographic name?
+        monetary amount? person name? email?), then check each cell
+        against that domain.
+      * Inferring the domain reliably requires either (a) a clear
+        header, or (b) >= 5 non-empty peer values forming a coherent
+        type. Below that, mark findings ``confidence: "low"`` rather
+        than "high".
+      * FAST-SKIP (return {{"issues": []}}) when the column is
+        designed to hold mixed types: free-text Notes / Description /
+        Comments / Bio columns; metadata / extra_data / params /
+        attributes columns that store JSON or key=value blobs; any
+        column whose header explicitly indicates "any / variable /
+        misc". These columns have NO single domain to violate.
+      * DOWN-WEIGHT when the column is an IDENTITY column (person
+        name, email, URL, phone) and the suspect cell merely "looks
+        odd" - those columns hold per-subject identifiers whose
+        domain is "any string the subject uses." Only flag at
+        ``high`` when the value is structurally wrong for the
+        identity kind (e.g. an email column carrying "555-1234"
+        clearly belongs in a phone column).
+
       WHAT TO FLAG
-      * For each column, FIRST infer its semantic domain from the
-        surrounding non-empty values: integer count? date? enumerated
-        status? geographic name? monetary amount?
       * Per-cell finding: `row` = offending row, `columns` = the single
         column, `observed` = the offending value, `explanation` names
         the column's inferred domain and what the value actually is.
-      * Be conservative. A value that COULD be coerced to the column's
-        domain (a number written with commas in a numeric column) is
-        not semantically incompatible - it's a format issue.
+      * Confidence ladder:
+          - obvious type/domain mismatch (phone in a Name column,
+            free-text narrative in a numeric column) -> "high"
+          - value plausibly belongs to a different domain but the
+            column's inferred domain is itself uncertain -> "medium"
+          - the column's domain is fuzzy (free-text, mixed types)
+            and the cell merely looks unusual -> "low" (still emit;
+            reviewer confirms).
+      * A value that COULD be coerced to the column's domain (a
+        number written with commas in a numeric column) is a format
+        issue, not a domain mismatch -> route to
+        `inconsistency` (number_format sub-pattern).
 
-      WHAT NOT TO FLAG
+      WHAT NOT TO FLAG (handled by siblings)
       * Out-of-distribution NUMERIC values inside a numeric column ->
         `numeric_outlier`.
       * Spelling mistakes -> `typo`.
       * Format / encoding differences where the underlying domain is
-        correct -> `pattern_inconsistency` or
-        `number_format_inconsistency`.
+        correct -> `inconsistency` (the relevant sub-pattern).
       * Cross-column factual / FD conflicts (Country/Capital mismatch,
         Zip/State mismatch) -> `fd_violation`.
 
@@ -612,11 +904,13 @@ types:
       digit) - not merely a legitimately large observation in a
       naturally heavy-tailed quantity.
 
-      Be CONSERVATIVE. Most "extreme-looking" numbers in real-world
+      Be DELIBERATE. Most "extreme-looking" numbers in real-world
       tables (death counts, case counts, sales spikes, populations,
-      revenues) are genuine. Only flag when both (a) the gap is
-      large AND (b) the value is implausible for what the column
-      measures.
+      revenues) are genuine, so calibrate confidence carefully:
+      flag implausible values at ``high`` confidence, large-gap but
+      plausible values at ``low`` so the reviewer can sanity-check
+      them. Borderline cases are exactly what the human verifier
+      wants to see - do not silently drop them.
     example: |
       DO flag:
       * A salary of $1,000,000 when peer values cluster $50k-$120k
@@ -639,17 +933,39 @@ types:
       * A 2024 row with 4x the value of 2020-2023 in a growth/usage
         metric - growth spikes happen.
     notes: |
-      HARD PRE-CHECK - SKIP THE COLUMN UP-FRONT IF EITHER IS TRUE.
-      Skip (return {{"issues": []}} immediately) when ANY of the
-      following holds for the column:
-        * The column does not contain numeric (or numeric-like)
-          values - free text, identifiers, dates, codes are not in
-          scope here.
-        * Fewer than ${peer_min_outlier} peer DETAIL rows (i.e.
-          excluding the total/summary rows defined below) are
-          visible in the chunk. Tighter than the global R2 minimum
-          of ${peer_min}: distributional claims need a real
-          distribution.
+      SEMANTIC VIEW OF THE COLUMN (read this BEFORE flagging)
+      * Outlier reasoning is meaningful only when the column reports
+        a QUANTITY: a count, amount, percentage, currency, ratio,
+        rate, score, magnitude, duration, age, etc. The arithmetic
+        value of the cell must be what the column is reporting.
+      * FAST-SKIP (return {{"issues": []}}) for these numeric-LOOKING
+        columns whose digits encode something other than a quantity:
+          - IDENTIFIER / CODE columns parsed as integers (zip, FIPS,
+            postal, area, county/town code, route number, account
+            number, SKU, product code, license number, classification
+            code). "1234" vs "98765" here does not denote a different
+            magnitude.
+          - YEAR columns (year_established, founded_in, year_built,
+            release_year). 1850 alongside 2024 is a legitimate range,
+            not an outlier. Only flag values that are physically
+            impossible (year=20200, year=-5).
+          - VERSION numbers (1.2.3, 2.0).
+          - DATES parsed as ordinals / Excel serials.
+          - PHONE numbers / SSNs / passport numbers stored as digits.
+          - ID columns (customer_id, employee_id, record_id) even
+            when they happen to be integers.
+        Heuristic: column name contains 'code', 'id', 'number',
+        'zip', 'fips', 'route', 'year', 'version', 'isbn'; or all
+        values share a fixed width with leading-zero structure; or
+        the values are never plausibly aggregated arithmetically.
+      * For columns that ARE quantities but are KNOWN to be
+        heavy-tailed (death counts, case counts, sales spikes,
+        populations, revenues, follower counts), prefer
+        ``confidence: "low"`` for extreme-but-plausible values.
+        The DOWN-WEIGHT list below repeats this for visibility.
+      * IDENTITY columns (person name, email, URL) are non-numeric
+        and already excluded; you don't need a separate carve-out
+        for them here.
 
       EXCLUDE TOTAL / SUMMARY ROWS BEFORE COMPARING.
       Drop any row whose first cell, label column, or known
@@ -659,47 +975,46 @@ types:
       magnitude is the design, not an outlier. Apply the
       distributional argument only to the remaining detail rows.
 
-      WHAT TO FLAG (ALL conditions must hold)
-      * The column passed the HARD PRE-CHECK above.
-      * Statistical gap: the value is at least an order-of-magnitude
-        away from the median, OR >=${iqr_multiple} IQR from the
-        median (raised from 3 - be stricter). A value that is merely
-        the largest in a small sample is NOT enough.
-      * Plausibility check: write down what the column measures, then
-        ask "could a real entity legitimately have this value?" Only
-        flag if the answer is clearly NO (typo, extra digit, wrong
-        unit, physically impossible).
-      * `explanation` MUST cite both pieces of evidence: peer summary
-        AND why the value is implausible. E.g. "median ~75k, IQR
-        ~30k; this row is 10M, ~130 IQRs above median, and the role
-        'Junior Analyst' makes 10M implausible."
-      * Per-cell finding. For multiple outliers in the same column,
-        use a group-level finding listing ALL outlier rows in
-        `affected_rows` per R6 (do NOT truncate).
+      CONFIDENCE LADDER (flag at every rung; calibrate confidence)
+      * ``high``   - the value is BOTH >=order-of-magnitude (or
+                     >=${iqr_multiple} IQR) from the median AND
+                     implausible for what the column measures
+                     (typo, extra digit, wrong unit, physically
+                     impossible). Peer count >=${peer_min_outlier}.
+      * ``medium`` - large statistical gap (e.g. 3-${iqr_multiple} IQR
+                     from the median) and the value is suspicious
+                     but could plausibly be real. Peer count
+                     >=${peer_min}.
+      * ``low``    - the value stands out (largest in a small chunk,
+                     2-3 IQR from median, only a handful of peers
+                     visible) but you cannot rule out heavy-tail
+                     behaviour. Flag anyway so the reviewer sees it.
+      `explanation` MUST cite the peer summary AND a brief
+      plausibility note. E.g. "median ~75k, IQR ~30k; this row is
+      10M, ~130 IQRs above median, and the role 'Junior Analyst'
+      makes 10M implausible."
 
-      WHAT NOT TO FLAG
-      * HEAVY-TAILED COUNT / EVENT COLUMNS. Death tolls, case counts,
-        casualty figures, earthquake magnitudes, sales spikes,
-        follower counts, view counts, etc. are inherently
-        heavy-tailed - one row at 15 when most are 0-1 is normal
-        variation, NOT an outlier. Do not flag unless the value is
-        physically impossible (e.g. >world population).
-      * The single largest / single smallest value in a small chunk,
-        when no other evidence suggests an error.
+      Per-cell finding. For multiple outliers in the same column,
+      use a group-level finding listing ALL outlier rows in
+      `affected_rows` per R6 (do NOT truncate).
+
+      WHAT NOT TO FLAG (genuinely out of scope)
       * Non-numeric values that don't belong in the column ->
         `semantic_incompatible`.
-      * Mild variation. Do NOT flag values that are merely "large" or
-        "small" without a concrete distributional argument AND a
-        plausibility argument.
       * Format-only quirks (one row uses "%" while others are
-        decimals) -> `number_format_inconsistency`.
+        decimals) -> `inconsistency` (number_format sub-pattern).
       * A row whose number violates an algebraic relation
         (price*qty != total) -> `row_calculation_inconsistency`.
-      * A whole column whose magnitudes look "off" but consistently so
-        (likely a unit choice, not an error).
-      * When in doubt, DO NOT FLAG. False positives on this type are
-        more harmful than missed outliers; downstream consumers can
-        spot extremes themselves.
+
+      DOWN-WEIGHT (flag at confidence='low' rather than skip)
+      * HEAVY-TAILED COUNT / EVENT COLUMNS (death tolls, case
+        counts, magnitudes, sales spikes, follower counts). One row
+        at 15 when most are 0-1 is normal variation; flag at
+        ``low`` so the reviewer can confirm.
+      * The single largest / smallest in a small chunk -> ``low``.
+      * A whole column whose magnitudes look "off" but consistently
+        so (likely a unit choice). Flag the whole column at ``low``
+        with an explanation; the reviewer decides.
 
   # =====================================================================
   # MULTI-COLUMN (intra-row)
@@ -723,6 +1038,49 @@ types:
       * Same EmployeeID appears with two different Departments.
       * Country = "France" implies Capital = "Paris" (within-row FD).
     notes: |
+      SEMANTIC VIEW OF THE COLUMNS (read this BEFORE flagging)
+      * An FD requires a DETERMINANT column whose value uniquely
+        identifies a real-world entity in a controlled vocabulary,
+        and a DEPENDENT column whose value is a strict function of
+        that entity (zip -> state, country -> capital, productcode
+        -> productname, employee_id -> department, isbn -> title).
+      * Candidate determinants must be IDENTIFIERS / CODES drawn
+        from a controlled real-world vocabulary. Two carve-outs:
+
+        FAST-SKIP (return {{"issues": []}}) when the only candidate
+        determinants visible in the slice are:
+          - PERSON NAMES. "John Smith" is not a determinant for
+            anything: many distinct people share the same name, so
+            "John Smith -> Department=A on row 3 vs Department=B
+            on row 17" is two different employees, not an FD
+            violation. The homonym problem makes name-keyed FD
+            findings structurally unsound; stay silent.
+          - FREE-TEXT columns (Notes, Description, Comments). FDs
+            don't apply.
+
+        DOWN-WEIGHT (cap ``confidence`` at ``"low"``) when the
+        candidate determinants are:
+          - EMAIL ADDRESSES, URLs, PHONE NUMBERS, free-form
+            ADDRESSES. These are unique-per-subject identity
+            values, so the same value rarely repeats across rows
+            and most apparent "violations" reflect sparse
+            evidence. When the same email/URL/phone DOES repeat
+            with conflicting dependents inside the slice, that is
+            a real signal worth surfacing - emit the finding at
+            ``confidence: "low"`` so the reviewer can adjudicate.
+            (Within a single row, a strict FD like Zip->State is
+            still allowed at the normal confidence ladder.)
+      * The DEPENDENT column must be a deterministic FUNCTION of
+        the determinant. Skip when the dependent is itself
+        free-text or a soft attribute (e.g. determinant=Country,
+        dependent=Notes). Soft attributes can vary per record by
+        design.
+      * DOWN-WEIGHT to ``confidence: "low"`` for soft / approximate
+        FDs (City -> Region usually, but boundary cities exist).
+        The dedicated WHAT TO FLAG ladder below already encodes
+        this; the carve-out exists so you don't elevate soft
+        candidates to "high".
+
       WHAT TO FLAG
       * Identify candidate determinants: codes, IDs, postal codes,
         identifiers that should map deterministically to a dependent
@@ -734,17 +1092,26 @@ types:
           - `affected_rows`: every row in the disagreeing group
           - `observed`: e.g. "Zip=94103 -> State=CA (rows 3,4) vs
             State=NY (row 17)"
-      * Within-row: only when the FD is strong real-world knowledge
-        (Zip->State, Country->Capital). Per-row finding.
+      * Within-row FD finding: only when the FD is strong real-world
+        knowledge (Zip->State, Country->Capital). Per-row finding.
+      * Confidence ladder:
+          - strict, well-known FD violated (Zip->State,
+            ProductCode->Name in the same table) -> "high"
+          - candidate FD that holds across the slice except for a
+            small disagreeing minority -> "medium"
+          - soft / approximate dependency (City -> Region
+            typically, with known exceptions). Flag the
+            disagreeing rows at "low" so the reviewer can decide
+            whether the exception is legitimate.
 
-      WHAT NOT TO FLAG
-      * Soft / approximate dependencies (City -> Region typically but
-        with exceptions) - too easy to false-positive.
+      WHAT NOT TO FLAG (handled by siblings)
       * Numeric derivations between row columns ->
         `row_calculation_inconsistency`.
       * String composition / concatenation rules (FullName == First +
         " " + Last) -> `string_calculation_inconsistency`.
       * Two rows that are exact duplicates -> `row_duplication`.
+      * Within-column representational variants (text / casing /
+        pattern / punctuation / number_format) -> `inconsistency`.
       * Disagreements ACROSS tables / sources for the same entity ->
         `inter_table_inconsistency`.
 
@@ -764,6 +1131,35 @@ types:
       * start=100, end=120, delta=15 (expected 20).
       * principal=1000, rate=0.05, interest=60 (expected 50).
     notes: |
+      SEMANTIC VIEW OF THE COLUMNS (read this BEFORE flagging)
+      * Algebraic reasoning is meaningful only when EVERY column in
+        the candidate relation is a true QUANTITY (count, amount,
+        currency, percentage, magnitude, duration). The header /
+        peer values must support that reading.
+      * FAST-SKIP (return {{"issues": []}}) when the candidate
+        components include any of these numeric-LOOKING but
+        non-quantitative columns:
+          - IDENTIFIER / CODE columns (zip, FIPS, SKU, account
+            number, employee_id, license number, route number).
+            "id_a + id_b" is meaningless.
+          - YEAR columns (release_year, founded_in). 2020 + 2024 is
+            not a meaningful sum.
+          - VERSION numbers, phone numbers, classification codes
+            stored as digits.
+          - TIMESTAMPS / DATES parsed as ordinals (unless the
+            relation is explicitly a date diff: end_date -
+            start_date = duration_days).
+        Heuristic: if any candidate component header matches the
+        identifier/code/year/version pattern, do not infer an
+        algebraic relation through it.
+      * IDENTITY columns (person name, email, URL) are non-numeric
+        and therefore inherently outside this type's scope.
+      * The relation must be NAMED OR STRONGLY IMPLIED by the
+        headers (subtotal+tax=total; price*qty=total; end-start
+        =delta). Don't manufacture relations between columns that
+        merely happen to have similar magnitudes - those are
+        coincidences, not algebra.
+
       WHAT TO FLAG
       * Identify columns whose headers / typical magnitudes suggest an
         algebraic relation (price*qty=total, subtotal+tax=total,
@@ -774,20 +1170,27 @@ types:
       * Per-row finding: `columns` = every component plus the derived
         column; `observed` = "a=10, b=3, c=35 (expected 30)";
         `explanation` names the relation.
-      * Use reasonable rounding tolerance - DO NOT flag floating-point
-        noise.
+      * Use reasonable rounding tolerance - floating-point noise is
+        not a defect.
+      * Confidence ladder:
+          - relation is named explicitly by the headers
+            (subtotal+tax=total, price*qty=total) and the mismatch
+            is well above rounding tolerance -> "high"
+          - relation is strongly suggested by header semantics but
+            there is some ambiguity (e.g. "amount" might or might
+            not include tax) -> "medium"
+          - relation is plausible but speculative; flag at
+            "low" so the reviewer can confirm rather than dropping.
 
-      WHAT NOT TO FLAG
+      WHAT NOT TO FLAG (handled by siblings)
       * String composition (FirstName + LastName != FullName) ->
         `string_calculation_inconsistency`.
       * A single value numerically unusual but not an algebraic
         inconsistency -> `numeric_outlier`.
       * Mixed number formats (with/without commas) ->
-        `number_format_inconsistency`.
+        `inconsistency` (number_format sub-pattern).
       * Non-arithmetic determinant/dependent disagreements (Zip vs
         State, ProductCode vs Category) -> `fd_violation`.
-      * Relations you cannot confidently derive from the headers
-        alone - this detector should be conservative.
 
   string_calculation_inconsistency:
     name: "String / Calculation Inconsistency"
@@ -810,6 +1213,39 @@ types:
       * Domain="example.com", User="alice", Email="bob@example.com"
         (Email should be "alice@example.com").
     notes: |
+      SEMANTIC VIEW OF THE COLUMNS (read this BEFORE flagging)
+      * String composition is meaningful only when (a) the COMPOSED
+        column's header strongly implies a deterministic rule, AND
+        (b) every COMPONENT column is itself part of that rule's
+        natural recipe. Examples that meet both:
+          - FullName <- FirstName + " " + LastName
+          - Email    <- User + "@" + Domain
+          - Address  <- Street + ", " + City + " " + Zip
+          - URL      <- Scheme + "://" + Host + Path
+          - SKU      <- Brand + "-" + Code
+      * FAST-SKIP (return {{"issues": []}}) when none of the
+        visible columns triggers this pattern, OR when any of the
+        candidate component columns is:
+          - A FREE-TEXT column (Notes, Description, Comments, Bio,
+            Remarks). Composition with free-text is not
+            deterministic.
+          - A NUMERIC measurement (amount, total, qty). Numeric
+            relations belong to `row_calculation_inconsistency`.
+          - An IDENTIFIER / ID column whose value is opaque (no
+            meaningful contribution to the composed string).
+      * NOTE on identity columns: this type LEGITIMATELY operates
+        on identity-shaped columns when those identities ARE the
+        composition output - e.g. an Email column is composed from
+        User + Domain, a FullName column is composed from FirstName
+        + LastName. The other typo / inconsistency carve-outs that
+        skip identity columns do NOT apply here when the identity
+        IS the composed result. Do flag a row where FirstName=
+        "Alice", LastName="Brown", FullName="Bob Smith".
+      * DOWN-WEIGHT to ``confidence: "low"`` when the composition
+        rule is plausible but separator / ordering / wording have
+        genuine flexibility ("Smith, Alice" vs "Alice Smith";
+        addresses with optional unit numbers).
+
       WHAT TO FLAG
       * Identify columns whose headers strongly suggest a string
         composition rule (FullName from First+Last; Address from
@@ -822,22 +1258,26 @@ types:
       * Per-row finding: `columns` = every component plus the composed
         column; `observed` = the actual vs expected string;
         `explanation` names the composition rule.
-      * Be conservative on natural-language fields where ordering or
-        wording is genuinely flexible (e.g. "Smith, Alice" vs
-        "Alice Smith" may both be acceptable representations of the
-        same name).
+      * Confidence ladder:
+          - deterministic rule strongly implied by headers (Email
+            from User+Domain; FullName from First+Last) and the
+            mismatch is unambiguous -> "high"
+          - composition rule is plausible but column ordering /
+            separators / wording have genuine flexibility (e.g.
+            "Smith, Alice" vs "Alice Smith") -> "medium" or "low"
+            depending on how clear the row's mismatch is
+          - rule speculative or column is free-text-leaning ->
+            "low" (still emit; reviewer confirms).
 
-      WHAT NOT TO FLAG
+      WHAT NOT TO FLAG (handled by siblings)
       * Numeric derivations -> `row_calculation_inconsistency`.
       * Strict identifier-based FDs (Zip->State, ProductCode->Name)
         -> `fd_violation`.
       * Pure casing / spelling / formatting differences on a single
-        column -> `casing_inconsistency` / `typo` /
-        `pattern_inconsistency`.
+        column -> `inconsistency` (the relevant sub-pattern) or
+        `typo`.
       * Free-text Notes / Description columns where no deterministic
         composition is expected.
-      * Composition rules you cannot confidently derive from the
-        headers alone - this detector should be conservative.
 
   # =====================================================================
   # MULTI-ROW (intra-table cross-row)
@@ -857,6 +1297,38 @@ types:
         representing the same transaction recorded twice.
       * Three rows that are character-for-character identical.
     notes: |
+      SEMANTIC VIEW OF THE TABLE (read this BEFORE flagging)
+      * Whether row_duplication is even a defect depends on what
+        kind of table this is. Use the column set to infer the
+        table's semantic role:
+          - SNAPSHOT / MASTER-DATA / INVENTORY / DIRECTORY tables
+            (one row per real-world entity: organisations, places,
+            products, employees, schools). Exact-row repeats here
+            are defects with high confidence.
+          - TRANSACTION LOG / EVENT STREAM / AUDIT TABLE / TIME
+            SERIES (one row per event; presence of timestamp /
+            event_id / transaction_id / sequence_no / created_at /
+            recorded_at / log_time columns). Repeated values
+            across rows can be legitimate replays of the same
+            measurement at different times. Only flag exact full-
+            row duplicates here at ``confidence: "low"`` and only
+            after confirming the timestamp-bearing columns also
+            match exactly (otherwise the rows are distinct events).
+          - SUMMARY / AGGREGATE tables where some rows are totals
+            ("Total", "Subtotal", "Grand Total" labels). Apply the
+            total-row exclusion rule from `numeric_outlier` and
+            don't treat aggregate rows as duplicates of detail
+            rows.
+      * IDENTITY-FIELD POOLING: when the identity columns are
+        person names / emails / URLs / phone numbers, two rows
+        sharing the SAME identity and otherwise-matching attributes
+        are very likely the same real-world subject recorded twice
+        - this is the canonical row_duplication case. (The typo /
+        inconsistency carve-outs that skip these columns DON'T
+        suppress duplication checks: identity + matching
+        attributes = duplicate, regardless of whether the identity
+        itself was checked for typos.)
+
       WHAT TO FLAG
       * Set of rows where every observed column has an identical
         non-empty value.
@@ -872,8 +1344,8 @@ types:
 
       WHAT NOT TO FLAG
       * Near-duplicates caused only by formatting differences on
-        structured columns - first apply `pattern_inconsistency` /
-        `number_format_inconsistency`; only flag here if, after a
+        structured columns - first apply `inconsistency` (pattern /
+        number_format sub-pattern); only flag here if, after a
         mental normalisation, the rows are genuine duplicates.
       * Distinct entities that merely look similar.
 
@@ -916,14 +1388,48 @@ types:
       * Block A uses header "CustomerID"; block B uses
         "ClientNumber" for what is clearly the same join key.
     notes: |
-      DEFAULT BEHAVIOUR.
-      The slice is almost always a single table with no sibling
-      table visible. Unless the chunk itself contains the
-      disagreeing pieces, return {{"issues": []}}. Do NOT speculate
-      from column names alone.
+      SEMANTIC VIEW OF THE SLICE (read this BEFORE flagging)
+      * This type fires only when the slice ITSELF carries enough
+        evidence of cross-source disagreement to ground a finding.
+        Without that, the call should produce no findings.
+      * APPLICABLE signals to look for:
+          - Two or more SOURCE BLOCKS stacked inside the slice
+            (the same column carries clearly different value
+            distributions across row ranges; or a "source"/"file"
+            metadata column distinguishes blocks).
+          - An FK-LIKE column whose value lies outside the
+            controlled set OBSERVED ELSEWHERE in the slice.
+          - The SAME header name carrying clearly different
+            concepts across blocks, or different headers naming the
+            same concept.
+          - Mixed UNIT / SCALE / ENCODING on a column with no
+            disambiguating metadata column.
+      * FAST-SKIP (return {{"issues": []}}) when:
+          - The slice is one homogeneous block of a single table
+            with no FK-like column AND no controlled vocabulary
+            visible. There is no cross-source signal to find.
+          - Disagreements live within a SINGLE table and would be
+            caught by `fd_violation`, `row_duplication`, or
+            `inconsistency` - those siblings have full coverage;
+            don't double-flag.
+      * FK-like columns must be IDENTIFIERS / CODES (department
+        ID, customer ID, product code, region code). Person names,
+        emails, free-text fields are NOT FK-like; treat them as
+        identity content rather than as keys for orphan detection.
+      * DOWN-WEIGHT to ``confidence: "low"`` for column-name
+        synonym/homonym suspicions where you don't have actual
+        value-level evidence inside the slice.
 
-      WHAT TO FLAG (only when the disagreement is fully visible
-      inside the slice)
+      DEFAULT BEHAVIOUR.
+      The slice is usually a single table with no sibling table
+      visible. Most calls will produce no findings. Do NOT
+      hallucinate cross-table evidence - but do not stay silent on
+      cross-source signals that ARE visible in the slice (stacked
+      blocks, mixed encodings on the same column, FK-like values
+      against an observed controlled set).
+
+      WHAT TO FLAG (when supporting evidence is visible inside the
+      slice; downstream verification will filter false positives)
       * Per-cell finding when an FK-like column carries a value that
         falls clearly outside the observed controlled set in the
         slice.
@@ -942,15 +1448,18 @@ types:
         different header names for the same concept, or the same
         header name for clearly different concepts.
         `explanation`: "inter_table_naming: <synonym|homonym>".
+      * Confidence: ``high`` only when the disagreement is fully
+        materialised in the slice; ``medium`` for one-sided
+        evidence (e.g. an FK-like value with an observed but
+        partial controlled set); ``low`` for column-name signals
+        where you suspect a cross-source defect but cannot fully
+        verify it from the slice.
 
-      WHAT NOT TO FLAG
+      WHAT NOT TO FLAG (handled by siblings)
       * Within-table FD violations -> `fd_violation`.
       * Within-table duplicate rows -> `row_duplication`.
       * Single-source columns whose values use mixed encodings ->
-        `number_format_inconsistency` or `pattern_inconsistency`.
+        `inconsistency` (number_format / pattern sub-pattern).
       * Format-only differences on identifier columns ->
-        `pattern_inconsistency` or `casing_inconsistency`.
-      * Anything that requires evidence from a parent table or
-        sibling source not visible in the chunk - return
-        {{"issues": []}} rather than speculating.
+        `inconsistency` (pattern / casing sub-pattern).
 

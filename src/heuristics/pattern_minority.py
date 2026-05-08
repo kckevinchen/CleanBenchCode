@@ -67,7 +67,7 @@ def _compress(sig: str) -> str:
 @register_detector
 class PatternMinorityDetector(HeuristicDetector):
     name = "pattern_minority"
-    default_error_type = "pattern_inconsistency"
+    default_error_type = "inconsistency"
 
     def __init__(
         self,

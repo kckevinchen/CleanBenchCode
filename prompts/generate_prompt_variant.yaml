@@ -60,6 +60,24 @@ base:
        round, soften, or paraphrase numbers - they are part of the
        behavioural contract.
 
+    7. PRESERVE THE RECALL-OVER-PRECISION STANCE. The seed prompt
+       favours recall over precision: borderline / speculative
+       defects are flagged with ``confidence: "low"`` rather than
+       silently skipped, because a downstream verifier filters
+       false positives. Your rewrite MUST keep this stance:
+         * Do NOT introduce phrases like "be conservative",
+           "precision over recall", "when in doubt do not flag",
+           "stay silent", "fast-skip on weak evidence".
+         * Do NOT convert a "flag at confidence: low" branch into
+           a hard skip / empty-list return.
+         * Preserve the confidence ladder (high / medium / low)
+           and the rule that ``low`` confidence is a first-class
+           verdict, not a fallback.
+         * The only fast-skip permitted is TYPE-APPLICABILITY
+           (e.g. the number_format sub-pattern of `inconsistency`
+           on a code column, or the pattern sub-pattern on free-text
+           prose) - keep these where the seed has them.
+
   user_template: |
     # Error-type definition to rewrite
 
@@ -110,6 +128,12 @@ base:
          fine; dropping or weakening an exclusion is a failure.
       4. Confirm your `example` block uses CASES different from the
          seed's (Rule 3) but stays within the same scope.
+      5. Scan your rewrite for precision-bias phrasing forbidden by
+         Rule 7 ("be conservative", "precision over recall", "when
+         in doubt do not flag", "stay silent on weak evidence"). If
+         present, replace with the seed's recall stance. Confirm the
+         confidence ladder (high / medium / low) is intact and that
+         every "flag at low confidence" branch is preserved.
 
     ## Output
 

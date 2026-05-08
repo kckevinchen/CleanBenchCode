@@ -28,6 +28,7 @@ from src.core.data_loader import (
     COLUMN_MODE_SINGLE,
     CsvChunk,
     _dedupe_columns,
+    _visible_whitespace,
     iter_chunks,
     load_csv,
 )
@@ -280,3 +281,64 @@ class TestCsvChunkToMarkdown:
         # Trail ellipsis appears; raw 500-char string does not.
         assert "\u2026" in md
         assert "x" * 500 not in md
+
+    def test_marks_trailing_space(self) -> None:
+        # The Markdown table renderer (tabulate) right-pads cells with
+        # spaces - so trailing whitespace inside a cell would normally
+        # be invisible. ``to_markdown`` must inject a sentinel so the
+        # LLM can still see it.
+        df = pd.DataFrame({"City": ["Centerville ", "Adams"]})
+        chunk = CsvChunk(
+            source=Path("x.csv"),
+            start_row=0, end_row=2,
+            headers=["City"],
+            frame=df, column_mode=COLUMN_MODE_ALL,
+        )
+        md = chunk.to_markdown(max_cell_chars=120)
+        assert "Centerville\u2423" in md
+        # The "clean" cell is rendered without any sentinel.
+        assert " Adams " in md  # surrounded by table padding spaces
+
+    def test_marks_leading_space_and_embedded_newline(self) -> None:
+        df = pd.DataFrame({"Note": [" foo", "bar\nbaz"]})
+        chunk = CsvChunk(
+            source=Path("x.csv"),
+            start_row=0, end_row=2,
+            headers=["Note"],
+            frame=df, column_mode=COLUMN_MODE_ALL,
+        )
+        md = chunk.to_markdown(max_cell_chars=120)
+        assert "\u2423foo" in md         # leading space
+        assert "bar\u21B5baz" in md      # embedded \n
+
+
+# ---------------------------------------------------------------------------
+# _visible_whitespace
+# ---------------------------------------------------------------------------
+
+
+class TestVisibleWhitespace:
+    def test_no_change_for_clean_value(self) -> None:
+        assert _visible_whitespace("hello") == "hello"
+        # Internal single-space runs are preserved as-is.
+        assert _visible_whitespace("hello world") == "hello world"
+        # Internal multi-space runs are also preserved (tabulate keeps
+        # them; only edge whitespace and control chars get sentinels).
+        assert _visible_whitespace("foo  bar") == "foo  bar"
+
+    def test_leading_and_trailing_runs_are_marked(self) -> None:
+        assert _visible_whitespace(" foo ") == "\u2423foo\u2423"
+        assert _visible_whitespace("   foo") == "\u2423\u2423\u2423foo"
+        assert _visible_whitespace("foo   ") == "foo\u2423\u2423\u2423"
+        assert _visible_whitespace("   ") == "\u2423\u2423\u2423"
+
+    def test_special_chars_are_substituted(self) -> None:
+        assert _visible_whitespace("a\tb") == "a\u2192b"
+        assert _visible_whitespace("a\nb") == "a\u21B5b"
+        assert _visible_whitespace("a\rb") == "a\u21B5b"
+        assert _visible_whitespace("a\u00A0b") == "a\u2423b"     # NBSP -> open box
+        assert _visible_whitespace("a\u200Bb") == "a\u00B7b"      # ZWSP -> middle dot
+        assert _visible_whitespace("a\uFEFFb") == "a\u00B7b"      # BOM -> middle dot
+
+    def test_empty_string_unchanged(self) -> None:
+        assert _visible_whitespace("") == ""

@@ -7,6 +7,11 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'" />
   <title>Data cleaning - labelling</title>
   <link rel="stylesheet" href="./styles.css" />
+  <!-- Cross-sheet (multi-table) comparison panes share styles with the
+       legacy mt_label.html surface. Inlined here because the unified
+       label page needs both the CSV grid (for cluster items) and the
+       side-by-side panel layout (for multi-table findings). -->
+  <link rel="stylesheet" href="./mt_label.css" />
 </head>
 <body>
   <header>
@@ -18,33 +23,44 @@
     <div class="actions">
       <a href="./">← Runs</a>
       <a id="export-link" href="#" download>Export benchmark</a>
+      <a id="export-by-type-link" href="#" download title="One JSONL per error_type, bundled as a ZIP">Per-type benchmark</a>
+      <span class="export-single" title="Download just one error_type as JSONL">
+        <select id="export-single-type" aria-label="Select error type to export">
+          <option value="">(error type)</option>
+        </select>
+        <a id="export-single-link" href="#" download class="muted" aria-disabled="true">Download</a>
+      </span>
+      <a id="export-sources-link" href="#" download title="ZIP of source CSVs minus exclusions (whole-file, row, and column exclusions are stripped out)">Export source CSVs</a>
       <a href="/api/docs" target="_blank" rel="noopener">API</a>
     </div>
   </header>
 
   <aside class="sidebar" id="sidebar">
     <div class="filters">
-      <label>
+      <div class="filter-cell filter-cell-wide">
         <span>Source</span>
-        <select id="filter-source"><option value="">(all)</option></select>
+        <div class="multi-filter" id="filter-source" data-empty-label="(all)"></div>
         <span id="filter-source-xlsx" class="xlsx-actions" hidden></span>
-      </label>
-      <label>
+      </div>
+      <div class="filter-cell">
         <span>Status</span>
-        <select id="filter-status">
-          <option value="">(any)</option>
-          <option value="unlabeled">unlabeled</option>
-          <option value="tp">tp</option>
-          <option value="fp">fp</option>
-          <option value="partial">partial</option>
-          <option value="unsure">unsure</option>
-          <option value="skip">skip</option>
-        </select>
-      </label>
-      <label>
+        <div class="multi-filter" id="filter-status" data-empty-label="(any)"></div>
+      </div>
+      <!-- Column-status filter narrows the queue to clusters whose
+           (source, column) cell is in a particular adaptive-loop arm
+           state (budget-capped, exploring, converged, too sparse).
+           Hidden for runs with no per-arm labelling-effort artifact;
+           the wrapper's [hidden] is toggled by refreshLabelingEffort. -->
+      <div class="filter-cell" id="filter-column-status-cell" hidden>
+        <span>Column status
+          <span class="muted info" title="Adaptive arm state for the cluster's (source, column). budget-capped = the detector hit k_max while still finding new defects, so the column likely needs further inspection.">&#9432;</span>
+        </span>
+        <div class="multi-filter" id="filter-column-status" data-empty-label="(any)"></div>
+      </div>
+      <div class="filter-cell filter-cell-wide">
         <span>Error type</span>
-        <select id="filter-error-type"><option value="">(any)</option></select>
-      </label>
+        <div class="multi-filter" id="filter-error-type" data-empty-label="(any)"></div>
+      </div>
     </div>
     <div class="queue" id="queue"></div>
   </aside>
@@ -54,7 +70,35 @@
       <span id="csv-source" class="muted">(no source)</span>
       <span id="csv-pos" class="muted"></span>
     </div>
+    <!-- Exclusion bar: lets the operator mark this CSV (or specific
+         rows / columns within it) as too messy to label. Persists to
+         <run_dir>/exclusions.jsonl. Only the visual mark is applied
+         here - excluded items remain visible so they can be re-labelled
+         or undone via the active-list chips below the inputs. -->
+    <div class="exclude-bar" id="exclude-bar" hidden>
+      <button type="button" id="exclude-csv-btn" class="exclude-btn" title="Mark this entire CSV as excluded from labelling">✕ Exclude this CSV</button>
+      <span class="exclude-input">
+        <label for="exclude-rows-input">rows</label>
+        <input id="exclude-rows-input" type="text" placeholder="e.g. 5, 8-12, 20" autocomplete="off" />
+        <button type="button" id="exclude-rows-btn">Exclude</button>
+      </span>
+      <span class="exclude-input">
+        <label for="exclude-cols-input">columns</label>
+        <input id="exclude-cols-input" type="text" placeholder="e.g. age, name" autocomplete="off" />
+        <button type="button" id="exclude-cols-btn">Exclude</button>
+      </span>
+      <span class="exclude-active" id="exclude-active"></span>
+    </div>
+    <!-- Single-cell / multi-row / multi-column clusters: full CSV
+         viewer with the target row highlighted. ``hidden`` toggled by
+         label.js when the selected queue item switches between cluster
+         and multi-table. -->
     <div class="csv-viewer" id="csv-viewer"></div>
+    <!-- Multi-table cross-sheet findings: side-by-side row panels
+         (one per linked sheet/row). Reuses the .mt-compare grid from
+         mt_label.css so canonical-column alignment + cell-disagreement
+         highlighting work without further markup. -->
+    <div class="mt-compare" id="mt-compare" hidden></div>
     <!-- Per-(source, column) labelling-effort projection. Driven by the
          per-arm Good-Turing artifact written by adaptive runs. Hidden
          when the run has no per-arm estimates (single-pass / fixed-K).
@@ -63,6 +107,25 @@
       <summary>
         <span class="effort-summary-text">Labelling effort projection</span>
         <span id="effort-headline" class="muted"></span>
+        <!-- Live progress for an in-flight column-audit job. Hidden
+             until the script writes column_verifications/_progress.json
+             (and the polling loop in label.js notices). Shows
+             "auditing N/M columns - <src>.<col> - X/Y values" plus
+             a striped progress bar driven by the cumulative ratio. -->
+        <span id="audit-progress" class="audit-progress" hidden>
+          <span class="audit-progress-text"></span>
+          <span class="audit-progress-bar"><span class="audit-progress-fill"></span></span>
+          <button type="button"
+                  id="audit-progress-cancel"
+                  class="audit-progress-cancel"
+                  title="Cancel the running column-audit job (sends SIGTERM to the worker)."
+                  hidden>cancel</button>
+        </span>
+        <button type="button"
+                id="audit-all-capped-btn"
+                class="audit-all-btn"
+                title="Run the column-wide web verifier across every (source, column) whose adaptive arms hit their run-budget cap. Spawns one background job."
+                hidden>Audit all budget-capped columns</button>
       </summary>
       <div class="effort-body">
         <p class="muted effort-help">
@@ -84,11 +147,25 @@
               <th title="Good-Turing missing mass: probability the next perturbed run surfaces a never-before-seen species. Higher = more uncertainty about coverage.">GT mass</th>
               <th title="Cluster verdicts logged in the labelling store for this cell.">Labelled</th>
               <th title="Saturated arms / total arms (one arm per error_type at this cell). Saturated = stop predicate met.">Arms sat.</th>
+              <th title="Run a column-wide web verification: the agent audits every distinct value (including never-flagged cells) and flags potential missed errors.">Web audit</th>
             </tr>
           </thead>
           <tbody id="effort-body"></tbody>
         </table>
       </div>
+    </details>
+    <!-- Column-audit results: one collapsible block per audited
+         (source, column) pair. Populated lazily (by clicking
+         "Verify column" in the effort table) and on page load
+         from outputs/<run>/column_verifications/_index.jsonl.
+         The whole panel is itself a <details> so it can be
+         collapsed when many columns have been audited. -->
+    <details class="column-audit-panel" id="column-audit-panel" hidden>
+      <summary class="column-audit-head">
+        <span class="title">Column audit findings</span>
+        <span id="column-audit-headline" class="muted"></span>
+      </summary>
+      <div class="column-audit-body" id="column-audit-body"></div>
     </details>
   </main>
 

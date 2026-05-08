@@ -108,8 +108,27 @@ def _process_csv(
     carries the verdict and any diagnostics for the manifest.
     """
     detail: Dict[str, Any] = {"path": str(path)}
+    # Fast path: explicit empty-file rejection so the manifest carries
+    # a precise reason (``empty_csv``) instead of a verbose pandas
+    # exception string. Mirrors ``curate.py``'s _evaluate_table.
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        detail["status"] = "rejected"
+        detail["reason"] = f"unreadable_csv: {exc}"
+        return None, detail
+    if size == 0 or (size <= 256 and not path.read_bytes().strip()):
+        detail["status"] = "rejected"
+        detail["reason"] = "empty_csv"
+        return None, detail
     try:
         df = pd.read_csv(path, dtype=str, keep_default_na=False)
+    except pd.errors.EmptyDataError:
+        # Survives the size check above only if the header line is
+        # quoted-empty or otherwise produces zero columns.
+        detail["status"] = "rejected"
+        detail["reason"] = "empty_csv"
+        return None, detail
     except Exception as exc:  # noqa: BLE001
         detail["status"] = "rejected"
         detail["reason"] = f"unreadable_csv: {exc}"

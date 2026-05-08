@@ -279,6 +279,42 @@ def _render_row_samples(
     return "\n".join(parts) or "(no samples)"
 
 
+def _speculative_union_candidate(
+    sheets: Sequence[str],
+    frames: Mapping[str, pd.DataFrame],
+) -> UnionableGroupCandidate:
+    """Synthesise an all-sheets union candidate when priors find none.
+
+    Used by the recall-first fallback in :func:`resolve_workbook`:
+    when structural Jaccard / FK detectors emit no candidate but the
+    workbook is small enough to be worth one LLM call, this helper
+    builds a single ``UnionableGroupCandidate`` that names every
+    sheet so the LLM can confirm or reject from row samples alone.
+    Stats are filled in conservatively (avg_jaccard=0.0,
+    n_shared=0); they exist for the audit trail and do not influence
+    the LLM's decision.
+    """
+    sheets_t = tuple(sheets)
+    sheet_headers: List[Tuple[str, Tuple[str, ...]]] = []
+    canonical_union: set = set()
+    for s in sheets_t:
+        df = frames.get(s)
+        if df is None:
+            continue
+        raw = tuple(str(c) for c in df.columns)
+        sheet_headers.append((s, raw))
+        canonical_union |= {c for c in raw}
+    return UnionableGroupCandidate(
+        group_id="u_spec",
+        sheets=sheets_t,
+        n_sheets=len(sheets_t),
+        n_canonical_headers=len(canonical_union),
+        n_shared_headers=0,
+        avg_jaccard=0.0,
+        sheet_headers=tuple(sheet_headers),
+    )
+
+
 # ---------------------------------------------------------------------------
 # LLM response parsing
 # ---------------------------------------------------------------------------
@@ -430,11 +466,24 @@ def resolve_workbook(
     model: str,
     prompt_cfg: ConfirmPromptConfig,
     fk_candidate_cap: int = 12,
+    speculative_max_sheets: int = 8,
 ) -> ResolvedWorkbook:
     """Run priors -> LLM confirmation for one workbook.
 
     Returns an empty (no-error) ``ResolvedWorkbook`` when there are
-    no candidate groups at all - the LLM call is skipped to save cost.
+    no candidate groups at all AND the workbook is too large for a
+    speculative all-sheets fallback.
+
+    Recall-first fallback: when the structural priors return no
+    unionable group and no FK candidate, but the workbook has at
+    least two sheets and at most ``speculative_max_sheets``, we
+    synthesise ONE speculative union candidate spanning every
+    sheet and let the LLM decide. This rescues workbooks where
+    multi-line / parenthetical / acronym header drift collapses
+    every Jaccard pair to zero, but the sheets are clearly siblings
+    when the LLM looks at row samples (the user's framing: "show
+    metadata and a few rows, ask the LLM whether they are
+    join/unionable").
     """
     sheets_t = tuple(sheets)
     if len(sheets_t) < 2:
@@ -453,10 +502,22 @@ def resolve_workbook(
     )
     union_candidates = priors.unionable_groups
     fk_top = priors.fk_candidates[:fk_candidate_cap]
+    speculative = False
     if not union_candidates and not fk_top:
-        return ResolvedWorkbook(
-            workbook=workbook, sheets=sheets_t, priors=priors,
-        )
+        if len(sheets_t) <= speculative_max_sheets:
+            union_candidates = (
+                _speculative_union_candidate(sheets_t, frames),
+            )
+            speculative = True
+            logger.debug(
+                "Workbook %r: no structural priors -> emitting speculative "
+                "all-sheets union candidate (%d sheets) for LLM judgment.",
+                workbook, len(sheets_t),
+            )
+        else:
+            return ResolvedWorkbook(
+                workbook=workbook, sheets=sheets_t, priors=priors,
+            )
 
     # Build prompt.
     sheet_headers_block = _render_sheet_headers(sheets_t, frames)
@@ -540,3 +601,95 @@ def write_resolved_workbooks_jsonl(
         for r in resolved:
             fh.write(json.dumps(r.to_dict(), ensure_ascii=False) + "\n")
     return len(resolved)
+
+
+def _resolved_group_from_dict(d: Mapping[str, Any]) -> ResolvedGroup:
+    """Round-trip a single ``ResolvedGroup`` dict back to the dataclass.
+
+    Used by :func:`read_resolved_workbooks_jsonl` so step-3/step-4
+    consumers can re-load a discovery run's
+    ``multi_table_groups.jsonl`` without recomputing priors.
+    """
+    cm_raw: Mapping[str, Any] = d.get("column_mapping") or {}
+    column_mapping: Dict[str, Tuple[ColumnMappingEntry, ...]] = {}
+    for canonical, entries in cm_raw.items():
+        mapped: List[ColumnMappingEntry] = []
+        for e in entries or []:
+            if isinstance(e, Mapping):
+                mapped.append(
+                    ColumnMappingEntry(
+                        sheet=str(e.get("sheet", "")),
+                        column=str(e.get("column", "")),
+                    )
+                )
+        column_mapping[str(canonical)] = tuple(mapped)
+    join_raw = d.get("join")
+    join: Optional[JoinSpec] = None
+    if isinstance(join_raw, Mapping):
+        join = JoinSpec(
+            parent_sheet=str(join_raw.get("parent_sheet", "")),
+            parent_columns=tuple(
+                str(c) for c in (join_raw.get("parent_columns") or [])
+            ),
+            child_sheet=str(join_raw.get("child_sheet", "")),
+            child_columns=tuple(
+                str(c) for c in (join_raw.get("child_columns") or [])
+            ),
+        )
+    return ResolvedGroup(
+        workbook=str(d.get("workbook", "")),
+        group_id=str(d.get("group_id", "")),
+        kind=str(d.get("kind", "union")),
+        confirmed=bool(d.get("confirmed", False)),
+        rationale=str(d.get("rationale", "")),
+        sheets=tuple(str(s) for s in (d.get("sheets") or [])),
+        column_mapping=column_mapping,
+        primary_key=tuple(str(c) for c in (d.get("primary_key") or [])),
+        join=join,
+    )
+
+
+def read_resolved_workbooks_jsonl(path: Path) -> List[ResolvedWorkbook]:
+    """Round-trip ``multi_table_groups.jsonl`` back to dataclasses.
+
+    Lossy: ``priors`` / ``prompt`` / ``raw_response`` /
+    ``reasoning_summary`` are not persisted by
+    :func:`write_resolved_workbooks_jsonl`, so they come back empty.
+    Step 3 (semantic detector / compiler) and step 4 (verifier) only
+    consume ``workbook``, ``sheets``, ``groups`` and ``error``, so
+    the round-trip is sufficient for re-running the detection phase
+    against groups confirmed in a previous run.
+    """
+    out: List[ResolvedWorkbook] = []
+    p = Path(path)
+    if not p.is_file():
+        return out
+    with p.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(d, Mapping):
+                continue
+            groups_raw = d.get("groups") or []
+            groups = [
+                _resolved_group_from_dict(g)
+                for g in groups_raw
+                if isinstance(g, Mapping)
+            ]
+            out.append(
+                ResolvedWorkbook(
+                    workbook=str(d.get("workbook", "")),
+                    sheets=tuple(str(s) for s in (d.get("sheets") or [])),
+                    groups=groups,
+                    error=d.get("error"),
+                    parse_error=d.get("parse_error"),
+                    endpoint=str(d.get("endpoint", "")),
+                    attempts=int(d.get("attempts", 0) or 0),
+                )
+            )
+    return out
