@@ -1,0 +1,29 @@
+# Pre-commit hooks. Install with:
+#   pip install -r requirements-dev.txt
+#   pre-commit install
+#
+# Run manually on all files:
+#   pre-commit run --all-files
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: '\.(md|csv|tsv)$'
+      - id: end-of-file-fixer
+        exclude: '\.(csv|tsv|jsonl)$'
+      - id: check-yaml
+        exclude: '^prompts/'  # prompts use Jinja-style {{var}} which breaks strict parse
+      - id: check-added-large-files
+        args: ['--maxkb=1024']
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: detect-private-key
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.4.10
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format

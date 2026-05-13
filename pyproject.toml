@@ -1,0 +1,65 @@
+# Project tooling config. Runtime deps stay in requirements.txt for now;
+# this file holds linter, formatter, and test settings only.
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = [
+    "venv",
+    "outputs",
+    "logs",
+    "label_result",
+    "backups",
+    "external",
+    "notebooks",
+    "frontend",
+    "data",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # bugbear
+    "UP",   # pyupgrade
+    "SIM",  # simplify
+    "C4",   # comprehensions
+    "PL",   # pylint subset
+    "RUF",  # ruff-specific
+]
+ignore = [
+    "E501",     # line too long (handled by formatter, advisory only)
+    "PLR2004",  # magic-value comparisons - too noisy in research code
+    "PLR0913",  # too-many-arguments
+    "PLR0915",  # too-many-statements (large research functions)
+    "PLR0912",  # too-many-branches
+    "PLR0911",  # too-many-return-statements
+    "SIM108",   # ternary preference
+    "B008",     # function call in default arg (FastAPI Depends/Body pattern)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["PLR2004", "SIM117", "B011"]
+"experiments/**" = ["PLR0915", "PLR0912"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+]
+markers = [
+    "integration: tests that hit live external services (skipped by default in CI)",
+    "slow: tests that take >5s",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:pandas.*",
+    "ignore::DeprecationWarning:pkg_resources.*",
+]

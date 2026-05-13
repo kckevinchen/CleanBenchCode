@@ -29,15 +29,20 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local backups
+*.bak
+*.bak_*
+backups/
 
 # Secrets - NEVER commit
 .env
 .env.local
 *.key
 *secret*
-
-# Run outputs
-outputs/
 
 # Editor
 .vscode/

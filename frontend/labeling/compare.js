@@ -6,23 +6,7 @@
 //
 // Backed by /api/compare, /api/compare/cells, /api/compare/cell.
 
-const $ = (sel) => document.querySelector(sel);
-const $$ = (sel) => Array.from(document.querySelectorAll(sel));
-
-async function api(path) {
-  const res = await fetch(path, { headers: { "content-type": "application/json" } });
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`${res.status} ${res.statusText}: ${body.slice(0, 200)}`);
-  }
-  return res.json();
-}
-
-function escape(s) {
-  return String(s ?? "")
-    .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;").replaceAll("'", "&#39;");
-}
+import { $, $$, api, escapeHtml as escape } from "./shared/utils.js";
 
 const state = {
   runs: [],
