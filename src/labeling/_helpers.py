@@ -1,12 +1,14 @@
 """Leaf helpers shared by the labelling app factory and its routers.
 
-Kept dependency-free (stdlib only) so both ``app.py`` and the
+Kept light (stdlib + fastapi only) so both ``app.py`` and the
 ``routers/`` modules can import from here without a circular import.
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+from fastapi import HTTPException
 
 
 def _scalar(v: Any) -> str:
@@ -18,3 +20,15 @@ def _scalar(v: Any) -> str:
     if v is None:
         return ""
     return str(v)
+
+
+def _validate_source_name(name: str) -> None:
+    """Reject source names that look like paths (traversal guard)."""
+    if (
+        not name
+        or name in (".", "..")
+        or "/" in name
+        or "\\" in name
+        or "\x00" in name
+    ):
+        raise HTTPException(400, f"invalid source name: {name!r}")
