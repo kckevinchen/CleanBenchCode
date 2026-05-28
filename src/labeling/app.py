@@ -1380,7 +1380,7 @@ def create_app(
 
             for (s, c, lid), suggs in results.items():
                 key = f"{s}\x00{c}\x00{lid}"
-                job.results[key] = _suggestions_to_payload(suggs)
+                job.results[key] = correction_suggester.suggestions_to_payload(suggs)
             job.status = "done"
             job.finished_at = time.time()
 

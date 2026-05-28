@@ -410,28 +410,6 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
             )
         return parts
 
-    def _suggestions_to_payload(
-        suggestions: List[correction_suggester.ValueSuggestion],
-    ) -> List[Dict[str, Any]]:
-        """Trim a list of ``ValueSuggestion`` to the shape the UI wants.
-
-        We hide the per-sample raw lists (heavy, only useful for
-        diagnostic export) and keep just the consensus + agreement +
-        provenance hints needed to render the table.
-        """
-        out: List[Dict[str, Any]] = []
-        for s in suggestions:
-            out.append({
-                "value": s.value,
-                "suggestion": s.suggestion,
-                "agreement": s.agreement,
-                "n_valid_samples": s.n_valid_samples,
-                "n_total_samples": s.n_total_samples,
-                "would_drop_per_export_rule": s.would_drop_per_export_rule,
-                "rows": s.rows,
-            })
-        return out
-
     def _saved_value_corrections_for(
         ctx: "RunContext", target_id: str,
     ) -> Dict[str, Union[str, List[str]]]:
@@ -526,7 +504,7 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
             "source": s,
             "column": c,
             "cluster_local_id": lid,
-            "suggestions": _suggestions_to_payload(suggestions),
+            "suggestions": correction_suggester.suggestions_to_payload(suggestions),
             "saved_value_corrections": _saved_value_corrections_for(
                 ctx, cluster_id,
             ),
@@ -571,7 +549,7 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
                 concurrency=1,
                 dry_run=True,
             )
-            cached_suggestions = _suggestions_to_payload(
+            cached_suggestions = correction_suggester.suggestions_to_payload(
                 results.get((s, c, lid), []),
             )
         except FileNotFoundError:

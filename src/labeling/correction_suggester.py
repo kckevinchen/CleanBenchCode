@@ -1140,3 +1140,26 @@ def suggest_corrections_for_clusters(
 _PROMPT_VERSION = PROMPT_VERSION
 _SYSTEM_PROMPT = SYSTEM_PROMPT
 _INTERESTING_STATUSES = INTERESTING_STATUSES
+
+
+def suggestions_to_payload(
+    suggestions: List["ValueSuggestion"],
+) -> List[Dict[str, Any]]:
+    """Trim ``ValueSuggestion`` records to the shape the labelling UI wants.
+
+    Hides the per-sample raw lists (heavy, diagnostic-only) and keeps the
+    consensus + agreement + provenance hints needed to render the table.
+    Shared by the clusters router and the correction-job worker.
+    """
+    out: List[Dict[str, Any]] = []
+    for s in suggestions:
+        out.append({
+            "value": s.value,
+            "suggestion": s.suggestion,
+            "agreement": s.agreement,
+            "n_valid_samples": s.n_valid_samples,
+            "n_total_samples": s.n_total_samples,
+            "would_drop_per_export_rule": s.would_drop_per_export_rule,
+            "rows": s.rows,
+        })
+    return out
