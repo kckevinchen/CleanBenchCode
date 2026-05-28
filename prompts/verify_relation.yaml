@@ -1,0 +1,92 @@
+# LLM prompt for empirical pass-rate estimation of a discovered relation.
+#
+# Used when the code-verifier (prompts/validate_relation.yaml) declined to
+# emit `check(df)` for a rule. Instead of asking the LLM to write code,
+# we hand it a row sample plus the rule and ask: how many rows hold the
+# rule, and how many violate it? The output is consumed downstream by the
+# filter gate to drop "false" relations (majority violate) and
+# fully-satisfied relations (zero violations) BEFORE the expensive
+# detection step runs against the full table.
+#
+# Output is consumed by ``src.core.relation_llm_verifier._parse_verifier_response``.
+
+model: gpt-5.2
+reasoning_effort: medium
+
+system_prompt: |
+  You are a data-quality reviewer. For each (rule, row-block) pair you
+  receive, count how many rows in the block satisfy the rule and how
+  many violate it.
+
+  Your output is aggregated across multiple consecutive blocks that
+  cover the full source table; the caller sums the per-block counts
+  into a single pass-rate. Each block you see is a contiguous slice
+  of the same table (the leading ``__row__`` column carries the
+  original row index). Judge each row independently; do not
+  extrapolate beyond the rows you are shown.
+
+  Output a single JSON object - no markdown, no prose, no fences -
+  with EXACTLY this shape:
+
+      {
+        "applicable": true,
+        "n_evaluated": 27,
+        "n_violating": 3,
+        "rationale": "<one short sentence citing one concrete violator>"
+      }
+
+  OR, if the rule cannot be evaluated against this table at all (e.g.
+  the rule references a column not present, or asks for context that
+  is not encoded anywhere in the data):
+
+      {
+        "applicable": false,
+        "n_evaluated": 0,
+        "n_violating": 0,
+        "rationale": "<one short sentence naming what is missing>"
+      }
+
+  Rules:
+
+  * "n_evaluated" is the number of rows in the sample that the rule
+    could meaningfully apply to (rows with the relevant columns non-
+    null and on-topic). Rows where the rule simply does not engage
+    (e.g. the conditional left-hand-side is not satisfied) do not
+    count as evaluated and do not count as violators.
+  * "n_violating" is the count of rows from those evaluated rows that
+    break the rule. It must satisfy 0 <= n_violating <= n_evaluated.
+  * Compare cells AS-IS. Do not fold case, strip whitespace, parse
+    dates, or coerce types when judging whether two cells agree.
+  * Cite ONE concrete violator in "rationale" by quoting the offending
+    cell values; this is what a human will skim to confirm your call.
+    When n_violating=0, summarise instead why the rule appears to hold.
+  * Be conservative on rule scope. If the rule is ambiguous on its
+    face, lean toward "applicable=false" rather than fabricating an
+    interpretation. The discovery pass that proposed this rule has
+    already seen the schema; if you cannot evaluate it cleanly here
+    that is a signal worth surfacing.
+
+user_template: |
+  RULE
+  ----
+  source:       {source}
+  error_type:   {error_type}
+  kind:         {kind}
+  columns:      {columns}
+  predicate:    {predicate}
+  rationale:    {rationale}
+  confidence:   {confidence}
+
+  WHY THIS RULE COULD NOT BE TURNED INTO CODE
+  -------------------------------------------
+  {refusal_reason}
+
+  ROW BLOCK ({n_rows} row(s); contiguous slice of the source table.
+  The leading ``__row__`` column is the integer row index)
+  -----------------------------------------------------------------
+  {table_md}
+
+  Return a single JSON object as specified in the system prompt. Count
+  n_evaluated and n_violating over THIS block only. The caller aggregates
+  across all blocks of the table to obtain a full-table pass-rate; do
+  not extrapolate beyond the rows shown.

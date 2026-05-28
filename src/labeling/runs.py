@@ -78,6 +78,29 @@ class RunInfo:
     # "Label MT" entry point.
     has_multi_table: bool = False
     n_multi_table_findings: int = 0
+    # Web-verification artifacts (output of ``experiments.run_web_verify``).
+    # Exposed so the runs list can flag which detection runs already
+    # have web verifications and how many cells are covered.
+    has_web_verifications: bool = False
+    n_web_verifications: int = 0
+    # Column-clusters (inconsistency error type) artifacts.
+    # ``has_column_cluster_drafts``: did the LLM proposer
+    # (``experiments.run_column_clustering``) write
+    # ``column_cluster_drafts.jsonl``?  ``has_column_cluster_labels``:
+    # did the labelling UI write any ``column_clusters.jsonl``
+    # records? The runs dashboard shows a "Column board" link when
+    # either is true; the counts let the UI render a badge.
+    has_column_cluster_drafts: bool = False
+    n_column_cluster_drafts: int = 0
+    has_column_cluster_labels: bool = False
+    n_column_cluster_labels: int = 0
+    # Operator-editable sidecar metadata (``run_metadata.json``).
+    # Empty defaults mean "no metadata written yet" - the runs
+    # dashboard falls back to displaying just ``run_id`` and treats
+    # the run as unstarred / unpinned. See ``_load_run_metadata``.
+    display_name: str = ""
+    starred: bool = False
+    notes: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -103,7 +126,92 @@ class RunInfo:
             "n_saturated_arms": self.n_saturated_arms,
             "has_multi_table": self.has_multi_table,
             "n_multi_table_findings": self.n_multi_table_findings,
+            "has_web_verifications": self.has_web_verifications,
+            "n_web_verifications": self.n_web_verifications,
+            "has_column_cluster_drafts": self.has_column_cluster_drafts,
+            "n_column_cluster_drafts": self.n_column_cluster_drafts,
+            "has_column_cluster_labels": self.has_column_cluster_labels,
+            "n_column_cluster_labels": self.n_column_cluster_labels,
+            "display_name": self.display_name,
+            "starred": self.starred,
+            "notes": self.notes,
         }
+
+
+# ---------------------------------------------------------------------------
+# Operator-editable run metadata sidecar (``run_metadata.json``)
+# ---------------------------------------------------------------------------
+#
+# Lives at ``outputs/<run_id>/run_metadata.json``. Holds fields the
+# operator can edit from the runs dashboard so they can rename ("pin")
+# runs without renaming the immutable timestamp-based directory and
+# without losing the run-id used by labels.jsonl. Schema is
+# deliberately tiny and forward-compatible: unknown keys are ignored
+# on read so future fields don't break older readers, and missing
+# files mean "no metadata" rather than an error.
+
+_RUN_METADATA_FILE = "run_metadata.json"
+_MAX_DISPLAY_NAME = 120
+_MAX_NOTES = 2000
+
+
+def _load_run_metadata(run_dir: Path) -> Dict[str, Any]:
+    """Read the sidecar; return empty dict for missing/corrupt files."""
+    path = run_dir / _RUN_METADATA_FILE
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.debug("run_metadata.json parse fail for %s: %s", run_dir, exc)
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    out: Dict[str, Any] = {}
+    dn = raw.get("display_name")
+    if isinstance(dn, str):
+        out["display_name"] = dn.strip()[:_MAX_DISPLAY_NAME]
+    starred = raw.get("starred")
+    if isinstance(starred, bool):
+        out["starred"] = starred
+    notes = raw.get("notes")
+    if isinstance(notes, str):
+        out["notes"] = notes[:_MAX_NOTES]
+    return out
+
+
+def _save_run_metadata(run_dir: Path, meta: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge ``meta`` into the sidecar and write atomically.
+
+    Only known keys (``display_name``, ``starred``, ``notes``) are
+    persisted. Returns the full post-merge metadata dict. Writes use
+    a tmp-file + ``os.replace`` so a crashing server can't leave a
+    half-written JSON behind.
+    """
+    current = _load_run_metadata(run_dir)
+    merged: Dict[str, Any] = {
+        "display_name": current.get("display_name", ""),
+        "starred": bool(current.get("starred", False)),
+        "notes": current.get("notes", ""),
+    }
+    if "display_name" in meta:
+        dn = meta["display_name"] or ""
+        if not isinstance(dn, str):
+            raise ValueError("display_name must be a string")
+        merged["display_name"] = dn.strip()[:_MAX_DISPLAY_NAME]
+    if "starred" in meta:
+        merged["starred"] = bool(meta["starred"])
+    if "notes" in meta:
+        nt = meta["notes"] or ""
+        if not isinstance(nt, str):
+            raise ValueError("notes must be a string")
+        merged["notes"] = nt[:_MAX_NOTES]
+
+    path = run_dir / _RUN_METADATA_FILE
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+    return merged
 
 
 def _parse_run_dir(path: Path) -> RunInfo:
@@ -207,6 +315,72 @@ def _parse_run_dir(path: Path) -> RunInfo:
         except OSError:
             pass
 
+    # Web-verification artifact (``experiments.run_web_verify`` output).
+    # JSON array of one record per gate-eligible cluster; we count the
+    # length so the runs list can render a "verified N/M" badge.
+    wv_path = path / "web_verifications.json"
+    has_web_verifications = wv_path.exists()
+    n_web_verifications = 0
+    if has_web_verifications:
+        try:
+            wv_raw = json.loads(wv_path.read_text(encoding="utf-8"))
+            if isinstance(wv_raw, list):
+                n_web_verifications = len(wv_raw)
+        except (OSError, ValueError):
+            pass
+
+    # Column-cluster labelling artifacts (inconsistency error type).
+    # Drafts are written by ``experiments.run_column_clustering``;
+    # labels are written by the labelling-UI POST endpoint. Both are
+    # append-only JSONL where the latest record per (source, column)
+    # wins, so the headline counts come from the de-duplicated set.
+    ccd_path = path / "column_cluster_drafts.jsonl"
+    has_column_cluster_drafts = ccd_path.exists()
+    n_column_cluster_drafts = 0
+    if has_column_cluster_drafts:
+        try:
+            seen: set = set()
+            with ccd_path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    src = rec.get("source")
+                    col = rec.get("column")
+                    if src is not None and col is not None:
+                        seen.add((src, col))
+            n_column_cluster_drafts = len(seen)
+        except OSError:
+            pass
+    ccl_path = path / "column_clusters.jsonl"
+    has_column_cluster_labels = ccl_path.exists()
+    n_column_cluster_labels = 0
+    if has_column_cluster_labels:
+        try:
+            seen2: set = set()
+            with ccl_path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    src = rec.get("source")
+                    col = rec.get("column")
+                    if src is not None and col is not None:
+                        seen2.add((src, col))
+            n_column_cluster_labels = len(seen2)
+        except OSError:
+            pass
+
+    meta = _load_run_metadata(path)
+
     return RunInfo(
         run_id=path.name,
         path=path,
@@ -230,6 +404,15 @@ def _parse_run_dir(path: Path) -> RunInfo:
         n_saturated_arms=n_saturated_arms,
         has_multi_table=has_multi_table,
         n_multi_table_findings=n_multi_table_findings,
+        has_web_verifications=has_web_verifications,
+        n_web_verifications=n_web_verifications,
+        has_column_cluster_drafts=has_column_cluster_drafts,
+        n_column_cluster_drafts=n_column_cluster_drafts,
+        has_column_cluster_labels=has_column_cluster_labels,
+        n_column_cluster_labels=n_column_cluster_labels,
+        display_name=meta.get("display_name", ""),
+        starred=bool(meta.get("starred", False)),
+        notes=meta.get("notes", ""),
     )
 
 
@@ -273,35 +456,9 @@ class RunRegistry:
 
 _BOOL_KEYS_DETECT = {
     "no_synthesis": "--no-synthesis",
+    "no_synthesise_singletons": "--no-synthesise-singletons",
     # Good-Turing booleans - handled below with paired --no-* flags.
 }
-
-
-def _append_if(argv: List[str], flag: str, value: Any) -> None:
-    if value is None or value == "":
-        return
-    if isinstance(value, (list, tuple)):
-        # Lists from the JSON launcher payload (e.g. ``error_types``,
-        # ``scopes``, ``columns``) need to be flattened into the CLI's
-        # comma-separated form. ``str([...])`` would smuggle Python
-        # repr noise (brackets, quotes) into argv.
-        items = [str(v).strip() for v in value if str(v).strip()]
-        if not items:
-            return
-        argv.extend([flag, ",".join(items)])
-        return
-    argv.extend([flag, str(value)])
-
-
-def _append_bool(
-    argv: List[str],
-    value: Optional[bool],
-    on_flag: str,
-    off_flag: str,
-) -> None:
-    if value is None:
-        return
-    argv.append(on_flag if value else off_flag)
 
 
 # Path keys that the launcher accepts from the UI / API and forwards to
@@ -312,6 +469,16 @@ def _append_bool(
 _DETECTION_PATH_KEYS = ("config", "csv", "csv_dir", "output_dir")
 _DETECTION_GLOB_KEYS = ("csv_glob",)  # patterns, not paths
 _CURATE_PATH_KEYS = ("source_dir", "output_dir")
+_RELATIONS_PATH_KEYS = ("config", "csv", "csv_dir", "output_dir",
+                        "discovery_prompt", "aggregate_prompt",
+                        "validate_prompt")
+_RELATIONS_GLOB_KEYS = ("csv_glob",)
+# Step 2 (relation_detection) form keys that resolve to filesystem
+# paths under the project root. ``discovery_run`` is the Step-1 dir;
+# ``output_dir`` is where the new detection run is written.
+_RELATION_DETECTION_PATH_KEYS = (
+    "config", "discovery_run", "output_dir",
+)
 
 
 def _path_within(value: str, project_root: Path) -> Path:
@@ -391,409 +558,28 @@ def _validate_payload_paths(
             raise ValueError(f"invalid {key}: {exc}") from exc
 
 
-def build_detection_argv(payload: Dict[str, Any]) -> List[str]:
-    """Translate a UI form payload into a ``run_cleaning_detection`` argv.
-
-    Everything goes through named flags so we never need shell quoting.
-    The Python executable is the same one the server runs under (to keep
-    the detector in the same venv); the caller prepends it.
-    """
-    argv: List[str] = ["-m", "experiments.run_cleaning_detection"]
-
-    _append_if(argv, "--config", payload.get("config"))
-    _append_if(argv, "--mode", payload.get("mode"))
-    _append_if(argv, "--csv", payload.get("csv"))
-    _append_if(argv, "--csv-dir", payload.get("csv_dir"))
-    _append_if(argv, "--csv-glob", payload.get("csv_glob"))
-    _append_if(argv, "--model", payload.get("model"))
-    _append_if(argv, "--chunk-size", payload.get("chunk_size"))
-    _append_if(argv, "--max-chunks", payload.get("max_chunks"))
-    _append_if(argv, "--column-mode", payload.get("column_mode"))
-    _append_if(argv, "--columns", payload.get("columns"))
-    _append_if(argv, "--reasoning-effort", payload.get("reasoning_effort"))
-    _append_if(argv, "--concurrency", payload.get("concurrency"))
-    _append_if(argv, "--error-types", payload.get("error_types"))
-    _append_if(argv, "--scopes", payload.get("scopes"))
-    _append_if(argv, "--synthesis-effort", payload.get("synthesis_effort"))
-    _append_if(argv, "--output-dir", payload.get("output_dir"))
-
-    if payload.get("no_synthesis"):
-        argv.append("--no-synthesis")
-
-    # Input normalization (deterministic pre-pass; ablation flag).
-    if payload.get("normalize_input"):
-        argv.append("--normalize-input")
-    if payload.get("normalize_fold_punctuation"):
-        argv.append("--normalize-fold-punctuation")
-    if payload.get("normalize_lowercase"):
-        argv.append("--normalize-lowercase")
-
-    # row_duplication detector knobs (only consulted when
-    # ``row_duplication`` is in --error-types). Tri-state booleans are
-    # forwarded via paired --no-* flags so the user can explicitly
-    # override the YAML in either direction.
-    _append_if(
-        argv,
-        "--row-dup-detection-mode",
-        payload.get("row_dup_detection_mode"),
-    )
-    _append_bool(
-        argv,
-        payload.get("row_dup_normalize_keys"),
-        "--row-dup-normalize-keys",
-        "--no-row-dup-normalize-keys",
-    )
-    _append_bool(
-        argv,
-        payload.get("row_dup_adjudicate"),
-        "--row-dup-adjudicate",
-        "--no-row-dup-adjudicate",
-    )
-    _append_if(
-        argv,
-        "--row-dup-max-groups-per-source",
-        payload.get("row_dup_max_groups_per_source"),
-    )
-    _append_bool(
-        argv,
-        payload.get("row_dup_canonicalize_keys"),
-        "--row-dup-canonicalize-keys",
-        "--no-row-dup-canonicalize-keys",
-    )
-    _append_if(
-        argv,
-        "--row-dup-canonicalize-max-cardinality",
-        payload.get("row_dup_canonicalize_max_cardinality"),
-    )
-    _append_bool(
-        argv,
-        payload.get("row_dup_blocking_enabled"),
-        "--row-dup-blocking",
-        "--no-row-dup-blocking",
-    )
-    _append_bool(
-        argv,
-        payload.get("row_dup_minhash_enabled"),
-        "--row-dup-minhash",
-        "--no-row-dup-minhash",
-    )
-    _append_if(
-        argv,
-        "--row-dup-minhash-threshold",
-        payload.get("row_dup_minhash_threshold"),
-    )
-    _append_bool(
-        argv,
-        payload.get("row_dup_embedding_enabled"),
-        "--row-dup-embedding",
-        "--no-row-dup-embedding",
-    )
-    _append_if(
-        argv,
-        "--row-dup-embedding-threshold",
-        payload.get("row_dup_embedding_threshold"),
-    )
-    _append_if(
-        argv,
-        "--row-dup-embedding-model",
-        payload.get("row_dup_embedding_model"),
-    )
-
-    # Good-Turing (adaptive mode).
-    _append_if(argv, "--gt-mode", payload.get("gt_mode"))
-    _append_if(argv, "--gt-num-runs", payload.get("gt_num_runs"))
-    _append_if(argv, "--gt-min-runs", payload.get("gt_min_runs"))
-    _append_if(argv, "--gt-target-missing-mass", payload.get("gt_target_missing_mass"))
-    _append_if(argv, "--gt-stop-scope", payload.get("gt_stop_scope"))
-    # Back-compat: still forward --gt-target-policy if a stale form
-    # submission supplies it (the launcher drops it on the next page
-    # load now that the dropdown was renamed).
-    _append_if(argv, "--gt-target-policy", payload.get("gt_target_policy"))
-    _append_if(argv, "--gt-base-seed", payload.get("gt_base_seed"))
-    _append_bool(argv, payload.get("gt_shuffle_rows"), "--gt-shuffle-rows", "--no-gt-shuffle-rows")
-    _append_bool(argv, payload.get("gt_shuffle_columns"), "--gt-shuffle-columns", "--no-gt-shuffle-columns")
-    _append_bool(argv, payload.get("gt_prompt_ensemble"), "--gt-prompt-ensemble", "--no-gt-prompt-ensemble")
-    _append_bool(argv, payload.get("gt_skip_identity_run"), "--gt-skip-identity-run", "--no-gt-skip-identity-run")
-    _append_if(argv, "--gt-variant-effort", payload.get("gt_variant_effort"))
-
-    # Scope-aware per-arm overrides. Loop-level target_missing_mass /
-    # min_runs / num_runs feed the per-arm epsilon / k_min / k_max so
-    # those are not duplicated here. The remaining per-arm knobs --
-    # require_two_consecutive, stop_when, epsilon_chao1 -- are exposed
-    # individually so the launcher form can experiment with them
-    # without editing the YAML.
-    _append_bool(
-        argv,
-        payload.get("gt_per_arm_two_consecutive"),
-        "--gt-per-arm-two-consecutive",
-        "--no-gt-per-arm-two-consecutive",
-    )
-    _append_if(
-        argv,
-        "--gt-per-arm-stop-when",
-        payload.get("gt_per_arm_stop_when"),
-    )
-    _append_if(
-        argv,
-        "--gt-per-arm-epsilon-chao1",
-        payload.get("gt_per_arm_epsilon_chao1"),
-    )
-
-    # Multi-table cross-sheet pass. The cleaning runner owns the
-    # whole multi-table pipeline (steps 1+2+3 plus optional step 4)
-    # so artifacts land in the same run as the rest of the
-    # detection output. ``inter_table_inconsistency`` in
-    # --error-types auto-triggers the pass; --multi-table-from
-    # short-circuits steps 1+2 by reusing groups from a prior
-    # discovery run.
-    if payload.get("no_multi_table"):
-        argv.append("--no-multi-table")
-    _append_if(argv, "--multi-table-from", payload.get("multi_table_from"))
-    _append_if(argv, "--multi-table-prompt", payload.get("multi_table_prompt"))
-    _append_if(
-        argv,
-        "--multi-table-strategy",
-        payload.get("multi_table_strategy"),
-    )
-    _append_if(
-        argv,
-        "--multi-table-detect-prompt",
-        payload.get("multi_table_detect_prompt"),
-    )
-    _append_if(
-        argv,
-        "--multi-table-verify-prompt",
-        payload.get("multi_table_verify_prompt"),
-    )
-    if payload.get("no_multi_table_verify"):
-        argv.append("--no-multi-table-verify")
-    _append_if(
-        argv,
-        "--multi-table-semantic-rows",
-        payload.get("multi_table_semantic_rows"),
-    )
-    _append_if(
-        argv,
-        "--multi-table-semantic-max-pages",
-        payload.get("multi_table_semantic_max_pages"),
-    )
-
-    return argv
+# Argv builders for the launcher's subprocess kinds live in a
+# dedicated module to keep this file focused on the JobManager +
+# RunRegistry. Re-exported below for backwards compatibility with
+# tests that import them from runs.
+from .cli_builders import (
+    _append_bool,
+    _append_if,
+    _CURATE_FIELDS,
+    _CURATE_LEGACY_KEY_ALIASES,
+    _normalise_curate_payload,
+    build_column_verify_argv,
+    build_curate_argv,
+    build_detection_argv,
+    build_relation_detection_argv,
+    build_relation_report_argv,
+    build_relation_validation_argv,
+    build_relations_argv,
+    build_report_argv,
+    build_web_verify_argv,
+)
 
 
-def build_report_argv(run_dir: Path) -> List[str]:
-    return ["-m", "experiments.build_report", str(run_dir)]
-
-
-# ---- Relation discovery (multi-column relations) -----------------------------
-
-# Path/glob keys forwarded from the launcher form to
-# ``run_relation_discovery``.  Validated for project-root containment
-# in ``launch_relations`` before the subprocess is spawned.
-_RELATIONS_PATH_KEYS = ("config", "csv", "csv_dir", "output_dir",
-                        "discovery_prompt", "aggregate_prompt",
-                        "generalize_prompt", "validate_prompt")
-_RELATIONS_GLOB_KEYS = ("csv_glob",)
-
-
-def build_relations_argv(payload: Dict[str, Any]) -> List[str]:
-    """Translate a UI form payload into a ``run_relation_discovery`` argv."""
-    argv: List[str] = ["-m", "experiments.run_relation_discovery"]
-    _append_if(argv, "--config", payload.get("config"))
-    _append_if(argv, "--csv", payload.get("csv"))
-    _append_if(argv, "--csv-dir", payload.get("csv_dir"))
-    _append_if(argv, "--csv-glob", payload.get("csv_glob"))
-    _append_if(argv, "--model", payload.get("model"))
-    _append_if(argv, "--reasoning-effort", payload.get("reasoning_effort"))
-    _append_if(argv, "--concurrency", payload.get("concurrency"))
-    _append_if(argv, "--error-types", payload.get("error_types"))
-    _append_if(argv, "--n-row-samples", payload.get("n_row_samples"))
-    _append_if(argv, "--output-dir", payload.get("output_dir"))
-    _append_if(argv, "--discovery-prompt", payload.get("discovery_prompt"))
-    if payload.get("include_raw"):
-        argv.append("--include-raw")
-    if payload.get("adaptive"):
-        argv.append("--adaptive")
-        _append_if(argv, "--max-passes", payload.get("max_passes"))
-        _append_if(argv, "--min-passes", payload.get("min_passes"))
-        _append_if(argv, "--gt-threshold", payload.get("gt_threshold"))
-        _append_if(argv, "--stop-when", payload.get("stop_when"))
-        _append_if(argv, "--epsilon-chao1", payload.get("epsilon_chao1"))
-        _append_if(argv, "--base-seed", payload.get("base_seed"))
-    # Post-discovery passes. Both default ON in the CLI; the launcher
-    # form sends ``aggregate``/``generalize`` as bools so we can flip
-    # the negative flag without leaking flag-name semantics into the
-    # form payload schema.
-    if payload.get("aggregate") is False:
-        argv.append("--no-aggregate")
-    else:
-        _append_if(argv, "--aggregate-prompt", payload.get("aggregate_prompt"))
-        _append_if(argv, "--aggregate-min-cluster",
-                   payload.get("aggregate_min_cluster"))
-    if payload.get("generalize") is False:
-        argv.append("--no-generalize")
-    else:
-        _append_if(argv, "--generalize-prompt", payload.get("generalize_prompt"))
-        _append_if(argv, "--generalize-min-cluster",
-                   payload.get("generalize_min_cluster"))
-    # Empirical-validation pass also defaults ON; flip the negative
-    # flag when the form explicitly opts out.
-    if payload.get("validate") is False:
-        argv.append("--no-validate")
-    else:
-        _append_if(argv, "--validate-prompt", payload.get("validate_prompt"))
-        _append_if(argv, "--validate-layer", payload.get("validate_layer"))
-        _append_if(argv, "--validate-sample-rows",
-                   payload.get("validate_sample_rows"))
-        _append_if(argv, "--validate-timeout",
-                   payload.get("validate_timeout"))
-        _append_if(argv, "--validate-max-violations",
-                   payload.get("validate_max_violations"))
-        _append_if(argv, "--validate-limit", payload.get("validate_limit"))
-    return argv
-
-
-def build_relation_report_argv(run_dir: Path) -> List[str]:
-    return ["-m", "experiments.build_relation_report", str(run_dir)]
-
-
-def build_relation_validation_argv(
-    run_dir: Path,
-    *,
-    layer: Optional[str] = None,
-    concurrency: Optional[int] = None,
-    limit: Optional[int] = None,
-) -> List[str]:
-    """Argv for ``experiments.run_relation_validation``.
-
-    Optional kwargs map onto the script's CLI flags. They are exposed
-    as job-launcher params so the UI can offer a small form (layer
-    select + max-relations cap for a smoke test) without hardcoding.
-    """
-    argv: List[str] = ["-m", "experiments.run_relation_validation", str(run_dir)]
-    if layer:
-        argv.extend(["--layer", str(layer)])
-    if concurrency is not None:
-        argv.extend(["--concurrency", str(int(concurrency))])
-    if limit is not None:
-        argv.extend(["--limit", str(int(limit))])
-    return argv
-
-
-def build_column_verify_argv(
-    run_id: str,
-    *,
-    source: Optional[str] = None,
-    column: Optional[str] = None,
-    all_budget_capped: bool = False,
-    concurrency: Optional[int] = None,
-    max_distinct: Optional[int] = None,
-    skip_flagged: bool = False,
-    force: bool = False,
-    model: Optional[str] = None,
-    reasoning_effort: Optional[str] = None,
-) -> List[str]:
-    """Argv for ``experiments.run_web_verify_column``.
-
-    Either ``(source, column)`` must be supplied OR ``all_budget_capped``
-    must be True. The caller (JobManager.launch_column_verify) is
-    responsible for validating that condition before reaching here.
-    """
-    argv: List[str] = ["-m", "experiments.run_web_verify_column",
-                       "--run-id", run_id]
-    if all_budget_capped:
-        argv.append("--all-budget-capped")
-    else:
-        if not source:
-            raise ValueError("source is required when all_budget_capped is False")
-        if not column:
-            raise ValueError("column is required when all_budget_capped is False")
-        argv.extend(["--source", source, "--column", column])
-    if concurrency is not None:
-        argv.extend(["--concurrency", str(int(concurrency))])
-    if max_distinct is not None:
-        argv.extend(["--max-distinct", str(int(max_distinct))])
-    if skip_flagged:
-        argv.append("--skip-flagged")
-    if force:
-        argv.append("--force")
-    if model:
-        argv.extend(["--model", str(model)])
-    if reasoning_effort:
-        argv.extend(["--reasoning-effort", str(reasoning_effort)])
-    return argv
-
-
-# ---- Data-prep (unified curate) -------------------------------------------
-
-# Field schema for the unified curate launcher. Mirrors
-# ``src/data_prep/curate.py``'s parse_args(); CSV layout (flat vs grouped)
-# is auto-detected by the curate module so the same payload schema covers
-# both the legacy curate_tables (single-table) and curate_pbi (multi-table)
-# use cases.
-_CURATE_FIELDS: List[tuple] = [
-    # (payload_key, cli_flag)
-    ("source_dir",                "--source-dir"),
-    ("output_dir",                "--output-dir"),
-    ("num_targets",               "--num-targets"),
-    ("min_columns",               "--min-columns"),
-    ("max_columns",               "--max-columns"),
-    ("min_rows",                  "--min-rows"),
-    ("max_rows",                  "--max-rows"),
-    ("min_tables",                "--min-tables"),
-    ("max_tables",                "--max-tables"),
-    ("seed",                      "--seed"),
-    ("max_scan",                  "--max-scan"),
-    ("oversize",                  "--oversize"),
-    ("language_check",            "--language-check"),
-    ("language_min_english_prob", "--language-min-english-prob"),
-    ("language_min_confidence",   "--language-min-confidence"),
-    ("language_llm_model",        "--language-llm-model"),
-    ("language_llm_effort",       "--language-llm-effort"),
-    ("max_non_latin_chars",       "--max-non-latin-chars"),
-    ("max_empty_ratio",           "--max-empty-ratio"),
-    ("max_cell_chars",            "--max-cell-chars"),
-    ("max_cell_words",            "--max-cell-words"),
-    ("max_oversized_row_ratio",   "--max-oversized-row-ratio"),
-]
-
-# Legacy payload keys that callers may still send. We translate them onto
-# the unified schema so existing UI/API clients keep working through one
-# release; remove after the next major.
-_CURATE_LEGACY_KEY_ALIASES: Dict[str, str] = {
-    "num_tables":       "num_targets",   # old curate_tables
-    "num_spreadsheets": "num_targets",   # old curate_pbi
-}
-
-
-def _normalise_curate_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Map legacy payload keys onto the unified schema."""
-    out = dict(payload)
-    for old, new in _CURATE_LEGACY_KEY_ALIASES.items():
-        if old in out and new not in out:
-            out[new] = out.pop(old)
-        elif old in out:
-            out.pop(old)
-    return out
-
-
-def build_curate_argv(payload: Dict[str, Any]) -> List[str]:
-    payload = _normalise_curate_payload(payload)
-    if not payload.get("source_dir"):
-        raise ValueError("source_dir is required for curate")
-    if not payload.get("output_dir"):
-        raise ValueError("output_dir is required for curate")
-    argv: List[str] = ["-m", "experiments.data_prep.curate"]
-    for key, flag in _CURATE_FIELDS:
-        _append_if(argv, flag, payload.get(key))
-    if payload.get("overwrite"):
-        argv.append("--overwrite")
-    # Boolean flag pair: dedupe_schema_within_group defaults ON in the CLI,
-    # so only emit the negative form when the caller explicitly disables it.
-    dedupe = payload.get("dedupe_schema_within_group")
-    if dedupe is False or (isinstance(dedupe, str) and dedupe.lower() in ("false", "0", "no", "off")):
-        argv.append("--no-dedupe-schema-within-group")
-    return argv
 
 
 # ---------------------------------------------------------------------------
@@ -931,6 +717,32 @@ class JobManager:
         )
         return self._launch("relations", build_relations_argv(payload))
 
+    def launch_relation_detection(self, payload: Dict[str, Any]) -> Job:
+        """Step 2: per-cell violation detection from confirmed relations.
+
+        Accepts a ``discovery_run`` (path to a Step-1 directory) in the
+        payload; the script reads ``relations.jsonl`` + ``relation_reviews.jsonl``
+        from there and writes a new run dir with cleaning-detection-shape
+        outputs that the labeling UI surfaces automatically.
+        """
+        payload = dict(payload)
+        # ``discovery_run`` is required and must live under the project
+        # root (same containment guard as every other payload path).
+        if not payload.get("discovery_run"):
+            raise ValueError(
+                "relation_detection: 'discovery_run' is required (path to "
+                "a Step-1 discovery run directory)"
+            )
+        _validate_payload_paths(
+            payload,
+            project_root=self.project_root,
+            path_keys=_RELATION_DETECTION_PATH_KEYS,
+            glob_keys=(),
+        )
+        return self._launch(
+            "relation_detection", build_relation_detection_argv(payload),
+        )
+
     def launch_relation_report(self, run_id: str) -> Job:
         run_dir = self.project_root / "outputs" / run_id
         if not run_dir.is_dir():
@@ -963,6 +775,48 @@ class JobManager:
             limit=params.get("limit"),
         )
         return self._launch("relation_validation", argv)
+
+    def launch_web_verify(
+        self,
+        run_id: str,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Job:
+        """Spawn ``experiments.run_web_verify`` for one detection run.
+
+        Batch-verifies every gate-eligible cluster (the cells the LLM
+        flagged as errors) against the web. Driven by the "Verify on
+        web" button on each detection row in the runs dashboard.
+
+        Optional ``params`` keys: ``concurrency``, ``max_clusters``,
+        ``error_types`` (comma-separated whitelist), ``model``,
+        ``reasoning_effort``, ``force``, ``agent_endpoint``,
+        ``agent_id``. Anything missing falls back to the script's
+        defaults / environment.
+        """
+        run_dir = self.project_root / "outputs" / run_id
+        if not run_dir.is_dir():
+            raise FileNotFoundError(f"run not found: {run_id}")
+        try:
+            _path_within(str(run_dir), self.project_root)
+        except ValueError as exc:
+            raise ValueError(f"invalid run_id: {exc}") from exc
+        if not (run_dir / "clusters.json").exists():
+            raise ValueError(
+                f"run {run_id!r} has no clusters.json — nothing to verify"
+            )
+        params = dict(params or {})
+        argv = build_web_verify_argv(
+            run_id=run_id,
+            agent_endpoint=params.get("agent_endpoint") or None,
+            agent_id=params.get("agent_id") or None,
+            model=params.get("model") or None,
+            reasoning_effort=params.get("reasoning_effort") or None,
+            concurrency=params.get("concurrency"),
+            max_clusters=params.get("max_clusters"),
+            error_types=params.get("error_types") or None,
+            force=bool(params.get("force")),
+        )
+        return self._launch("web_verify", argv)
 
     def launch_column_verify(
         self,

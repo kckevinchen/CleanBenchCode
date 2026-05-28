@@ -6,12 +6,17 @@
   <!-- Defense-in-depth: block inline-script regressions and third-party loads. -->
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'" />
   <title>Data cleaning - labelling</title>
-  <link rel="stylesheet" href="./styles.css" />
+  <!-- Auto-zoom the workbench so the 3-pane labelling layout stays
+       usable on low-resolution screens (1366x768 / 1280x720 laptops).
+       Loads synchronously BEFORE stylesheets so the first paint is
+       at the right scale (no FOUC). See viewport-zoom.js for the API. -->
+  <script src="./viewport-zoom.js"></script>
+  <link rel="stylesheet" href="./styles.css?v=2" />
   <!-- Cross-sheet (multi-table) comparison panes share styles with the
        legacy mt_label.html surface. Inlined here because the unified
        label page needs both the CSV grid (for cluster items) and the
        side-by-side panel layout (for multi-table findings). -->
-  <link rel="stylesheet" href="./mt_label.css" />
+  <link rel="stylesheet" href="./mt_label.css?v=2" />
 </head>
 <body>
   <header>
@@ -31,6 +36,14 @@
         <a id="export-single-link" href="#" download class="muted" aria-disabled="true">Download</a>
       </span>
       <a id="export-sources-link" href="#" download title="ZIP of source CSVs minus exclusions (whole-file, row, and column exclusions are stripped out)">Export source CSVs</a>
+      <button id="batch-corrections-btn" class="hdr-btn" type="button"
+              title="Generate per-value corrections for every TP / unsure cluster in this run (LLM, K=3 self-consistency).">
+        Generate all corrections
+      </button>
+      <button id="identify-trivial-btn" class="hdr-btn" type="button"
+              title="Tag two classes of trivial-typo cells: whitespace-anomaly cells (existing labels get TRIVIAL appended to their note) and phone-format-inconsistency cells (cluster gets SKIP, cell gets FN+canonical with TRIVIAL phone_format note). Idempotent: rows already tagged are skipped.">
+        Tag Trivial
+      </button>
       <a href="/api/docs" target="_blank" rel="noopener">API</a>
     </div>
   </header>
@@ -69,6 +82,17 @@
     <div class="csv-head" id="csv-head">
       <span id="csv-source" class="muted">(no source)</span>
       <span id="csv-pos" class="muted"></span>
+      <!-- Per-CSV "Add inconsistency cluster" button. Visible when a
+           CSV is loaded in the center pane. Clicking opens a modal
+           where the operator picks a column + 2+ values + canonical;
+           submitting POSTs a new ``StdCluster`` appended to the
+           column's existing ``column_clusters.jsonl`` record (or
+           creates the record if missing). -->
+      <button type="button"
+              id="add-cluster-btn"
+              class="add-cluster-btn"
+              title="Add an inconsistency cluster for a column in this CSV"
+              hidden>+ Add inconsistency cluster</button>
     </div>
     <!-- Exclusion bar: lets the operator mark this CSV (or specific
          rows / columns within it) as too messy to label. Persists to
@@ -182,13 +206,139 @@
     <span><kbd>5</kbd> skip</span>
     <span><kbd>c</kbd> corrected value</span>
     <span><kbd>n</kbd> note</span>
-    <span><kbd>Enter</kbd> save + next</span>
+    <span><kbd>Enter</kbd> save + next <span class="muted">(defaults to fp)</span></span>
     <span class="muted">click any cell to mark FN / re-label</span>
   </footer>
 
   <div class="toast" id="toast" hidden></div>
 
-  <script type="module" src="./label.js"></script>
+  <!-- Add-inconsistency-cluster modal. Opened via the +Add button
+       in the CSV head; closed by the X / backdrop / Esc. The modal
+       lets the operator pick a column from the active CSV, multi-
+       select 2+ distinct values, designate one as canonical, and
+       optionally set the cluster kind. Submitting appends a new
+       ``StdCluster`` to the column's ``column_clusters.jsonl``
+       record (creating one if none exists) and refreshes the queue
+       so the new cluster shows up as a queue item with verdict
+       ``unlabeled``. -->
+  <div class="cc-modal" id="add-cluster-modal" hidden>
+    <div class="cc-modal-backdrop" data-modal-close="1"></div>
+    <div class="cc-modal-panel" role="dialog" aria-modal="true" aria-labelledby="add-cluster-title">
+      <div class="cc-modal-head">
+        <h2 id="add-cluster-title">Add inconsistency cluster</h2>
+        <button type="button" class="cc-modal-close" data-modal-close="1" aria-label="close">×</button>
+      </div>
+      <div class="cc-modal-body">
+        <div class="cc-modal-row">
+          <label for="add-cluster-source" class="cc-modal-label">CSV</label>
+          <span id="add-cluster-source" class="cc-modal-static muted">(no CSV)</span>
+        </div>
+        <div class="cc-modal-row">
+          <label for="add-cluster-column" class="cc-modal-label">Column</label>
+          <select id="add-cluster-column"></select>
+        </div>
+        <div class="cc-modal-row">
+          <label for="add-cluster-kind" class="cc-modal-label">Kind</label>
+          <select id="add-cluster-kind">
+            <option value="untagged">untagged</option>
+            <option value="text" selected>text (entity variants)</option>
+            <option value="casing">casing</option>
+            <option value="pattern">pattern (template shape)</option>
+            <option value="punctuation">punctuation / whitespace</option>
+            <option value="numerical_format">numerical format</option>
+          </select>
+        </div>
+        <div class="cc-modal-row">
+          <label for="add-cluster-search" class="cc-modal-label">Values</label>
+          <input id="add-cluster-search" type="text" placeholder="filter values…" autocomplete="off" />
+        </div>
+        <div class="cc-modal-values" id="add-cluster-values">
+          <div class="muted">(select a column)</div>
+        </div>
+        <div class="cc-modal-summary muted" id="add-cluster-summary">0 values selected</div>
+      </div>
+      <div class="cc-modal-foot">
+        <button type="button" class="cc-modal-cancel" data-modal-close="1">Cancel</button>
+        <button type="button" id="add-cluster-submit" class="cc-modal-submit" disabled>Create cluster</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Batch corrections modal: progress + per-cluster results table.
+       Hidden by default; opened by the "Generate all corrections"
+       header button. The body is rendered by label.js so the layout
+       can react to the polled job state. -->
+  <div class="cc-modal" id="batch-corrections-modal" hidden>
+    <div class="cc-modal-backdrop" data-modal-close="1"></div>
+    <div class="cc-modal-panel cc-batch-panel" role="dialog" aria-modal="true" aria-labelledby="batch-corrections-title">
+      <div class="cc-modal-head">
+        <h2 id="batch-corrections-title">Batch correction generation</h2>
+        <button type="button" class="cc-modal-close" data-modal-close="1" aria-label="close">×</button>
+      </div>
+      <div class="cc-modal-body" id="batch-corrections-body">
+        <!-- Populated by renderBatchCorrectionsModal(). -->
+      </div>
+    </div>
+  </div>
+
+  <!-- Trivial-cell tagger: two-tab modal handling both whitespace
+       anomalies and phone-number format inconsistencies. Body
+       rendered by renderIdentifyTrivialModal(). The tab strip is
+       static markup; each tab's body is rendered per-tab into the
+       corresponding pane. -->
+  <div class="cc-modal" id="identify-trivial-modal" hidden>
+    <div class="cc-modal-backdrop" data-modal-close="1"></div>
+    <div class="cc-modal-panel cc-batch-panel" role="dialog" aria-modal="true" aria-labelledby="identify-trivial-title">
+      <div class="cc-modal-head">
+        <h2 id="identify-trivial-title">Tag Trivial</h2>
+        <button type="button" class="cc-modal-close" data-modal-close="1" aria-label="close">×</button>
+      </div>
+      <div class="trivial-tab-strip" role="tablist" aria-label="Trivial-typo type">
+        <button type="button" class="trivial-tab is-active" role="tab"
+                aria-selected="true" data-trivial-tab="whitespace">
+          Whitespace
+        </button>
+        <button type="button" class="trivial-tab" role="tab"
+                aria-selected="false" data-trivial-tab="phone">
+          Phone format
+        </button>
+      </div>
+      <div class="cc-modal-body" id="identify-trivial-body"
+           data-active-tab="whitespace">
+        <!-- Populated by renderIdentifyTrivialModal(). Two panes are
+             rendered; only the active one is visible. -->
+      </div>
+    </div>
+  </div>
+
+  <!-- Pre-export conflict guard: when the operator clicks any of the
+       "Export benchmark" links the front-end first hits
+       /export/conflicts. If any (source, column, value) triple has
+       divergent verdicts (e.g. one row marked error, another clean
+       for the same value), this modal surfaces the offending cells
+       with a "Jump" button next to each so the operator can correct
+       them in place. The export only proceeds if the modal is
+       dismissed via "Export anyway" (or the run was clean to start
+       with, in which case the modal never appears). Body is rendered
+       by renderExportConflictsModal() in label.js. -->
+  <div class="cc-modal" id="export-conflicts-modal" hidden>
+    <div class="cc-modal-backdrop" data-modal-close="1"></div>
+    <div class="cc-modal-panel export-conflict-panel" role="dialog" aria-modal="true" aria-labelledby="export-conflicts-title">
+      <div class="cc-modal-head">
+        <h2 id="export-conflicts-title">Inconsistent labels detected</h2>
+        <button type="button" class="cc-modal-close" data-modal-close="1" aria-label="close">×</button>
+      </div>
+      <div class="cc-modal-body" id="export-conflicts-body">
+        <!-- Populated by renderExportConflictsModal(). -->
+      </div>
+      <div class="cc-modal-foot">
+        <button type="button" class="cc-modal-cancel" data-modal-close="1">Cancel &amp; revise</button>
+        <button type="button" id="export-conflicts-anyway" class="cc-modal-export-anyway">Export anyway</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="./label.js?v=6"></script>
 </body>
 </html>
 

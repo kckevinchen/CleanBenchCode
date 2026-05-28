@@ -1,0 +1,598 @@
+/* column_board.css — component-level overrides for the column board.
+ *
+ * The page chrome (body grid, header, .sidebar, .filters, .detail,
+ * footer) is shared with label.html via styles.css so the two
+ * surfaces look like one product. This file only styles the parts
+ * that are unique to the column board:
+ *
+ *   - The per-column queue rows (different metadata than the
+ *     label.html cluster queue).
+ *   - The .cb-cluster-list cards (LLM proposals + custom clusters).
+ *   - The .cb-value-list + value-picker in the detail pane.
+ *   - The verdict bar at the bottom of the detail pane.
+ */
+
+/* -------- header strip / column head -------- */
+
+#cb-title { flex: 1 1 auto; font-weight: 600; font-size: 12.5px; color: var(--text); }
+#cb-title.muted { font-weight: 400; color: var(--muted); }
+#cb-stats, #cb-draft-meta {
+  flex: 0 0 auto;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+/* -------- sidebar queue (column-board-specific item layout) -------- */
+
+/* The standard .filters cell uses a horizontal label-to-control row.
+   For the column-board's single-select dropdowns we want the control
+   to span the full width so long source filenames don't ellipsis. */
+.sidebar .filter-cell {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+}
+.sidebar .filter-cell > span:first-child {
+  flex: 0 0 auto;
+  text-align: left;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  font-size: 10px;
+  color: var(--muted);
+}
+.sidebar .filter-cell select {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 12px;
+}
+
+/* Per-column queue item. Each item is two rows: title + a meta row
+   with status badge / draft chip / cardinality. */
+.queue .queue-item {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-column-gap: 8px;
+  grid-row-gap: 2px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+.queue .queue-item:hover { background: var(--panel-2); }
+.queue .queue-item.active {
+  background: var(--panel-2);
+  border-left: 3px solid var(--accent);
+  padding-left: 9px;
+}
+.queue .queue-item .qi-title {
+  font-weight: 600;
+  font-size: 12.5px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.queue .queue-item .qi-src {
+  grid-column: 1 / -1;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.queue .queue-item .qi-meta {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* Status / draft pills inside the queue row + on cluster cards. */
+.qi-badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--muted);
+}
+.qi-badge.status-unlabeled        { background: rgba(245,158,11,0.18); border-color: rgba(245,158,11,0.55); color: var(--sev-medium); }
+.qi-badge.status-labeled          { background: rgba(16,185,129,0.18);  border-color: rgba(16,185,129,0.55);  color: var(--tp); }
+.qi-badge.status-no_inconsistency { background: rgba(96,165,250,0.18);  border-color: rgba(96,165,250,0.55);  color: var(--accent); }
+.qi-badge.status-dropped_overlapping,
+.qi-badge.status-dropped_messy    { background: rgba(248,113,113,0.18); border-color: rgba(248,113,113,0.55); color: var(--fp); }
+.qi-badge.draft                   { background: rgba(167,139,250,0.18); border-color: rgba(167,139,250,0.55); color: var(--unsure); }
+
+/* -------- center pane: LLM proposals + cluster cards -------- */
+
+.cb-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 10px 14px 14px 14px;
+  gap: 12px;
+  overflow: hidden;
+}
+.cb-proposals {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  overflow: hidden;
+}
+.cb-section-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+}
+.cb-section-head h2 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+}
+.cb-section-head #cb-proposals-meta { flex: 1; font-size: 11.5px; }
+.cb-bulk-actions { display: inline-flex; gap: 6px; }
+.cb-bulk-actions button.ghost,
+.cb-value-actions button.ghost,
+.cb-cluster-card .cb-cluster-remove {
+  background: var(--panel-2);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 10px;
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.cb-bulk-actions button.ghost:hover,
+.cb-value-actions button.ghost:hover { color: var(--text); border-color: var(--accent); }
+
+.cb-cluster-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.cb-cluster-list .placeholder { padding: 24px; text-align: center; }
+
+.cb-cluster-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  padding: 10px 12px;
+  position: relative;
+  /* Active-card highlight is driven by .cb-cluster-card.active so
+     the keyboard shortcut (j/k) and the verdict shortcuts (1/2)
+     have a single visual anchor. */
+  transition: border-color 0.1s ease, opacity 0.1s ease;
+}
+.cb-cluster-card.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+.cb-cluster-card.from-draft {
+  /* Slightly different chrome so the operator can tell at a glance
+     what the LLM proposed vs. what they added themselves. */
+  border-left: 3px solid var(--unsure);
+}
+.cb-cluster-card.verdict-reject {
+  /* Rejected proposals stay visible (so the operator can change
+     their mind) but visually dim and strike-through. They are
+     omitted from the saved payload. */
+  opacity: 0.55;
+  background: rgba(248,113,113,0.06);
+  border-color: rgba(248,113,113,0.35);
+}
+.cb-cluster-card.verdict-reject .cb-cluster-values .cb-cluster-value-row .v-text {
+  text-decoration: line-through;
+}
+.cb-cluster-card.verdict-accept {
+  border-color: rgba(16,185,129,0.55);
+  background: rgba(16,185,129,0.05);
+}
+
+.cb-cluster-card header.cc-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin-bottom: 6px;
+}
+.cb-cluster-card .cb-cluster-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  color: var(--muted);
+  font-weight: 600;
+}
+.cb-cluster-card .cc-canonical-line {
+  flex: 1 1 auto;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.cb-cluster-card .cc-canonical-line .cc-canonical-prefix {
+  color: var(--muted);
+  font-weight: 400;
+  margin-right: 4px;
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+/* LLM-emitted hint describing the column's competing majority style
+   for type-2 (shared-minority-style) clusters. Rendered below the
+   header on its own line so the prefix label aligns visually with
+   the canonical-line prefix on the row above; only present when the
+   cluster carries a non-null ``target_style`` (type-1 alias groups
+   skip it). */
+.cb-cluster-card .cc-target-style-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text);
+  margin: -2px 0 8px 0;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+}
+.cb-cluster-card .cc-target-style-line .cc-target-style-prefix {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+.cb-cluster-card .cc-target-style-line .cc-target-style-text {
+  font-style: italic;
+  color: var(--muted);
+}
+/* Overlap hint: rendered on overlapping LLM drafts that the seeder
+   pushed to ``verdict: "reject"`` so the save payload stays a
+   disjoint partition. Names the earlier accepted card(s) whose
+   value-set conflicts with this one. Operator can flip Accept here
+   and Reject the conflicting card to swap which interpretation
+   wins. */
+.cb-cluster-card .cc-overlap-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+  margin: -2px 0 8px 0;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+}
+.cb-cluster-card .cc-overlap-line .cc-overlap-prefix {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+.cb-cluster-card .cc-overlap-line .cc-overlap-text {
+  color: var(--fp);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.cb-cluster-card .cc-kind-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.cb-cluster-card .cb-cluster-kind {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font: inherit;
+  font-size: 11.5px;
+}
+.cb-cluster-card .cc-agreement {
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.cb-cluster-card .cc-actions {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: auto;
+}
+.cb-cluster-card .cc-verdict-btn {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 4px;
+  padding: 3px 10px;
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.cb-cluster-card .cc-verdict-btn:hover { border-color: var(--accent); }
+.cb-cluster-card .cc-verdict-btn.cc-accept.active {
+  background: var(--tp);
+  border-color: var(--tp);
+  color: #0b1120;
+  font-weight: 600;
+}
+.cb-cluster-card .cc-verdict-btn.cc-reject.active {
+  background: var(--fp);
+  border-color: var(--fp);
+  color: #0b1120;
+  font-weight: 600;
+}
+.cb-cluster-card .cb-cluster-remove {
+  background: transparent;
+  color: var(--muted);
+  border-color: var(--border);
+  padding: 2px 7px;
+  font-size: 11px;
+}
+.cb-cluster-card .cb-cluster-remove:hover { color: var(--fp); border-color: var(--fp); }
+
+.cb-cluster-card .cb-cluster-values {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  padding: 3px;
+}
+/* Each row inside a cluster: [radio] [value text] [count] [×].
+   Mirrors .cb-value-row on the right-hand picker so the operator
+   reads both surfaces with the same visual cadence. */
+.cb-cluster-card .cb-cluster-value-row {
+  display: grid;
+  grid-template-columns: 18px 1fr auto 22px;
+  align-items: start;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 4px;
+  border-left: 3px solid transparent;
+  transition: background 0.08s ease;
+}
+.cb-cluster-card .cb-cluster-value-row:hover {
+  background: var(--panel-2);
+}
+.cb-cluster-card .cb-cluster-value-row .v-canonical-radio {
+  margin: 3px 0 0 0;
+  accent-color: var(--tp);
+  cursor: pointer;
+}
+.cb-cluster-card .cb-cluster-value-row .v-text {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  color: var(--text);
+  /* Long, sentence-length values are common (entity-variant
+     clusters). Allow them to wrap inside the row rather than
+     truncating with an ellipsis -- a cluster typically has only
+     2-5 values, so the vertical cost is small and the readability
+     gain is large. */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.4;
+}
+.cb-cluster-card .cb-cluster-value-row .v-count {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  min-width: 2ch;
+  text-align: right;
+  padding-top: 2px;
+}
+.cb-cluster-card .cb-cluster-value-row.canonical {
+  background: rgba(16,185,129,0.10);
+  border-left-color: var(--tp);
+}
+.cb-cluster-card .cb-cluster-value-row.canonical .v-text {
+  color: var(--text);
+  font-weight: 600;
+}
+.cb-cluster-card .cb-cluster-value-row .v-remove {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.cb-cluster-card .cb-cluster-value-row .v-remove:hover {
+  color: var(--fp);
+  border-color: rgba(248,113,113,0.5);
+  background: rgba(248,113,113,0.08);
+}
+.cb-cluster-card .cb-cluster-meta {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* -------- detail pane (value picker + verdict) -------- */
+
+#cb-value-search {
+  display: block;
+  width: 100%;
+  margin: 4px 0 8px 0;
+  padding: 4px 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font: inherit;
+  font-size: 12px;
+}
+.detail .cb-help { font-size: 11.5px; margin: 0 0 6px 0; line-height: 1.4; }
+
+.cb-value-list {
+  /* Bounded height with internal scroll so the verdict bar below
+     always remains reachable on short viewports. */
+  max-height: 38vh;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-2);
+  padding: 4px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.cb-value-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+.cb-value-row:hover { background: var(--panel); }
+.cb-value-row.selected {
+  background: rgba(96,165,250,0.18);
+  border-color: var(--accent);
+}
+.cb-value-row.in-cluster {
+  /* Already clustered: dim + non-interactive. */
+  color: var(--muted);
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+.cb-value-row .v-text {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 12px;
+}
+.cb-value-row .v-count {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+.cb-value-row .v-cluster-ref {
+  font-size: 10px;
+  color: var(--unsure);
+  background: rgba(167,139,250,0.16);
+  border-radius: 3px;
+  padding: 1px 5px;
+}
+.cb-singletons { margin-top: 6px; }
+.cb-singletons summary {
+  cursor: pointer;
+  font-size: 11px;
+  padding: 3px 6px;
+  color: var(--muted);
+}
+.cb-singletons summary:hover { color: var(--text); }
+
+.cb-value-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.cb-value-actions #cb-selected-count {
+  flex: 1;
+  font-size: 11px;
+}
+
+button.primary {
+  background: var(--accent);
+  color: #0b1120;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 4px 12px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+button.primary:hover { filter: brightness(1.1); }
+button.primary[disabled] {
+  background: var(--panel-2);
+  color: var(--muted);
+  border-color: var(--border);
+  cursor: not-allowed;
+}
+
+.cb-verdict-title { margin-top: 18px !important; }
+.cb-verdict-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-2);
+}
+.cb-verdict-block label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.cb-verdict-block label span:first-child {
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+.cb-verdict-block input,
+.cb-verdict-block select {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 12px;
+}
+.cb-save-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 2px;
+}
+#cb-save-msg { font-size: 11.5px; }
+#cb-save-msg.ok    { color: var(--tp); }
+#cb-save-msg.error { color: var(--fp); }
+
+/* Disable label.html's narrow-viewport rule that turns .filters into
+   a stacked column once the column-board sidebar starts wrapping.
+   The column board already uses column-stacked filters by default,
+   so no adjustment is needed below the standard 1200px breakpoint. */

@@ -1,0 +1,131 @@
+# Blind LLM baseline prompt for the inconsistency benchmark.
+#
+# Goal: given ONLY a column's name + its distinct values (no
+# detector hints, no cluster pre-groupings, no benchmark labels),
+# ask the model to surface groups of values that should be
+# normalized together because they refer to the same underlying
+# thing or share an off-style minority pattern.
+#
+# This is the column-clustering proposer task in disguise (same
+# definition of "inconsistency"), but we keep a fresh prompt + cache
+# so the baseline is independent of any iteration history on the
+# detector-side prompts. Output is per-column groups; the driver
+# expands each group to row-level predictions and scores them
+# against the benchmark JSONL.
+#
+# Placeholders (Python str.format; double braces escape literal JSON):
+#   source       - CSV basename (context only)
+#   column       - column header (context only)
+#   value_list   - one bullet per distinct value:
+#                  ``- "<value>" (count=<n>)``
+#   distinct_count - number of distinct values
+#   truncated_hint - "" or " (showing top N by frequency)"
+#
+# Output schema (strict JSON, no markdown fences, no commentary):
+#   {
+#     "findings": [
+#       {
+#         "values": ["<verbatim value>", "<verbatim value>", ...],
+#         "canonical_value": "<one of values, verbatim>" | null,
+#         "kind": "casing" | "punctuation" | "pattern"
+#               | "numerical_format" | "text" | "untagged",
+#         "rationale": "<one short sentence>"
+#       },
+#       ...
+#     ]
+#   }
+#
+# Rules:
+#   - A group must contain >= 2 distinct values.
+#   - Every value in a group must appear verbatim in the input list.
+#   - canonical_value should ALMOST ALWAYS be a verbatim member of
+#     the group. Default to the highest-frequency value, or the
+#     most complete / most standard spelling if frequencies are
+#     comparable. Only set null when the group is a genuine
+#     bi-directional pair where neither side is more canonical
+#     (and explain why in the rationale).
+#   - If the column has no inconsistencies, return ``{"findings": []}``.
+
+model: gpt-5.2,gpt-5.4,gpt-5.5
+reasoning_effort: medium
+
+system: >
+  You are a data-quality assistant. Given the distinct values of one
+  column from a CSV table, surface groups of values that disagree
+  about how something should be written. A group is worth proposing
+  when:
+
+  (1) Two or more values point at the SAME real-world entity but are
+      spelled / formatted differently (aliases, abbreviations,
+      casing or punctuation variants). Example: "USA" / "U.S.A." /
+      "United States".
+
+  (2) A minority of values share a write-up style that contrasts
+      with the column's dominant style. Example: most rows spell
+      out " Regional" but a few use " Reg" -- group the " Reg"
+      values.
+
+  Skip the column entirely if every value follows the same template:
+  a column that looks weird but is internally consistent is NOT an
+  inconsistency. Single-value groups are never useful.
+
+  For each group, ALWAYS pick a SINGLE canonical surface form
+  unless the group is a true bi-directional pair. Default rule: the
+  canonical is the highest-frequency value in the group; if
+  frequencies are comparable, prefer the most complete / most
+  standard spelling. Setting ``canonical_value`` to null is the
+  rare exception, not the default -- use it only when both sides
+  are equally valid (e.g. "US" vs "United States" with similar
+  counts) and state the reason in the rationale.
+
+  Reply with a JSON object and nothing else (no markdown fences, no
+  prose).
+
+user_template: |
+  You are looking at column ``{column}`` from the file ``{source}``.
+
+  Distinct values in this column ({distinct_count} total{truncated_hint}):
+  {value_list}
+
+  Surface every group of values in this column that should be
+  normalized together. Two grouping motivations apply:
+
+    (A) ALIASES OF THE SAME ENTITY -- two or more values mean the
+        same real-world thing but are written differently
+        (casing, punctuation, abbreviation, alternate spelling).
+        Even a single alias pair is a valid group.
+
+    (B) SHARED MINORITY STYLE -- a handful of values use a write-up
+        template (suffix / abbreviation / unit / format) that
+        differs from the column's dominant template. Group ALL the
+        off-style values together. This requires a competing
+        majority style to be visibly present.
+
+  RULES
+  -----
+  * A group must contain >= 2 distinct values from the list above.
+  * Use values VERBATIM from the input list -- do not paraphrase,
+    re-case, or trim whitespace.
+  * ``canonical_value`` MUST be one of the values in the group,
+    verbatim. Default to the value with the highest ``count=`` in
+    the bullet list. If counts are tied or comparable, prefer the
+    most complete / most standard spelling (full word over
+    abbreviation, properly cased over ALL CAPS, no trailing
+    junk codes, etc.). Only use ``null`` when the group is a
+    genuine bi-directional pair where neither side is more correct,
+    and say so in the rationale. Null should be rare.
+  * Pick a ``kind`` from: ``casing``, ``punctuation``, ``pattern``,
+    ``numerical_format``, ``text``, ``untagged``.
+  * If the column has no inconsistencies, return ``{{"findings": []}}``.
+
+  Output JSON exactly in this shape, nothing else:
+  {{
+    "findings": [
+      {{
+        "values": ["<verbatim>", "<verbatim>"],
+        "canonical_value": "<verbatim>" | null,
+        "kind": "casing",
+        "rationale": "<one short sentence>"
+      }}
+    ]
+  }}

@@ -1,4 +1,4 @@
-"""Tests for ``src.core.multi_table_violations`` (the deterministic
+"""Tests for ``src.core.multi_table.violations`` (the deterministic
 compiler that turns LLM-confirmed cross-sheet groups into per-row
 violation records).
 
@@ -18,13 +18,13 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.core.multi_table_resolver import (
+from src.core.multi_table.resolver import (
     ColumnMappingEntry,
     JoinSpec,
     ResolvedGroup,
     ResolvedWorkbook,
 )
-from src.core.multi_table_violations import (
+from src.core.multi_table.violations import (
     MultiTableViolation,
     compile_violations,
 )

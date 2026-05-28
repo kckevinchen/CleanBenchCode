@@ -1,4 +1,4 @@
-"""Tests for ``src.core.multi_table_semantic_detector`` (the
+"""Tests for ``src.core.multi_table.semantic_detector`` (the
 Shape-1 LLM-as-detector replacement for the deterministic
 compiler + per-violation verifier).
 
@@ -26,12 +26,12 @@ from typing import List
 import pandas as pd
 
 from src.core.llm_client import LLMResponse
-from src.core.multi_table_resolver import (
+from src.core.multi_table.resolver import (
     ColumnMappingEntry,
     ResolvedGroup,
     ResolvedWorkbook,
 )
-from src.core.multi_table_semantic_detector import (
+from src.core.multi_table.semantic_detector import (
     DetectPromptConfig,
     SEMANTIC_KINDS,
     _build_pages,
@@ -257,7 +257,7 @@ class TestBuildPages:
 
 class TestNormalizeLocations:
     def test_local_to_global_mapping(self) -> None:
-        from src.core.multi_table_semantic_detector import _PageSlice
+        from src.core.multi_table.semantic_detector import _PageSlice
         page = [
             _PageSlice(sheet="a.csv", row_offsets=(7, 8, 9)),
             _PageSlice(sheet="b.csv", row_offsets=(0, 5)),
@@ -270,7 +270,7 @@ class TestNormalizeLocations:
         assert locs == [("a.csv", 8), ("b.csv", 0)]
 
     def test_drops_hallucinated_sheet(self) -> None:
-        from src.core.multi_table_semantic_detector import _PageSlice
+        from src.core.multi_table.semantic_detector import _PageSlice
         page = [_PageSlice(sheet="a.csv", row_offsets=(0,))]
         locs = _normalize_locations(
             [{"sheet": "ghost.csv", "row": 0}],
@@ -279,7 +279,7 @@ class TestNormalizeLocations:
         assert locs == []
 
     def test_drops_out_of_range_row(self) -> None:
-        from src.core.multi_table_semantic_detector import _PageSlice
+        from src.core.multi_table.semantic_detector import _PageSlice
         page = [_PageSlice(sheet="a.csv", row_offsets=(0, 1))]
         locs = _normalize_locations(
             [{"sheet": "a.csv", "row": 99}],
@@ -288,7 +288,7 @@ class TestNormalizeLocations:
         assert locs == []
 
     def test_dedupes_repeated_locations(self) -> None:
-        from src.core.multi_table_semantic_detector import _PageSlice
+        from src.core.multi_table.semantic_detector import _PageSlice
         page = [_PageSlice(sheet="a.csv", row_offsets=(0,))]
         locs = _normalize_locations(
             [{"sheet": "a.csv", "row": 0},

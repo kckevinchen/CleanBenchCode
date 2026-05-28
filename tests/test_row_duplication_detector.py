@@ -1,4 +1,4 @@
-"""Tests for ``src.core.row_duplication_detector``.
+"""Tests for ``src.core.row_dup.detector``.
 
 We use a tiny fake ``LLMClient`` so the detector runs end-to-end
 without touching Azure. The fake exposes the same surface
@@ -17,7 +17,7 @@ import pytest
 
 from src.core.error_taxonomy import load_taxonomy
 from src.core.llm_client import LLMResponse
-from src.core.row_duplication_detector import (
+from src.core.row_dup.detector import (
     AdjudicatorSettings,
     RowDuplicationDetector,
     _parse_verdict,
@@ -439,7 +439,7 @@ class TestKeyCanonicalizer:
 
 class TestParseCanonicalGroups:
     def test_simple_object(self) -> None:
-        from src.core.row_duplication_detector import _parse_canonical_groups
+        from src.core.row_dup.detector import _parse_canonical_groups
         groups, err = _parse_canonical_groups(
             json.dumps({"groups": [{"canonical": "a", "members": ["a", "b"]}]})
         )
@@ -447,20 +447,20 @@ class TestParseCanonicalGroups:
         assert groups == [{"canonical": "a", "members": ["a", "b"]}]
 
     def test_fenced_markdown(self) -> None:
-        from src.core.row_duplication_detector import _parse_canonical_groups
+        from src.core.row_dup.detector import _parse_canonical_groups
         text = '```json\n{"groups": [{"canonical": "x", "members": ["x"]}]}\n```'
         groups, err = _parse_canonical_groups(text)
         assert err is None
         assert len(groups) == 1
 
     def test_invalid_json(self) -> None:
-        from src.core.row_duplication_detector import _parse_canonical_groups
+        from src.core.row_dup.detector import _parse_canonical_groups
         groups, err = _parse_canonical_groups("not json at all")
         assert groups == []
         assert err is not None
 
     def test_missing_groups_key(self) -> None:
-        from src.core.row_duplication_detector import _parse_canonical_groups
+        from src.core.row_dup.detector import _parse_canonical_groups
         groups, err = _parse_canonical_groups(json.dumps({"foo": []}))
         assert groups == []
         assert err is not None

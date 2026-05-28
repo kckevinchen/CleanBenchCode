@@ -19,6 +19,15 @@ validate that the YAML still carries:
   genuine number_format inconsistency from code-column false
   positives.
 
+NOTE on target path. As of the simple/inclusive prompt rewrite the
+canonical ``prompts/error_types.yaml`` deliberately drops most of
+these structural carve-outs (R1-R9, FAST-SKIP / SEMANTIC VIEW /
+QUANTITATIVE-COLUMN GATE / identity-column carve-outs) in favour of
+a recall-leaning auditor prompt. The preserved heavily-gated version
+lives at ``prompts/error_types_focused.yaml`` and is selectable via
+``prompts.error_types_file`` in ``config/experiment.yaml``. These
+tests pin the focused contract, so they target that file directly.
+
 They are pure-Python and run without any LLM calls.
 """
 
@@ -31,7 +40,11 @@ import pytest
 
 from src.core.error_taxonomy import load_taxonomy
 
-PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "error_types.yaml"
+PROMPT_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "prompts"
+    / "error_types_focused.yaml"
+)
 
 
 @pytest.fixture(scope="module")

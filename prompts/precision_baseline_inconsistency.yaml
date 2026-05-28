@@ -1,0 +1,119 @@
+# Conservative single-pass inconsistency detector (v2.2).
+#
+# v2.2 changes from v2:
+#   - Structural refactor: drastically shorten the system prompt and
+#     move the policy / examples / skip-rules into the user_template,
+#     mirroring the shape used by `prompts/error_types.yaml` (which
+#     sees 0% CSP from Azure's content filter). The v2 system prompt
+#     ran ~3.3K chars and was tripping the jailbreak detector on
+#     roughly 9% of the corpus; the v2.2 system prompt is ~200 chars.
+#   - No policy change. Same scope, same skip-rules, same output
+#     schema.
+#
+# Output (strict JSON, no markdown fences):
+#   {
+#     "errors": [
+#       {
+#         "value":      "<verbatim variant>",
+#         "correction": "<canonical form>",
+#         "rationale":  "<one short sentence>"
+#       },
+#       ...
+#     ]
+#   }
+
+model: gpt-5.2,gpt-5.4,gpt-5.5
+reasoning_effort: high
+
+system: |
+  You are a data-quality auditor. Each call targets one CSV column
+  and one error type; other types are handled by separate calls.
+  Respond with strictly valid JSON; no prose outside the JSON, no
+  Markdown fences.
+
+user_template: |
+  error type: inconsistency
+  definition: a value in the column is an off-style variant of
+    another value already present in the column -- same underlying
+    thing, different surface form.
+
+  policy (precision-oriented; list a value only when the
+  conditions hold; if you are not sure, skip it; empty output is
+  the right answer for a clean column):
+
+    include a value when each of these holds:
+      - another distinct value in the column refers to the same
+        underlying thing (same entity, same number, same date,
+        same category), differing only in surface form;
+      - the sibling is the more canonical form by one of: higher
+        frequency, more complete spelling, or more standard
+        formatting;
+      - the differences are stylistic (case, punctuation, spacing,
+        abbreviation expansion, separator, leading or trailing
+        whitespace, leading zeros, number-format precision).
+
+    illustrative variant kinds (each name is the value you will
+    use in the rationale to label the kind of variant):
+      - case: a value differs from its sibling only by letter
+        casing.
+      - punctuation: a value omits or adds a trailing period or
+        bracket relative to its sibling.
+      - spacing: a value has an extra internal space relative to
+        its sibling.
+      - abbreviation: a short form coexists with the spelled-out
+        form ("LTD" alongside "LIMITED"; "Inc" alongside
+        "Incorporated").
+      - separator: a date or composite value uses a different
+        separator than its sibling.
+      - number_format: a numeric value omits or adds thousands
+        separators, decimal precision, or sign relative to its
+        sibling.
+
+    skip a value if any of these apply:
+      - no sibling variant appears in the column (a lone unusual
+        value is not an inconsistency);
+      - the two surface forms would change meaning if normalized
+        to one (a state name and a same-spelled city name);
+      - the cell looks like a misspelling (that goes to the typo
+        error type instead, even when a correctly-spelled sibling
+        exists);
+      - the cell carries a value from a different semantic domain
+        (a phone number in a name column) -- that goes to the
+        semantic-incompatibility error type instead;
+      - both surface forms are valid representations at different
+        precisions ("3.14" alongside "3.1416"; "$5.0" alongside
+        "$5.00") and the column header does not pin down a
+        canonical precision.
+
+  output: a single JSON object, no Markdown fences:
+
+    {{"errors": [{{"value": "...", "correction": "...", "rationale": "..."}}, ...]}}
+
+  - "value" must appear verbatim in the value list (same casing,
+    punctuation, whitespace).
+  - "correction" must be the canonical sibling value present in
+    the column, verbatim from the list.
+  - "rationale" is one sentence; name the variant kind (case,
+    punctuation, spacing, abbreviation, separator, number_format,
+    leading_zero, whitespace).
+  - if no value qualifies, return: {{"errors": []}}.
+
+  column header: {column}
+  source: {source}
+  distinct value count: {distinct_count}{truncated_hint}
+
+  distinct values in this column:
+
+  {value_list}
+
+  whitespace markers in the value list (each marker is a sentinel
+  for the original character; treat it as that character):
+    "␣" = SPACE inside a multi-space run.
+    "→" = TAB.
+    "↵" = NEWLINE inside a cell.
+    "·" = zero-width char (ZWSP, ZWNJ, ZWJ, soft hyphen, BOM).
+  echo the sentinels verbatim in your "value" field.
+
+  list every value that is an off-style variant of a sibling value
+  in this column, using the policy above. output a single JSON
+  object; return ``{{"errors": []}}`` if no value qualifies.

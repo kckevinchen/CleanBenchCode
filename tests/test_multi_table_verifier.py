@@ -1,4 +1,4 @@
-"""Tests for ``src.core.multi_table_verifier`` (step 4 of the
+"""Tests for ``src.core.multi_table.verifier`` (step 4 of the
 multi-table inconsistency pipeline).
 
 The verifier:
@@ -26,12 +26,12 @@ from typing import List
 import pandas as pd
 
 from src.core.llm_client import LLMResponse
-from src.core.multi_table_resolver import (
+from src.core.multi_table.resolver import (
     ColumnMappingEntry,
     ResolvedGroup,
     ResolvedWorkbook,
 )
-from src.core.multi_table_verifier import (
+from src.core.multi_table.verifier import (
     VERIFIABLE_KINDS,
     Verification,
     VerifyPromptConfig,
@@ -43,7 +43,7 @@ from src.core.multi_table_verifier import (
     verify_workbook_violations,
     write_verifications_jsonl,
 )
-from src.core.multi_table_violations import MultiTableViolation
+from src.core.multi_table.violations import MultiTableViolation
 
 
 # ---------------------------------------------------------------------------

@@ -112,8 +112,9 @@ def test_confirmed_error_with_evidence_passes_through():
 
 def test_fabricated_url_is_dropped():
     """The agent JSON cited a URL that was NOT in the url_citation
-    annotations the runtime recorded. Anti-hallucination filter must
-    drop that citation. With no surviving evidence the verdict
+    annotations the runtime recorded, AND the runtime didn't record
+    any other annotations either. The anti-hallucination filter must
+    drop the fabricated URL; with no surviving evidence the verdict
     downgrades to ambiguous."""
     cluster = _cluster()
     payload = json.dumps({
@@ -127,9 +128,8 @@ def test_fabricated_url_is_dropped():
         }],
         "reasoning": "see citation",
     })
-    agent = StubAgentBackend(default=_verdict(
-        payload, urls=[("https://real.example.com", "Acme Corp")],
-    ))
+    # No SDK citations at all -> nothing to rescue, downgrade fires.
+    agent = StubAgentBackend(default=_verdict(payload, urls=[]))
     verifier = Verifier(
         agent=agent,
         cell_lookup=_make_cell_lookup({("x.csv", 0, "Vendor"): "AcmeCo"}),
@@ -141,6 +141,106 @@ def test_fabricated_url_is_dropped():
     assert v.canonical_value is None
     assert v.evidence == []
     assert v.parse_error and "downgraded" in v.parse_error
+
+
+def test_sdk_citations_rescue_empty_evidence():
+    """When the agent's ``payload.evidence`` is empty (or every URL
+    was dropped as non-grounded) but the runtime DID attach
+    ``url_citation`` annotations, those annotations must be surfaced
+    as evidence. This is the dominant Bing-Grounding shape: the
+    agent emits a JSON-only response and never copies the URLs back
+    into ``evidence``, but the runtime knows which pages it saw.
+    The annotations are by construction trustworthy, so the verdict
+    must NOT downgrade to ambiguous.
+    """
+    cluster = _cluster(suggested_fix="Acme Corp")
+    # Agent's reasoning mentions sources via Bing's marker syntax;
+    # payload.evidence is empty (the common Bing Grounding mode).
+    payload = json.dumps({
+        "verdict": "confirmed_error",
+        "canonical_value": "Acme Corp",
+        "confidence": 0.9,
+        "evidence": [],
+        "reasoning": "Authoritative listings show Acme Corp \u30103:0\u2020source\u3011.",
+    })
+    agent = StubAgentBackend(default=_verdict(
+        payload,
+        urls=[
+            ("https://real-1.example.com", "Acme Corp - Home"),
+            ("https://real-2.example.com", "Acme filing"),
+            # Duplicate: must be deduped.
+            ("https://real-1.example.com", "Acme Corp - Home"),
+        ],
+        n_calls=2,
+    ))
+    verifier = Verifier(
+        agent=agent,
+        cell_lookup=_make_cell_lookup({("x.csv", 0, "Vendor"): "AcmeCo"}),
+        column_samples=_make_column_samples({}),
+        cfg=VerifierConfig(prompt_path=PROMPT_PATH, concurrency=1),
+    )
+    v = verifier.run([cluster])[0]
+    # No downgrade: runtime annotations are trusted evidence.
+    assert v.verdict == "confirmed_error"
+    assert v.canonical_value == "Acme Corp"
+    # Two unique SDK citations surfaced; the duplicate is removed.
+    urls = [e.url for e in v.evidence]
+    assert urls == ["https://real-1.example.com", "https://real-2.example.com"]
+    # Title is carried over from the SDK citation.
+    assert v.evidence[0].title == "Acme Corp - Home"
+    # The agent's reasoning is reused as the quote (we never see the
+    # underlying snippet text from Bing).
+    assert v.evidence[0].quote == (
+        "Authoritative listings show Acme Corp \u30103:0\u2020source\u3011."
+    )
+    # ``n_unique_urls`` mirrors the raw count of SDK citations
+    # (existing behaviour - the field is set before the rescue path
+    # runs and includes the duplicate).
+    assert v.n_unique_urls == 3
+    assert v.n_results == 2
+    # No parse_error / no downgrade banner.
+    assert not v.parse_error
+
+
+def test_sdk_citations_do_not_override_real_payload_evidence():
+    """When the agent DID populate ``payload.evidence`` with grounded
+    URLs, those entries are kept as-is (their quote and title come
+    from the agent, not the fallback). The fallback path must only
+    fire when the per-URL filter produced an empty evidence list.
+    """
+    cluster = _cluster(suggested_fix="Acme Corp")
+    payload = json.dumps({
+        "verdict": "confirmed_error",
+        "canonical_value": "Acme Corp",
+        "confidence": 0.9,
+        "evidence": [{
+            "url": "https://real-1.example.com",
+            "title": "Acme Corp - Home",
+            "quote": "Acme Corp is a global supplier",
+        }],
+        "reasoning": "summary",
+    })
+    agent = StubAgentBackend(default=_verdict(
+        payload,
+        urls=[
+            ("https://real-1.example.com", "Acme Corp - Home"),
+            # SDK saw a SECOND URL the agent didn't bother quoting -
+            # we must not silently append it.
+            ("https://real-2.example.com", "Acme filing"),
+        ],
+    ))
+    verifier = Verifier(
+        agent=agent,
+        cell_lookup=_make_cell_lookup({("x.csv", 0, "Vendor"): "AcmeCo"}),
+        column_samples=_make_column_samples({}),
+        cfg=VerifierConfig(prompt_path=PROMPT_PATH, concurrency=1),
+    )
+    v = verifier.run([cluster])[0]
+    assert v.verdict == "confirmed_error"
+    assert len(v.evidence) == 1
+    assert v.evidence[0].url == "https://real-1.example.com"
+    # Quote came from the agent's payload, not the reasoning fallback.
+    assert v.evidence[0].quote == "Acme Corp is a global supplier"
 
 
 def test_false_positive_passes_through():

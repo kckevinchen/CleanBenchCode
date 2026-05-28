@@ -1,10 +1,13 @@
 # Phase-B synthesis prompt.
 #
-# This prompt is fired once per multi-type cluster. It asks the model to
-# reconcile several overlapping per-type detections on the same CSV row into
-# a single canonical issue record. The detectors are NOT independent - one
-# underlying defect typically trips several of them - so the model's job is
-# to identify the root cause and classify the rest as supporting evidence.
+# This prompt is fired once per cluster (single- or multi-detection). It
+# asks the model to consolidate the per-type detections on a CSV row into
+# a single canonical issue record. When several detectors fire they are
+# typically NOT independent - one underlying defect trips several of them
+# - so the model's job is to identify the root cause and classify the
+# rest as supporting evidence. When only one detector fired, the lone
+# detection IS the primary type and `supporting_error_types` is empty;
+# the model should still emit a clean, concrete `canonical_fix`.
 #
 # Placeholders available to base.user_template:
 #   row_values         - bulleted "column: value" list for the flagged row
@@ -18,17 +21,19 @@
 #   row                - source-CSV row index (integer or "n/a")
 
 system: >
-  You are a senior data-quality reviewer. Your job is to consolidate multiple
-  overlapping data-quality findings about a single CSV row into one canonical
-  issue record. Respond with strictly valid JSON, no markdown fences, and no
-  prose outside the JSON payload.
+  You are a senior data-quality reviewer. Your job is to produce one
+  canonical issue record for a flagged CSV row from one or more per-type
+  detector findings. Respond with strictly valid JSON, no markdown fences,
+  and no prose outside the JSON payload.
 
 user_template: |
   A single row in a CSV was flagged by {detection_count} data-quality
-  detectors, each focused on a different class of error. These detectors are
-  not independent: one underlying defect often trips several of them. Decide
-  which detection best names the underlying defect and treat the rest as
-  supporting evidence.
+  detector(s), each focused on a class of error. When several detectors
+  fired they are typically not independent - one underlying defect often
+  trips several of them - so identify which detection best names the
+  underlying defect and treat any others as supporting evidence. When
+  only one detector fired, that detection IS the primary error type and
+  `supporting_error_types` MUST be an empty list.
 
   CLUSTER: {cluster_id}   ROW: {row}
 
@@ -55,12 +60,26 @@ user_template: |
      is true, `primary_error_type` MUST still be the least-implausible
      of the existing detection keys - never invent a new type.
   2. Put the remaining detection keys that are genuine downstream symptoms
-     of the same defect in `supporting_error_types`.
+     of the same defect in `supporting_error_types`. With only one
+     detection this list is `[]`.
   3. Omit from `supporting_error_types` any detection that, on reflection,
      looks spurious given the row context.
-  4. If the whole cluster looks spurious given the row context, set
+  4. Always emit a concrete, actionable `canonical_fix` whenever a fix
+     would be safe to apply (the literal corrected value when one is
+     obvious, otherwise a short imperative such as "set Country to
+     'Brazil'"). Use null only when no defensible fix exists.
+     ALSO emit `canonical_record`: a mapping
+     `{{<column>: "<literal canonical replacement>"}}` keyed by every
+     column the cluster touches, giving the LITERAL replacement
+     string a downstream system could write directly into the cell -
+     NOT a sentence, NOT an instruction. Use `null` for the whole
+     object when no defensible literal exists for any column; use
+     `null` for individual columns where a literal cannot be given.
+     If a per-detection finding already supplied a `corrected_value`
+     mapping, copy / refine it - do not contradict it without reason.
+  5. If the whole cluster looks spurious given the row context, set
      `is_likely_false_positive` to true and explain why in `reviewer_note`.
-  5. Do NOT invent additional issues or refer to columns/values that do not
+  6. Do NOT invent additional issues or refer to columns/values that do not
      appear in the row context above.
 
   LENGTH BUDGETS (hard caps).
@@ -83,6 +102,7 @@ user_template: |
     "root_cause": "<1-2 sentences explaining the underlying defect>",
     "canonical_explanation": "<one-sentence summary suitable for a reviewer>",
     "canonical_fix": "<concrete fix recommendation, or null>",
+    "canonical_record": {{<column>: "<literal canonical replacement>", ...}} | null,
     "confidence": "high | medium | low",
     "is_likely_false_positive": <true | false>,
     "reviewer_note": "<optional extra context, or empty string>"

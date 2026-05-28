@@ -27,6 +27,85 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'; base-uri 'none'; form-action 'none'" />
   <title>Relation Discovery Report</title>
+  <!-- Auto-zoom for low-resolution screens. Mirrors
+       frontend/labeling/viewport-zoom.js; inlined here because this is
+       a self-contained file:// report. Sets html { zoom: N } based on
+       viewport size so the dashboard scales DOWN on small screens
+       (1366x768 / 1280x720 laptops) and stays at 1.0 on 1600x900+.
+       Synchronous + in <head> so the first paint is at the right
+       scale (no FOUC). Override from devtools via
+       ``__workbenchZoom.setOverride(0.85)`` or ``setOverride('off')``. -->
+  <script>
+    (function () {
+      'use strict';
+      var DESIGN_W = 1600, DESIGN_H = 900;
+      var MIN = 0.65, MAX = 1.0;
+      var KEY = 'workbench:zoom-override';
+      function readOverride() {
+        try { return window.localStorage.getItem(KEY); } catch (e) { return null; }
+      }
+      function writeOverride(v) {
+        try {
+          if (v === null || v === undefined) window.localStorage.removeItem(KEY);
+          else window.localStorage.setItem(KEY, String(v));
+        } catch (e) {}
+      }
+      function pick() {
+        var w = window.innerWidth || document.documentElement.clientWidth;
+        var h = window.innerHeight || document.documentElement.clientHeight;
+        if (!w || !h) return 1;
+        var fit = Math.min(w / DESIGN_W, h / DESIGN_H);
+        return fit > MAX ? MAX : (fit < MIN ? MIN : fit);
+      }
+      function resolve() {
+        var o = readOverride();
+        if (o === 'off' || o === '1' || o === '1.0') return 1;
+        if (o) {
+          var n = parseFloat(o);
+          if (!isNaN(n) && isFinite(n)) {
+            if (n < 0.4) n = 0.4;
+            if (n > 2.0) n = 2.0;
+            return n;
+          }
+        }
+        return pick();
+      }
+      function apply() {
+        var z = resolve();
+        var r = document.documentElement;
+        if (!r) return;
+        r.style.zoom = String(z);
+        /* Compensate viewport units: see viewport-zoom.js. With
+           html { zoom: 0.85 }, ``100vh`` inside still resolves
+           against the un-zoomed viewport, so e.g. a 100vh-tall
+           container only paints to 85% of the window. Setting
+           ``--vh-scale = 1/z`` lets CSS multiply ``vh`` values
+           back up so painted heights fill the viewport. */
+        var inv = 1 / z;
+        r.style.setProperty('--workbench-zoom', String(z));
+        r.style.setProperty('--vh-scale', String(inv));
+        r.style.setProperty('--vw-scale', String(inv));
+        r.dataset.viewportZoom = z.toFixed(3);
+      }
+      apply();
+      var pending = 0;
+      window.addEventListener('resize', function () {
+        if (pending) return;
+        pending = window.requestAnimationFrame(function () {
+          pending = 0; apply();
+        });
+      });
+      window.__workbenchZoom = {
+        apply: apply,
+        setOverride: function (v) { writeOverride(v); apply(); },
+        getCurrent: function () {
+          return parseFloat(
+            (document.documentElement && document.documentElement.dataset.viewportZoom) || '1',
+          );
+        },
+      };
+    })();
+  </script>
   <style>
     :root {
       --bg: #0f172a;
@@ -288,7 +367,10 @@
     }
     .relations-layout > .rel-context-col {
       position: sticky; top: 12px;
-      max-height: calc(100vh - 24px);
+      /* Match the body's zoom compensation (see inline script above)
+         so the sticky context panel actually reaches the bottom of
+         the viewport on zoomed-down layouts. */
+      max-height: calc((100vh - 24px) * var(--vh-scale, 1));
       overflow: auto;
     }
     .relations-layout > .rel-context-col.empty { display: none; }
@@ -1297,7 +1379,6 @@
       var sources = DATA.sources || [];
       var gtSummary = DATA.gt_summary || null;
       var sourcesDetail = Array.isArray(DATA.sources_detail) ? DATA.sources_detail : [];
-      var generalized = Array.isArray(DATA.generalized) ? DATA.generalized : [];
       var aggregated = Array.isArray(DATA.aggregated) ? DATA.aggregated : [];
       var multiTableGroups = Array.isArray(DATA.multi_table_groups)
         ? DATA.multi_table_groups : [];
@@ -1527,31 +1608,26 @@
       }
 
       // ---------------------------------------------------------------
-      // Aggregation + Generalization layers
+      // Aggregation layer
       //
-      // The discovery pipeline emits rules in three layers:
+      // The discovery pipeline emits rules in two layers:
       //   1. Originals (`relations.jsonl`)        - what the LLM actually said
       //   2. Aggregated canonicals (`relations_aggregated.jsonl`) -
       //      paraphrase clusters merged into canonical rules; each
       //      canonical carries `aggregated_from = [original species_keys]`
-      //   3. Generalized parametrics (`relations_generalized.jsonl`) -
-      //      value-keyed families collapsed to one parametric rule; each
-      //      parametric carries `generalized_from = [species_keys]` which
-      //      may be CANONICAL keys (when aggregation ran first) or
-      //      ORIGINAL keys (for arms that weren't aggregated).
       //
-      // We render the highest layer that covers each rule as the primary
-      // card; lower layers are tucked under expand. Originals are NEVER
-      // discarded from the dataset - this is the "we care about what the
-      // LLM really discovered" invariant.
+      // We render the aggregated canonical as the primary card when it
+      // covers an original; the original is tucked under expand.
+      // Originals are NEVER discarded from the dataset - this is the
+      // "we care about what the LLM really discovered" invariant.
       // ---------------------------------------------------------------
       var relationsBySpecies = {};
       relations.forEach(function (r) {
         if (r && r.species_key) relationsBySpecies[r.species_key] = r;
       });
 
-      // Pass 1: aggregation. Each canonical attaches its originals
-      // and we mark every original it covers as consumed.
+      // Aggregation: each canonical attaches its originals and we
+      // mark every original it covers as consumed.
       var coveredByAggregation = {};
       var aggregatedBySpecies = {};
       aggregated.forEach(function (a) {
@@ -1571,62 +1647,14 @@
         if (a.species_key) aggregatedBySpecies[a.species_key] = a;
       });
 
-      // Unified lookup so generalized's `generalized_from` can resolve
-      // either a canonical (post-aggregation) or an original (when
-      // aggregation didn't cover that arm).
-      var lookupBySpecies = {};
-      Object.keys(relationsBySpecies).forEach(function (k) {
-        lookupBySpecies[k] = relationsBySpecies[k];
-      });
-      Object.keys(aggregatedBySpecies).forEach(function (k) {
-        lookupBySpecies[k] = aggregatedBySpecies[k];
-      });
-
-      // Pass 2: generalization. Each parametric attaches its sources
-      // and we mark every source key as consumed. We also FLATTEN one
-      // level: if a source is a canonical with its own
-      // `aggregated_originals`, expose those originals on the parametric
-      // card so the audit expander shows the LLM's actual emitted
-      // predicates rather than just the merged canonical.
-      var coveredByGeneralization = {};
-      generalized.forEach(function (g) {
-        var keys = Array.isArray(g.generalized_from) ? g.generalized_from : [];
-        var sources = [];      // direct sources (canonicals or originals)
-        var flat = [];         // fully-flattened originals for display
-        var freq = 0;
-        keys.forEach(function (k) {
-          var src = lookupBySpecies[k];
-          if (!src) return;
-          coveredByGeneralization[k] = true;
-          sources.push(src);
-          freq += (src.pass_frequency || 0);
-          var nested = Array.isArray(src.aggregated_originals)
-            ? src.aggregated_originals : null;
-          if (nested && nested.length) {
-            nested.forEach(function (o) { flat.push(o); });
-          } else {
-            flat.push(src);
-          }
-        });
-        g.generalized_sources = sources;
-        g.generalized_originals = flat;
-        if (freq && g.pass_frequency == null) g.pass_frequency = freq;
-      });
-
-      // Build the final pool: the highest-layer rule for each chain,
-      // plus any original/canonical that was never consumed.
-      if (generalized.length || aggregated.length) {
+      // Build the final pool: aggregated canonicals first, then any
+      // original that was never absorbed.
+      if (aggregated.length) {
         var rebuilt = [];
-        generalized.forEach(function (g) { rebuilt.push(g); });
-        aggregated.forEach(function (a) {
-          if (!a.species_key || !coveredByGeneralization[a.species_key]) {
-            rebuilt.push(a);
-          }
-        });
+        aggregated.forEach(function (a) { rebuilt.push(a); });
         relations.forEach(function (r) {
           if (!r.species_key) return;
           if (coveredByAggregation[r.species_key]) return;
-          if (coveredByGeneralization[r.species_key]) return;
           rebuilt.push(r);
         });
         relations = rebuilt;
@@ -2475,18 +2503,6 @@
             text: "+" + variants.length + " variant" + (variants.length === 1 ? "" : "s")
           }));
         }
-        // Parametric / generalized badge.
-        var genOrigins = Array.isArray(r.generalized_originals)
-          ? r.generalized_originals : [];
-        if (genOrigins.length) {
-          pills.push(h("span", { class: "pill",
-            title: "Parametric rule: rewritten by a post-discovery LLM "
-              + "pass to cover " + genOrigins.length
-              + " value-keyed originals.",
-            style: "color: var(--kind-calc); border-color: rgba(52,211,153,0.55); background: rgba(52,211,153,0.10)",
-            text: "parametric"
-          }));
-        }
         // Aggregated / merged badge.
         var aggOrigins = Array.isArray(r.aggregated_originals)
           ? r.aggregated_originals : [];
@@ -2575,39 +2591,6 @@
             }
           });
           children.push(dataFold);
-        }
-
-        // Generalization originals: when this card is a parametric
-        // rewrite, the LLM-emitted value-keyed rules it replaced
-        // are listed verbatim here so users can audit the merge.
-        if (genOrigins.length) {
-          var genRows = h("div", { class: "variants-list" });
-          genOrigins.forEach(function (v) {
-            var rowKids = [];
-            if (v.error_type) {
-              rowKids.push(h("span", { class: "pill type-pill", text: v.error_type }));
-            }
-            if (v.kind) {
-              rowKids.push(h("span", { class: pillClassForKind(v.kind), text: v.kind }));
-            }
-            var c = (v.confidence || "").toLowerCase();
-            if (c) {
-              rowKids.push(h("span", { class: "pill conf-" + c, text: c }));
-            }
-            rowKids.push(h("span", { class: "v-pred",
-              text: v.predicate || "(no predicate)",
-              title: v.predicate || ""
-            }));
-            genRows.appendChild(h("div", { class: "variant-row" }, rowKids));
-          });
-          children.push(h("details", { class: "variants" }, [
-            h("summary", { class: "variants-summary",
-              text: "Generalized from " + genOrigins.length
-                + " value-keyed rule" + (genOrigins.length === 1 ? "" : "s")
-                + (r.generalization_reason ? " - " + r.generalization_reason : "")
-            }),
-            genRows
-          ]));
         }
 
         // Aggregation originals: when this card is a canonical rule

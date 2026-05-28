@@ -253,18 +253,25 @@ def test_cluster_propagate_fp_marks_sibling_clusters(tmp_path: Path):
         assert body["clusters"][0]["cluster_id"] == "contracts.csv__r00005-c000"
 
 
-def test_cluster_propagate_does_not_overwrite_existing_verdicts(tmp_path: Path):
+def test_cluster_propagate_overwrites_existing_verdicts(tmp_path: Path):
+    """Same-value cluster propagation now overrides prior verdicts on
+    sibling clusters - the operator clicked propagation precisely
+    because the value's verdict should be uniform, and silently
+    leaving the old (often contradictory) label in place produced
+    confusing UIs where the same value carried mixed states."""
     project, run_id = _build_run(tmp_path)
     app = create_app(project, annotator="t")
     with TestClient(app) as client:
         # Pre-label sibling cluster c001 as TP so it has a non-skip
-        # verdict already on file.
+        # verdict already on file (by a different annotator, to also
+        # confirm we don't refuse to overwrite someone else's label).
         client.post(f"/api/runs/{run_id}/labels", json={
             "target": "cluster",
             "target_id": "contracts.csv__r00005-c000",
             "source": "contracts.csv",
             "row": 5, "column": "contractor",
             "status": "tp",
+            "annotator": "other",
         })
         r = client.post(f"/api/runs/{run_id}/clusters/propagate-status", json={
             "source": "contracts.csv",
@@ -274,8 +281,44 @@ def test_cluster_propagate_does_not_overwrite_existing_verdicts(tmp_path: Path):
         })
         body = r.json()
         assert body["matched"] == 1
+        assert body["propagated"] == 1
+        assert body["overridden_existing"] == 1
+        # Back-compat key: kept around so older callers don't KeyError.
+        assert body["skipped_existing"] == 0
+        # The sibling's effective verdict must now be FP (latest-wins).
+        bundle = client.get(
+            f"/api/runs/{run_id}/clusters/contracts.csv__r00005-c000"
+        ).json()
+        assert bundle["label"]["status"] == "fp"
+
+
+def test_cluster_propagate_noop_when_same_status_same_annotator(tmp_path: Path):
+    """If a sibling already carries the SAME status from the SAME
+    annotator, propagation should be a no-op (avoids polluting the
+    audit log with redundant identical records)."""
+    project, run_id = _build_run(tmp_path)
+    app = create_app(project, annotator="t")
+    with TestClient(app) as client:
+        # Pre-label sibling with the exact same verdict the propagation
+        # will try to apply.
+        client.post(f"/api/runs/{run_id}/labels", json={
+            "target": "cluster",
+            "target_id": "contracts.csv__r00005-c000",
+            "source": "contracts.csv",
+            "row": 5, "column": "contractor",
+            "status": "fp",
+        })
+        r = client.post(f"/api/runs/{run_id}/clusters/propagate-status", json={
+            "source": "contracts.csv",
+            "row": 1, "column": "contractor",
+            "status": "fp",
+        })
+        body = r.json()
+        # Match still counts (we found a sibling); but no record was
+        # appended and no override happened.
+        assert body["matched"] == 1
         assert body["propagated"] == 0
-        assert body["skipped_existing"] == 1
+        assert body["overridden_existing"] == 0
 
 
 def test_cluster_propagate_skips_seed_and_non_matching_values(tmp_path: Path):
@@ -312,11 +355,13 @@ def test_cluster_propagate_skips_seed_and_non_matching_values(tmp_path: Path):
 
 def test_cluster_propagate_validates_status(tmp_path: Path):
     """FN is invalid for cluster propagation (cells, not clusters,
-    carry FN). SKIP has its own row-cascade path."""
+    carry FN). SKIP is allowed - it spreads the skip verdict to other
+    clusters on the column carrying the same anchor value (separate
+    from the row-cascade skip path)."""
     project, run_id = _build_run(tmp_path)
     app = create_app(project, annotator="t")
     with TestClient(app) as client:
-        for bad in ("fn", "skip", "garbage", ""):
+        for bad in ("fn", "garbage", ""):
             r = client.post(f"/api/runs/{run_id}/clusters/propagate-status", json={
                 "source": "contracts.csv",
                 "row": 1, "column": "contractor",

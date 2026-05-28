@@ -19,6 +19,11 @@ Why agents-as-verifier instead of "web tool returning snippets":
 
 Auth uses :class:`AzureCliCredential` so the deployment story matches
 :mod:`src.core.llm_client` - one ``az login`` and you're done.
+
+Multi-endpoint scaling: when several Foundry projects (each with its
+own web-search-equipped agent) are available, wrap them in
+:class:`RoundRobinAgentBackend` to distribute calls across endpoints
+and raise effective throughput. See :func:`build_agent_backend`.
 """
 
 from __future__ import annotations
@@ -28,11 +33,32 @@ import os
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Optional, Protocol
+from typing import Any, Dict, List, Mapping, Optional, Protocol, Sequence
 
 from .web_cache import WebCache
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Default Foundry Agents pool
+# ---------------------------------------------------------------------------
+
+# Pool of (project endpoint, agent id) pairs the verifier dispatches
+# across by default when nothing else is configured (no CLI args, no
+# env vars). Mirrors :data:`src.core.llm_client.DEFAULT_ENDPOINTS`:
+# multi-endpoint round-robin is the out-of-the-box behaviour, not an
+# opt-in. Add or remove pairs here as the agent fleet grows. The
+# pairing is positional (the i-th endpoint is dispatched against the
+# i-th agent id).
+DEFAULT_AGENT_ENDPOINTS: List[str] = [
+    "https://sc-rf-ma30hqbc-eastus2.services.ai.azure.com/api/projects/sc-rf-ma30hqbc-eastus2-project",
+    "https://sc-rf-ml1gf0z3-southcentralus.services.ai.azure.com/api/projects/sc-rf-ml1gf0z3-southcen-project",
+]
+DEFAULT_AGENT_IDS: List[str] = [
+    "asst_Hobm9YVg9eJm7848CqH4GQ4y",
+    "asst_uInM055RT8OpSFC9Zgb0aPpi",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +159,18 @@ class AzureAgentBackend:
             self.agent_id = os.environ.get(
                 "AZURE_AGENTS_VERIFIER_AGENT_ID", "",
             ).strip()
+        # Final code-default fallback: when nothing was passed and no
+        # singular env var was set, pick the FIRST entry from the
+        # default pool so direct ``AzureAgentBackend()`` instantiation
+        # (without going through ``build_agent_backend``) still works
+        # out-of-the-box. ``build_agent_backend`` is the recommended
+        # path - it returns a round-robin dispatcher across all
+        # default pairs - but we keep this fallback so legacy callers
+        # don't regress.
+        if not self.endpoint and DEFAULT_AGENT_ENDPOINTS:
+            self.endpoint = DEFAULT_AGENT_ENDPOINTS[0]
+        if not self.agent_id and DEFAULT_AGENT_IDS:
+            self.agent_id = DEFAULT_AGENT_IDS[0]
         if not self.endpoint:
             logger.warning(
                 "AzureAgentBackend initialised without an endpoint; "
@@ -546,6 +584,8 @@ def build_agent_backend(
     system_prompt: str = "",
     cache: Optional[WebCache] = None,
     stub: bool = False,
+    endpoints: Optional[Sequence[str]] = None,
+    agent_ids: Optional[Sequence[str]] = None,
 ) -> AgentBackend:
     """Build an :class:`AgentBackend`.
 
@@ -553,15 +593,256 @@ def build_agent_backend(
     production the caller supplies (or env-supplies) ``endpoint`` and
     ``agent_id``; the agent itself must be pre-configured with the Web
     Search tool in the Foundry portal.
+
+    Multi-endpoint mode
+    -------------------
+    To distribute load across several Foundry projects in round-robin
+    fashion, supply either:
+
+    * Lists/tuples via ``endpoints=`` and ``agent_ids=`` (same length;
+      paired positionally), OR
+    * Comma-separated values in the singular ``endpoint`` / ``agent_id``
+      arguments (e.g. ``endpoint="https://a/...,https://b/..."``), OR
+    * The plural env vars ``AZURE_AGENTS_ENDPOINTS`` and
+      ``AZURE_AGENTS_VERIFIER_AGENT_IDS`` (comma-separated, paired
+      positionally).
+
+    With more than one (endpoint, agent_id) pair the factory returns
+    a :class:`RoundRobinAgentBackend`. With exactly one pair it
+    returns a single :class:`AzureAgentBackend` (no overhead vs. the
+    legacy code path).
     """
     if stub:
         return StubAgentBackend(system_prompt=system_prompt)
-    return AzureAgentBackend(
+
+    pairs = _resolve_endpoint_pairs(
         endpoint=endpoint,
         agent_id=agent_id,
-        system_prompt=system_prompt,
-        cache=cache,
+        endpoints=endpoints,
+        agent_ids=agent_ids,
     )
+    # No multi-endpoint config → preserve the legacy single-backend
+    # path so behaviour is unchanged for callers that haven't opted
+    # in. AzureAgentBackend.__post_init__ falls back to the singular
+    # env vars on its own.
+    if len(pairs) <= 1:
+        ep, aid = (pairs[0] if pairs else ("", ""))
+        return AzureAgentBackend(
+            endpoint=ep or endpoint,
+            agent_id=aid or agent_id,
+            system_prompt=system_prompt,
+            cache=cache,
+        )
+
+    backends: List[AgentBackend] = [
+        AzureAgentBackend(
+            endpoint=ep,
+            agent_id=aid,
+            system_prompt=system_prompt,
+            cache=cache,
+        )
+        for ep, aid in pairs
+    ]
+    logger.info(
+        "agent backend: round-robin over %d endpoints (%s)",
+        len(backends),
+        ", ".join(_short_endpoint(ep) for ep, _ in pairs),
+    )
+    return RoundRobinAgentBackend(
+        backends=backends, system_prompt=system_prompt,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Multi-endpoint configuration helpers
+# ---------------------------------------------------------------------------
+
+
+def _split_csv(value: str) -> List[str]:
+    """Split a comma-separated string into a list of non-empty trimmed
+    items. ``""`` -> ``[]`` so we stay None-tolerant."""
+    if not value:
+        return []
+    return [v.strip() for v in str(value).split(",") if v.strip()]
+
+
+def _resolve_endpoint_pairs(
+    *,
+    endpoint: str = "",
+    agent_id: str = "",
+    endpoints: Optional[Sequence[str]] = None,
+    agent_ids: Optional[Sequence[str]] = None,
+) -> List[tuple[str, str]]:
+    """Resolve ``(endpoint, agent_id)`` pairs from CLI args + env vars.
+
+    Resolution order (first non-empty wins for each axis):
+
+    1. Explicit ``endpoints=`` / ``agent_ids=`` lists.
+    2. Comma-separated values in the singular ``endpoint`` /
+       ``agent_id`` strings (allows ``--agent-endpoint a,b`` from the
+       CLI without needing a second flag).
+    3. Plural env vars: ``AZURE_AGENTS_ENDPOINTS`` /
+       ``AZURE_AGENTS_VERIFIER_AGENT_IDS``.
+    4. Singular env vars: ``AZURE_AGENTS_ENDPOINT`` /
+       ``AZURE_AGENTS_VERIFIER_AGENT_ID`` (legacy).
+    5. Code-default pool: :data:`DEFAULT_AGENT_ENDPOINTS` /
+       :data:`DEFAULT_AGENT_IDS`. Multi-endpoint round-robin is thus
+       the out-of-the-box behaviour even when no .env / CLI override
+       is supplied.
+
+    Raises ``ValueError`` when the two lists are non-empty but
+    different lengths - the pairing is positional and we cannot
+    silently truncate.
+    """
+    eps: List[str] = []
+    aids: List[str] = []
+    used_default = False
+
+    if endpoints:
+        eps = [e.strip() for e in endpoints if e and str(e).strip()]
+    elif endpoint:
+        eps = _split_csv(endpoint)
+    else:
+        eps = _split_csv(os.environ.get("AZURE_AGENTS_ENDPOINTS", ""))
+        if not eps:
+            singular = os.environ.get("AZURE_AGENTS_ENDPOINT", "").strip()
+            if singular:
+                eps = [singular]
+
+    if agent_ids:
+        aids = [a.strip() for a in agent_ids if a and str(a).strip()]
+    elif agent_id:
+        aids = _split_csv(agent_id)
+    else:
+        aids = _split_csv(
+            os.environ.get("AZURE_AGENTS_VERIFIER_AGENT_IDS", ""),
+        )
+        if not aids:
+            singular = os.environ.get(
+                "AZURE_AGENTS_VERIFIER_AGENT_ID", "",
+            ).strip()
+            if singular:
+                aids = [singular]
+
+    # Code-default fallback. Only kicks in when BOTH axes are still
+    # empty - if the operator configured one axis explicitly, we
+    # surface the length mismatch below rather than silently mixing
+    # their endpoints with our default agent ids (or vice versa).
+    if not eps and not aids:
+        if not DEFAULT_AGENT_ENDPOINTS or not DEFAULT_AGENT_IDS:
+            return []
+        eps = list(DEFAULT_AGENT_ENDPOINTS)
+        aids = list(DEFAULT_AGENT_IDS)
+        used_default = True
+
+    if len(eps) != len(aids):
+        raise ValueError(
+            "endpoint / agent_id count mismatch: "
+            f"{len(eps)} endpoint(s) but {len(aids)} agent_id(s); "
+            "they must pair positionally",
+        )
+    if used_default:
+        logger.info(
+            "agent backend: using built-in default pool (%d endpoint(s)). "
+            "Set AZURE_AGENTS_ENDPOINTS / AZURE_AGENTS_VERIFIER_AGENT_IDS "
+            "or pass --agent-endpoint / --agent-id to override.",
+            len(eps),
+        )
+    return list(zip(eps, aids))
+
+
+def _short_endpoint(url: str) -> str:
+    """Display-only abbreviation for log lines."""
+    if not url:
+        return "<empty>"
+    # Strip the long ``/api/projects/...`` suffix; keep host.
+    head = url.split("/api/", 1)[0]
+    return head.replace("https://", "").replace("http://", "")[:60]
+
+
+# ---------------------------------------------------------------------------
+# Round-robin dispatcher
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RoundRobinAgentBackend:
+    """Round-robin dispatcher across multiple :class:`AgentBackend` instances.
+
+    Use this when you have several Foundry projects (each with its own
+    web-search-equipped agent) and want to distribute load across them
+    to raise effective throughput. Each call to :meth:`verify` advances
+    a shared counter and dispatches to the next backend; backends own
+    their own ``AgentsClient`` + verdict cache (typically all wired to
+    the same on-disk :class:`WebCache` so cache hits are shared).
+
+    Thread-safe: the counter is guarded by a ``Lock`` so concurrent
+    Verifier workers (``ThreadPoolExecutor``) get distinct backends.
+
+    System-prompt plumbing: :class:`Verifier` writes ``system_prompt``
+    onto its ``agent`` attribute after construction. We forward that
+    write down to every child so they all use the same prompt for
+    their per-run ``instructions`` override.
+    """
+
+    backends: List[AgentBackend] = field(default_factory=list)
+    system_prompt: str = ""
+    name: str = "azure_agent_pool"
+    _idx: int = field(init=False, default=0, repr=False)
+    _lock: threading.Lock = field(
+        init=False, default_factory=threading.Lock, repr=False,
+    )
+
+    def __post_init__(self) -> None:
+        if not self.backends:
+            raise ValueError(
+                "RoundRobinAgentBackend requires at least one backend",
+            )
+        # Propagate any system_prompt set at construction time down
+        # to children so the very first call already uses the right
+        # instructions override.
+        if self.system_prompt:
+            self._propagate_system_prompt(self.system_prompt)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        # Forward ``system_prompt`` writes to every child backend so
+        # the Verifier's post-init hook (``setattr(agent,
+        # "system_prompt", ...)``) reaches all of them.
+        super().__setattr__(name, value)
+        if name == "system_prompt" and getattr(self, "backends", None):
+            self._propagate_system_prompt(value)
+
+    def _propagate_system_prompt(self, value: str) -> None:
+        for b in self.backends:
+            try:
+                setattr(b, "system_prompt", value)
+            except (AttributeError, TypeError):  # backend doesn't support it
+                continue
+
+    def _next_backend(self) -> AgentBackend:
+        with self._lock:
+            backend = self.backends[self._idx % len(self.backends)]
+            i = self._idx
+            self._idx += 1
+        # Debug-level so production logs stay quiet, but operators
+        # can flip on `-v` to confirm dispatch is balanced across
+        # endpoints during smoke tests.
+        ep = getattr(backend, "endpoint", "")
+        if ep:
+            logger.debug(
+                "round-robin dispatch #%d -> %s",
+                i, _short_endpoint(ep),
+            )
+        return backend
+
+    def verify(
+        self,
+        prompt: str,
+        *,
+        cache_key: Optional[str] = None,
+    ) -> AgentVerdict:
+        backend = self._next_backend()
+        return backend.verify(prompt, cache_key=cache_key)
 
 
 __all__ = [
@@ -569,6 +850,9 @@ __all__ = [
     "AgentVerdict",
     "AzureAgentBackend",
     "Citation",
+    "DEFAULT_AGENT_ENDPOINTS",
+    "DEFAULT_AGENT_IDS",
+    "RoundRobinAgentBackend",
     "StubAgentBackend",
     "build_agent_backend",
 ]

@@ -55,6 +55,7 @@ from src.verifier import (  # noqa: E402
     GateConfig,
     Verifier,
     VerifierConfig,
+    build_agent_backend,
 )
 from src.verifier.web_cache import WebCache  # noqa: E402
 
@@ -675,10 +676,15 @@ def verify_column(
         synth.append(c)
         cluster_meta[c["cluster_id"]] = (value, rows, flagged_cids)
 
-    # Cache + agent.
+    # Cache + agent. ``build_agent_backend`` returns a round-robin
+    # dispatcher when multiple (endpoint, agent_id) pairs are
+    # configured via comma-separated CLI args or the plural env
+    # vars (AZURE_AGENTS_ENDPOINTS / AZURE_AGENTS_VERIFIER_AGENT_IDS),
+    # otherwise a single AzureAgentBackend. Cache is shared across
+    # endpoints so a hit from any backend short-circuits the call.
     cache_dir = run_dir / "web_cache"
     cache = WebCache(cache_dir)
-    agent = AzureAgentBackend(
+    agent = build_agent_backend(
         endpoint=agent_endpoint or "",
         agent_id=agent_id or "",
         cache=cache,
@@ -792,8 +798,20 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Run on every (source, column) whose adaptive arms include "
              "an exhausted state. Reads good_turing/per_arm_estimates.json.",
     )
-    p.add_argument("--agent-endpoint", default=None)
-    p.add_argument("--agent-id", default=None)
+    p.add_argument(
+        "--agent-endpoint", default=None,
+        help="Foundry project endpoint URL. Pass a comma-separated "
+             "list to round-robin across multiple Foundry projects. "
+             "Falls back to AZURE_AGENTS_ENDPOINTS / "
+             "AZURE_AGENTS_ENDPOINT.",
+    )
+    p.add_argument(
+        "--agent-id", default=None,
+        help="Foundry agent id (asst_...). Pass a comma-separated "
+             "list paired positionally with --agent-endpoint. Falls "
+             "back to AZURE_AGENTS_VERIFIER_AGENT_IDS / "
+             "AZURE_AGENTS_VERIFIER_AGENT_ID.",
+    )
     p.add_argument("--model", default="gpt-5.2")
     p.add_argument("--reasoning-effort", default="medium")
     p.add_argument("--concurrency", type=int, default=4)

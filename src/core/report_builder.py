@@ -42,6 +42,55 @@ logger = logging.getLogger(__name__)
 _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
+def _normalize_corrected_value(
+    raw: Any, columns: Sequence[str],
+) -> Optional[Dict[str, Optional[str]]]:
+    """Coerce the LLM's ``corrected_value`` field into a stable shape.
+
+    The prompt asks for a ``{column: literal}`` mapping (or ``null``)
+    but real LLM output sometimes wanders: a bare string for a
+    single-column finding, a list aligned with ``columns``, sentinel
+    strings like ``"null"``, etc. Normalise to either
+    ``{column: literal_or_None, ...}`` (one key per emitted column,
+    extras dropped) or ``None`` when no usable literal was supplied.
+    Pure row-level findings (``columns == []``) always return
+    ``None``.
+    """
+    cols = [c for c in (columns or []) if isinstance(c, str)]
+    if not cols:
+        return None
+    if raw in (None, "", "null", "None"):
+        return None
+
+    out: Dict[str, Optional[str]] = {c: None for c in cols}
+    if isinstance(raw, Mapping):
+        for col in cols:
+            val = raw.get(col)
+            if val in (None, "", "null", "None"):
+                out[col] = None
+            else:
+                s = str(val).strip()
+                out[col] = s or None
+    elif isinstance(raw, (list, tuple)):
+        for col, val in zip(cols, raw):
+            if val in (None, "", "null", "None"):
+                out[col] = None
+            else:
+                s = str(val).strip()
+                out[col] = s or None
+    else:
+        # Bare scalar (string / number): apply to first column only -
+        # only safe for single-column findings, but harmless for the
+        # multi-column case (later columns stay None).
+        s = str(raw).strip()
+        if s and s.lower() != "null":
+            out[cols[0]] = s
+
+    if not any(v for v in out.values()):
+        return None
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Issue flattening
 # ---------------------------------------------------------------------------
@@ -294,6 +343,9 @@ def flatten_issues(
                 "observed": issue.get("observed", ""),
                 "explanation": issue.get("explanation", ""),
                 "suggested_fix": issue.get("suggested_fix"),
+                "corrected_value": _normalize_corrected_value(
+                    issue.get("corrected_value"), columns,
+                ),
                 "row_values": row_values,
             }
             try:

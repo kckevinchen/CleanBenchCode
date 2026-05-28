@@ -2,7 +2,7 @@
 ``experiments.run_relation_discovery._run_validation_pass``.
 
 The pass is a thin wrapper around
-:func:`src.core.relation_validator.validate_relations`; the real
+:func:`src.core.relations.validator.validate_relations`; the real
 discovery runner end-to-end exercise lives in the integration suite,
 so here we just verify wiring: layer auto-resolution, missing-prompt
 short-circuit, and JSONL emission.
@@ -44,7 +44,6 @@ class _StubLLM:
 
 def _seed_layer(run_dir: Path, layer: str, relations: List[Dict[str, Any]]) -> None:
     layer_files = {
-        "generalized": "relations_generalized.jsonl",
         "aggregated":  "relations_aggregated.jsonl",
         "originals":   "relations.jsonl",
     }
@@ -118,11 +117,10 @@ class TestRunValidationPass:
     def test_auto_layer_picks_highest(self, tmp_path: Path) -> None:
         run_dir = tmp_path / "run"
         run_dir.mkdir()
-        # Seed all three layers with distinct keys so we can verify
+        # Seed both layers with distinct keys so we can verify
         # which layer was picked from the verifications JSONL.
         _seed_layer(run_dir, "originals", [_relation("orig1")])
         _seed_layer(run_dir, "aggregated", [_relation("agg1")])
-        _seed_layer(run_dir, "generalized", [_relation("gen1")])
 
         prompt_path = tmp_path / "prompt.yaml"
         prompt_path.write_text(
@@ -143,21 +141,21 @@ class TestRunValidationPass:
             limit=None,
         )
         assert stats is not None
-        assert stats["layer"] == "generalized"
+        assert stats["layer"] == "aggregated"
         assert stats["n_relations"] == 1
-        # JSONL written; species_key tracks the generalized layer.
+        # JSONL written; species_key tracks the aggregated layer.
         path = run_dir / "relation_verifications.jsonl"
         assert path.is_file()
         rows = [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
         assert len(rows) == 1
-        assert rows[0]["species_key"] == "gen1"
-        assert rows[0]["layer"] == "generalized"
+        assert rows[0]["species_key"] == "agg1"
+        assert rows[0]["layer"] == "aggregated"
 
     def test_explicit_layer_overrides_auto(self, tmp_path: Path) -> None:
         run_dir = tmp_path / "run"
         run_dir.mkdir()
         _seed_layer(run_dir, "originals", [_relation("orig1")])
-        _seed_layer(run_dir, "generalized", [_relation("gen1")])
+        _seed_layer(run_dir, "aggregated", [_relation("agg1")])
 
         prompt_path = tmp_path / "prompt.yaml"
         prompt_path.write_text(

@@ -184,6 +184,187 @@ class TestRowLevelFindings:
         assert cells[0].cluster_ids == ["c1"]
 
 
+class TestAffectedRowsPropagation:
+    """One cluster verdict must propagate to every row the cluster
+    covers — the primary ``row`` plus every entry in any detection's
+    ``affected_rows``. Relation rules (and dup groups) collapse N
+    failing rows into ONE cluster after per-incident aggregation, so
+    without this fan-out the benchmark would only carry the verdict
+    for the representative row and silently drop the rest."""
+
+    def test_fans_out_to_every_affected_row(
+        self, store: LabelStore,
+    ) -> None:
+        cluster = _cluster(
+            "c1",
+            ["school", "city"],
+            error_types=["string_calculation_inconsistency"],
+            detections=[
+                {
+                    "issue_id": "rel__r1#a.csv#r00005",
+                    "affected_rows": [5, 23, 26, 32],
+                },
+            ],
+            row=5,
+        )
+        store.append(Label(
+            target=LabelTarget.CLUSTER, target_id="c1",
+            source="a.csv", row=5, column=None,
+            columns=["school", "city"],
+            status=LabelStatus.TP,
+            annotator="tester",
+        ))
+
+        cells = materialize_label_benchmark([cluster], store)
+        # 4 rows × 2 columns = 8 emitted cells.
+        keys = {(c.row, c.column) for c in cells}
+        assert keys == {
+            (5, "school"), (5, "city"),
+            (23, "school"), (23, "city"),
+            (26, "school"), (26, "city"),
+            (32, "school"), (32, "city"),
+        }
+        # Every emitted cell carries the cluster's verdict + cluster id.
+        for c in cells:
+            assert c.label == "error"
+            assert c.cluster_ids == ["c1"]
+            assert c.error_types == ["string_calculation_inconsistency"]
+
+    def test_no_affected_rows_emits_only_primary_row(
+        self, store: LabelStore,
+    ) -> None:
+        # Singleton clusters (no detections.affected_rows) must keep
+        # their pre-fan-out behaviour: one cell per column at the
+        # primary row only.
+        cluster = _cluster("c1", ["name"])
+        store.append(_label(
+            target_id="c1", column="name", columns=["name"],
+            status=LabelStatus.TP, corrected_value="Alice",
+        ))
+        cells = materialize_label_benchmark([cluster], store)
+        assert {(c.row, c.column) for c in cells} == {(0, "name")}
+
+    def test_primary_row_in_affected_rows_is_not_duplicated(
+        self, store: LabelStore,
+    ) -> None:
+        # Compiled detections include the primary row in
+        # ``affected_rows`` (the list is the full failing-row set);
+        # the exporter must de-dup so we don't emit two cells for the
+        # same (row, column).
+        cluster = _cluster(
+            "c1",
+            ["city"],
+            detections=[{"affected_rows": [0, 7, 9]}],
+            row=0,
+        )
+        store.append(_label(
+            target_id="c1", column="city", columns=["city"],
+            status=LabelStatus.TP, corrected_value="Miami",
+        ))
+        cells = materialize_label_benchmark([cluster], store)
+        assert {(c.row, c.column) for c in cells} == {
+            (0, "city"), (7, "city"), (9, "city"),
+        }
+
+    def test_peer_rows_do_not_inherit_primary_row_correction(
+        self, store: LabelStore,
+    ) -> None:
+        # Regression for cluster contamination: two per-row clusters
+        # fired on overlapping ``affected_rows`` (rule-level fan-out),
+        # but each cluster's ``corrected_value`` is row-specific. The
+        # exporter must NOT propagate a cluster's correction to peer
+        # rows -- those rows have their own cluster + label.
+        c1 = _cluster(
+            "c1",
+            ["district"],
+            row=0,
+            row_values={"district": "EAST VALLEY  (SPOKANE)"},
+            detections=[{"affected_rows": [0, 1]}],
+        )
+        c2 = _cluster(
+            "c2",
+            ["district"],
+            row=1,
+            row_values={"district": "EAST VALLEY  (YAKIMA)"},
+            detections=[{"affected_rows": [0, 1]}],
+        )
+        store.append(_label(
+            target_id="c1", column="district", columns=["district"],
+            status=LabelStatus.TP, corrected_value="EAST VALLEY (SPOKANE)",
+        ))
+        store.append(_label(
+            target_id="c2", column="district", columns=["district"],
+            status=LabelStatus.TP, corrected_value="EAST VALLEY (YAKIMA)",
+        ))
+        cells = materialize_label_benchmark([c1, c2], store)
+        by_row = {c.row: c for c in cells}
+        assert by_row[0].corrected_value == "EAST VALLEY (SPOKANE)"
+        assert by_row[1].corrected_value == "EAST VALLEY (YAKIMA)"
+
+    def test_large_fanout_does_not_contaminate_peer_corrections(
+        self, store: LabelStore,
+    ) -> None:
+        # Regression for the buggy export file
+        # ``benchmark_typo_20260512T213238Z_gpt5-family (10).jsonl``:
+        # a single rule fired on N rows (here 9) producing N per-row
+        # clusters that ALL list the same ``affected_rows`` peer set.
+        # Each cluster has its own row-specific ``corrected_value``.
+        # Pre-fix, every cell ended up stamped with the FIRST cluster's
+        # correction (e.g. all 9 SCHOOL/SITE rows became
+        # ``Burroughs Elementary``). The exporter must keep each row's
+        # own correction regardless of cluster iteration order.
+        fixes = {
+            33: "Burroughs Elementary",
+            34: "Columbia Elementary",
+            35: "Ewing Elementary",
+            36: "Greenberg Elementary",
+            37: "Holland Elementary",
+            38: "Lincoln Elementary",
+            39: "Mayfair Elementary",
+            40: "Powers Elementary",
+            41: "Pyle Elementary",
+        }
+        peer_rows = sorted(fixes.keys())
+        clusters = []
+        for r, fix in fixes.items():
+            cluster = _cluster(
+                f"c{r}",
+                ["SCHOOL/SITE"],
+                row=r,
+                row_values={"SCHOOL/SITE": f"orig_{r}"},
+                detections=[{"affected_rows": peer_rows}],
+            )
+            clusters.append(cluster)
+            store.append(_label(
+                target_id=f"c{r}", column="SCHOOL/SITE",
+                columns=["SCHOOL/SITE"],
+                status=LabelStatus.TP, corrected_value=fix,
+            ))
+
+        # Forward order: primary clusters in row-ascending order.
+        cells = materialize_label_benchmark(clusters, store)
+        by_row = {c.row: c.corrected_value for c in cells}
+        assert by_row == fixes
+
+        # Reverse order: primary clusters in row-descending order.
+        # Conflict-resolution uses ``existing or corrected_for_emit``,
+        # so peer-row emits (which carry ``None``) must never clobber
+        # a peer's own primary-row correction regardless of which
+        # cluster the exporter visits first.
+        store2 = LabelStore(store.path.parent / "labels_rev.jsonl")
+        for r, fix in fixes.items():
+            store2.append(_label(
+                target_id=f"c{r}", column="SCHOOL/SITE",
+                columns=["SCHOOL/SITE"],
+                status=LabelStatus.TP, corrected_value=fix,
+            ))
+        cells_rev = materialize_label_benchmark(
+            list(reversed(clusters)), store2,
+        )
+        by_row_rev = {c.row: c.corrected_value for c in cells_rev}
+        assert by_row_rev == fixes
+
+
 # ---------------------------------------------------------------------------
 # Per-error-type bundle export
 # ---------------------------------------------------------------------------
@@ -307,12 +488,13 @@ class TestPerErrorTypeBundle:
             assert lines[0]["column"] == "school"
             assert lines[0]["label"] == "error"
 
-    def test_skipped_rows_are_excluded_from_all_buckets(
+    def test_skip_does_not_drop_sibling_clusters_on_same_row(
         self, store: LabelStore,
     ) -> None:
         # Two clusters on the same row; one is TP, one is SKIP. The
-        # skip cascades and excludes the entire row from the benchmark
-        # (existing semantics) - per-type export must respect that.
+        # skip applies to its own cluster only - the sibling TP must
+        # still appear in the exported benchmark. Row- or CSV-wide
+        # removal is the exclusions API's job, not the export's.
         cluster_tp = _cluster(
             "c1", ["name"], error_types=["typo"],
         )
@@ -330,7 +512,12 @@ class TestPerErrorTypeBundle:
         buckets = materialize_label_benchmark_by_error_type(
             [cluster_tp, cluster_skip], store,
         )
-        assert buckets == {}
+        # TP survives, SKIP is silently dropped.
+        assert set(buckets) == {"typo"}
+        rows = buckets["typo"]
+        assert len(rows) == 1
+        assert rows[0].column == "name"
+        assert rows[0].label == "error"
 
     def test_endpoint_returns_zip_with_per_type_files(
         self, store: LabelStore, tmp_path: Path,
@@ -658,5 +845,127 @@ class TestLLMSuggestedValue:
         cells = materialize_label_benchmark([c1, c2], store)
         assert len(cells) == 1
         assert cells[0].llm_suggested_value == "Boston"
+
+
+# ---------------------------------------------------------------------------
+# Pre-export conflict detection (find_label_conflicts)
+# ---------------------------------------------------------------------------
+
+from src.labeling.export import find_label_conflicts
+from src.labeling.schema import BenchmarkCell
+
+
+def _bcell(
+    *, source: str = "a.csv", row: int, column: str = "name",
+    original_value: str = "Foo", label: str = "clean",
+    corrected_value=None, cluster_ids=None, note: str = "",
+) -> BenchmarkCell:
+    """Factory for a minimal :class:`BenchmarkCell`."""
+    return BenchmarkCell(
+        source=source, row=row, column=column,
+        original_value=original_value, label=label,
+        corrected_value=corrected_value,
+        cluster_ids=list(cluster_ids or []),
+        note=note,
+    )
+
+
+class TestFindLabelConflicts:
+    def test_no_conflicts_when_all_labels_agree(self) -> None:
+        cells = [
+            _bcell(row=0, label="clean"),
+            _bcell(row=1, label="clean"),
+            _bcell(row=2, label="clean"),
+        ]
+        assert find_label_conflicts(cells) == []
+
+    def test_distinct_labels_on_same_value_surface_as_conflict(self) -> None:
+        cells = [
+            _bcell(row=0, label="clean", cluster_ids=["c0"]),
+            _bcell(row=7, label="error", cluster_ids=["c7"],
+                   corrected_value="Foobar"),
+            _bcell(row=12, label="clean", cluster_ids=["c12"]),
+        ]
+        groups = find_label_conflicts(cells)
+        assert len(groups) == 1
+        g = groups[0]
+        assert g["source"] == "a.csv"
+        assert g["column"] == "name"
+        assert g["original_value"] == "Foo"
+        assert g["labels"] == ["clean", "error"]
+        # Cells listed in row order for stable presentation.
+        assert [c["row"] for c in g["cells"]] == [0, 7, 12]
+        # Per-cell payload carries enough to round-trip to the UI.
+        e = next(c for c in g["cells"] if c["label"] == "error")
+        assert e["corrected_value"] == "Foobar"
+        assert e["cluster_ids"] == ["c7"]
+
+    def test_distinct_sources_or_columns_are_independent_groups(
+        self,
+    ) -> None:
+        cells = [
+            # Group A: a.csv/name -- conflict.
+            _bcell(source="a.csv", row=0, column="name",
+                   original_value="X", label="clean"),
+            _bcell(source="a.csv", row=1, column="name",
+                   original_value="X", label="error"),
+            # Same value but DIFFERENT column -> independent (no conflict).
+            _bcell(source="a.csv", row=2, column="city",
+                   original_value="X", label="clean"),
+            # Same value but DIFFERENT source -> independent (no conflict).
+            _bcell(source="b.csv", row=2, column="name",
+                   original_value="X", label="clean"),
+        ]
+        groups = find_label_conflicts(cells)
+        assert len(groups) == 1
+        assert groups[0]["source"] == "a.csv"
+        assert groups[0]["column"] == "name"
+
+    def test_three_distinct_labels_collapse_into_one_group(self) -> None:
+        cells = [
+            _bcell(row=0, label="clean"),
+            _bcell(row=1, label="error", corrected_value="Foobar"),
+            _bcell(row=2, label="ambiguous"),
+        ]
+        groups = find_label_conflicts(cells)
+        assert len(groups) == 1
+        assert groups[0]["labels"] == ["ambiguous", "clean", "error"]
+        assert len(groups[0]["cells"]) == 3
+
+    def test_empty_column_and_empty_value_cells_are_ignored(self) -> None:
+        # Row-level findings (column="") share no column-value semantics
+        # with each other, so they should NEVER trigger a conflict
+        # warning. Empty original_value cells likewise re-use the same
+        # key trivially and would generate noise.
+        cells = [
+            _bcell(row=0, column="", original_value="X", label="clean"),
+            _bcell(row=1, column="", original_value="X", label="error"),
+            _bcell(row=2, original_value="", label="clean"),
+            _bcell(row=3, original_value="", label="error"),
+        ]
+        assert find_label_conflicts(cells) == []
+
+    def test_output_is_deterministic_across_runs(self) -> None:
+        # Stable sort key: (source, column, original_value). Operators
+        # comparing benchmarks across runs shouldn't have to re-read
+        # a conflict report whose rows shuffled.
+        cells_a = [
+            _bcell(source="z.csv", row=0, column="c", original_value="V",
+                   label="clean"),
+            _bcell(source="z.csv", row=1, column="c", original_value="V",
+                   label="error"),
+            _bcell(source="a.csv", row=2, column="c", original_value="V",
+                   label="clean"),
+            _bcell(source="a.csv", row=3, column="c", original_value="V",
+                   label="error"),
+        ]
+        cells_b = list(reversed(cells_a))
+        out_a = find_label_conflicts(cells_a)
+        out_b = find_label_conflicts(cells_b)
+        keys_a = [(g["source"], g["column"], g["original_value"]) for g in out_a]
+        keys_b = [(g["source"], g["column"], g["original_value"]) for g in out_b]
+        assert keys_a == keys_b == [
+            ("a.csv", "c", "V"), ("z.csv", "c", "V"),
+        ]
 
 

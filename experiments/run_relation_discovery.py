@@ -50,14 +50,7 @@ from src.core.relations import (  # noqa: E402
     write_relations_jsonl,
 )
 from src.core.table_digest import build_table_digest  # noqa: E402
-from src.core.relation_generalize import (  # noqa: E402
-    GeneralizationResult,
-    generalize_relations,
-    load_generalization_prompt,
-    write_generalization_report_json,
-    write_generalized_jsonl,
-)
-from src.core.relation_aggregate import (  # noqa: E402
+from src.core.relations.aggregate import (  # noqa: E402
     AggregationResult,
     aggregate_relations,
     load_aggregation_prompt,
@@ -213,74 +206,6 @@ def _run_aggregation_pass(
     return stats, result.post_aggregation_relations(relations)
 
 
-def _run_generalization_pass(
-    *,
-    run_dir: Path,
-    relations: Sequence[Any],
-    digests: Mapping[str, Any],
-    source_frames: Mapping[str, Any],
-    llm: Any,
-    model: str,
-    reasoning_effort: str,
-    reasoning_summary: str,
-    n_row_samples: int,
-    concurrency: int,
-    prompt_path: Path,
-    min_cluster_size: int,
-) -> Optional[Dict[str, Any]]:
-    """Cluster value-keyed rules and ask the LLM to rewrite each
-    family as one parametric rule. Returns a stats dict for
-    summary.json or ``None`` when the pass was skipped.
-    """
-    if not prompt_path.is_file():
-        logger.warning(
-            "generalization prompt missing: %s (skipping pass)", prompt_path,
-        )
-        return None
-    prompt_cfg = load_generalization_prompt(prompt_path)
-    result: GeneralizationResult = generalize_relations(
-        relations,
-        digests=digests,
-        source_frames=source_frames,
-        prompt_cfg=prompt_cfg,
-        llm=llm,
-        model=model,
-        reasoning_effort=reasoning_effort,
-        reasoning_summary=reasoning_summary,
-        n_row_samples=n_row_samples,
-        min_cluster_size=min_cluster_size,
-        concurrency=concurrency,
-    )
-    if result.n_clusters == 0:
-        logger.info("Generalization: no value-keyed clusters found.")
-        return {
-            "n_clusters": 0,
-            "n_generalized": 0,
-            "n_declined": 0,
-            "n_errored": 0,
-            "n_originals_collapsed": 0,
-        }
-    n_written = write_generalized_jsonl(
-        result, run_dir / "relations_generalized.jsonl",
-    )
-    write_generalization_report_json(
-        result, run_dir / "generalization_report.json",
-    )
-    logger.info(
-        "Generalization: %d cluster(s), %d rewritten, %d declined, "
-        "%d errored, %d originals collapsed.",
-        result.n_clusters, result.n_generalized, result.n_declined,
-        result.n_errored, result.n_originals_collapsed,
-    )
-    return {
-        "n_clusters": result.n_clusters,
-        "n_generalized": n_written,
-        "n_declined": result.n_declined,
-        "n_errored": result.n_errored,
-        "n_originals_collapsed": result.n_originals_collapsed,
-    }
-
-
 def _run_multi_table_pass(
     *,
     run_dir: Path,
@@ -312,7 +237,7 @@ def _run_multi_table_pass(
     sheets are skipped silently; an empty stats dict is returned
     when the entire workbook map has none.
     """
-    from src.core.multi_table_pipeline import resolve_groups_pass
+    from src.core.multi_table.pipeline import resolve_groups_pass
 
     _, stats = resolve_groups_pass(
         run_dir=run_dir,
@@ -343,9 +268,9 @@ def _run_validation_pass(
 ) -> Optional[Dict[str, Any]]:
     """Empirically validate the discovered relations.
 
-    Picks the highest available rule layer (generalized > aggregated
-    > originals) when ``layer == "auto"`` and asks the LLM to write
-    a ``check(df)`` function for each rule. The function runs in a
+    Picks the highest available rule layer (aggregated > originals)
+    when ``layer == "auto"`` and asks the LLM to write a
+    ``check(df)`` function for each rule. The function runs in a
     restricted sandbox; pass-rate and sample violations are persisted
     to ``relation_verifications.jsonl``. Returns a stats dict for
     inclusion in ``summary.json`` or ``None`` when the pass was
@@ -362,7 +287,7 @@ def _run_validation_pass(
         return None
     # Imported lazily so the discovery module's import surface
     # (and the dry-run path) doesn't pay for it.
-    from src.core.relation_validator import (  # noqa: WPS433
+    from src.core.relations.validator import (  # noqa: WPS433
         load_validation_prompt,
         validate_relations,
         write_verifications_jsonl,
@@ -370,7 +295,6 @@ def _run_validation_pass(
     from src.core.jsonl_io import read_jsonl  # noqa: WPS433
 
     layer_files = {
-        "generalized": "relations_generalized.jsonl",
         "aggregated":  "relations_aggregated.jsonl",
         "originals":   "relations.jsonl",
     }
@@ -382,8 +306,33 @@ def _run_validation_pass(
 
     chosen: str = layer
     relations: List[Dict[str, Any]] = []
-    if layer == "auto":
-        for name in ("generalized", "aggregated", "originals"):
+    if layer == "union":
+        # Merge aggregated canonicals + originals that no canonical
+        # absorbed. Singleton originals (no paraphrase cluster) are
+        # NEVER written to relations_aggregated.jsonl, so the
+        # 'aggregated' and 'auto' layers silently drop them. 'union'
+        # keeps them.
+        agg_rels = read_jsonl(
+            run_dir / layer_files["aggregated"], limit=None,
+        )
+        orig_rels = read_jsonl(
+            run_dir / layer_files["originals"], limit=None,
+        )
+        absorbed: set[str] = set()
+        for r in agg_rels:
+            for k in (r.get("aggregated_from") or []):
+                if k:
+                    absorbed.add(str(k))
+        kept_orig = [
+            r for r in orig_rels
+            if str(r.get("species_key") or "") not in absorbed
+        ]
+        relations = list(agg_rels) + kept_orig
+        if read_limit is not None:
+            relations = relations[:read_limit]
+        chosen = "union"
+    elif layer == "auto":
+        for name in ("aggregated", "originals"):
             relations = read_jsonl(run_dir / layer_files[name], limit=read_limit)
             if relations:
                 chosen = name
@@ -468,52 +417,46 @@ def _run_violation_compilation_pass(
     *,
     run_dir: Path,
     source_frames: Mapping[str, Any],
-    llm: Any,
-    model: str,
-    detect_prompt_path: Path,
-    enable_code_compile: bool,
-    enable_llm_detect: bool,
     min_pass_rate: float,
-    max_violations_per_rule: int,
-    min_confidence: str,
+    max_pass_rate: float,
     timeout_seconds: float,
-    llm_max_rows_per_call: int,
-    llm_max_violations_per_rule: int,
 ) -> Optional[Dict[str, Any]]:
     """Compile per-row violations from the validated relations.
 
-    Two paths share this pass:
+    Pipeline (linear, no LLM detect):
 
-    * **Code path** (``compile_code_violations``) -- re-runs the
-      sandboxed ``check(df)`` against every relation that the
-      validator marked verifiable, gates on pass-rate / confidence /
-      violator count, and emits one violation record per failing
-      row. The validator already discarded the full violator mask
-      (it only persists 5 sample rows), so we re-execute the
-      function rather than try to reconstruct the mask from the
-      sample. Re-execution is deterministic and cheap.
+    1. Load ``relation_verifications.jsonl`` (the validator's
+       per-rule ``check()`` code + ``pass_rate``).
+    2. For each ``(rule, source)`` pair, classify the outcome via
+       :func:`relation_violations._classify_relation_outcome`:
 
-    * **LLM path** (``relation_llm_detector``) -- one whole-table
-      LLM call per relation that was declared not code-verifiable,
-      asking the model to enumerate violating row indices.
+       * ``pass_rate >= max_pass_rate`` (rule holds) **or**
+         ``pass_rate < min_pass_rate`` (false rule) \u2192 rejected.
+         The rule is dropped; nothing reaches the labelling UI.
+       * ``min_pass_rate \u2264 pass_rate < max_pass_rate`` \u2192 compile.
+         Re-execute the sandboxed check and emit one
+         ``code_verifier`` violation per failing row.
+       * verifier could not score (``verifiable=False``, missing
+         code, sandbox error, no ``pass_rate``) \u2192 emit a single
+         ``needs_review`` placeholder so a human can review the
+         rule against the table.
 
-    Both paths produce ``RelationViolation`` records; the combined
-    list is written to ``relation_violations.jsonl`` (raw artifact)
-    and converted to flat-issue dicts that go through the standard
-    ``cluster_issues`` pipeline. The resulting clusters are written
-    to ``clusters.json`` / ``clusters.jsonl`` so the unified label
-    UI surfaces them automatically alongside cluster + multi-table
-    findings.
+    3. Aggregate violations into clusters via ``cluster_issues``
+       and write ``relation_violations.jsonl`` /
+       ``clusters.json[l]`` / ``issues.json[l]`` so the unified
+       label UI picks the findings up automatically.
 
     Returns a stats dict for ``summary.json``. Returns ``None`` when
-    the validation artifact is missing (nothing to compile from).
+    the validation artifact is missing.
     """
     # Lazy imports keep the module import cheap when the violation
     # compilation pass is disabled.
     from src.core.aggregator import cluster_issues  # noqa: WPS433
     from src.core.jsonl_io import read_jsonl, write_jsonl  # noqa: WPS433
     from src.core.report_builder import write_json  # noqa: WPS433
-    from src.core.relation_violations import (  # noqa: WPS433
+    from src.core.relations.violations import (  # noqa: WPS433
+        OUTCOME_NEEDS_REVIEW,
+        OUTCOME_REJECT,
         compile_code_violations,
         relation_violations_to_flat_issues,
     )
@@ -527,34 +470,21 @@ def _run_violation_compilation_pass(
         )
         return None
 
-    # Load verifications. The code path iterates the sequence; the
-    # LLM detector indexes by species_key, so build a dict view too.
     verifications_list = read_jsonl(verifications_path)
-    verifications_by_key: Dict[str, Dict[str, Any]] = {}
-    for v in verifications_list:
-        key = v.get("species_key") or v.get("relation_species_key")
-        if not key:
-            continue
-        verifications_by_key[str(key)] = v
 
-    # Load the relation layer the validator actually scored. The
-    # validator stamps ``layer`` on each verification; pick the
-    # first non-empty value (all verifications in a single run share
-    # the same layer).
+    # Load the relation layer the validator actually scored.
     chosen_layer: Optional[str] = None
     for v in verifications_list:
         if v.get("layer"):
             chosen_layer = str(v["layer"])
             break
     layer_files = {
-        "generalized": "relations_generalized.jsonl",
         "aggregated":  "relations_aggregated.jsonl",
         "originals":   "relations.jsonl",
     }
     relations_path = run_dir / layer_files.get(chosen_layer or "originals", "relations.jsonl")
     if not relations_path.is_file():
-        # Fall back through the layer waterfall.
-        for name in ("generalized", "aggregated", "originals"):
+        for name in ("aggregated", "originals"):
             candidate = run_dir / layer_files[name]
             if candidate.is_file():
                 relations_path = candidate
@@ -568,70 +498,46 @@ def _run_violation_compilation_pass(
         )
         return None
 
-    # Code path: deterministic re-execution of check().
-    violations: List = []
-    skip_log: List[Dict[str, Any]] = []
-    if enable_code_compile:
-        relations_by_species: Dict[str, Dict[str, Any]] = {}
-        for r in relations_list:
-            key = r.get("species_key")
-            if not key:
-                continue
-            relations_by_species[str(key)] = r
-        violations, skip_log = compile_code_violations(
-            relations_by_species=relations_by_species,
-            verifications=verifications_list,
-            source_frames=source_frames,
-            min_pass_rate=float(min_pass_rate),
-            max_violations_per_rule=int(max_violations_per_rule),
-            min_confidence=str(min_confidence),
-            timeout_seconds=float(timeout_seconds),
-        )
-        logger.info(
-            "violation compilation: code path produced %d violation(s) "
-            "across %d rule(s) (skipped %d rules: %s)",
-            len(violations),
-            len({v.relation_species_key for v in violations}),
-            len(skip_log),
-            ", ".join(f"{e['reason']}={e['count']}" for e in _summarize_skip_log(skip_log)) or "none",
-        )
+    # Build species_key -> relation lookup once.
+    relations_by_species: Dict[str, Dict[str, Any]] = {}
+    for r in relations_list:
+        key = r.get("species_key")
+        if not key:
+            continue
+        relations_by_species[str(key)] = r
 
-    # LLM path: whole-table single call for non-code-verifiable rules.
-    n_llm_violations = 0
-    if enable_llm_detect:
-        if not detect_prompt_path.is_file():
-            logger.warning(
-                "violation compilation: detect prompt missing at %s; "
-                "skipping LLM detection path",
-                detect_prompt_path,
-            )
-        else:
-            from src.core.relation_llm_detector import (  # noqa: WPS433
-                detect_violations_for_relations,
-                load_detect_prompt,
-            )
-            prompt_cfg = load_detect_prompt(detect_prompt_path)
-            llm_violations = detect_violations_for_relations(
-                relations_list,
-                verifications=verifications_by_key,
-                source_frames=source_frames,
-                llm=llm,
-                model=model,
-                prompt_cfg=prompt_cfg,
-                max_rows_per_call=int(llm_max_rows_per_call),
-                max_violations_per_rule=int(llm_max_violations_per_rule),
-            )
-            n_llm_violations = len(llm_violations)
-            violations.extend(llm_violations)
+    # One-pass compile: code-path violations + needs-review
+    # placeholders are produced together by the compiler.
+    violations, skip_log = compile_code_violations(
+        relations_by_species=relations_by_species,
+        verifications=verifications_list,
+        source_frames=source_frames,
+        min_pass_rate=float(min_pass_rate),
+        max_pass_rate=float(max_pass_rate),
+        timeout_seconds=float(timeout_seconds),
+    )
 
-    # Persist raw violations regardless of whether either path found
+    # Persist the audit log of skipped/needs-review rules so callers
+    # can inspect why each rule landed where it did.
+    audit_records = [
+        {
+            "species_key": entry.get("species_key", ""),
+            "source": entry.get("source", ""),
+            "outcome": entry.get("outcome", ""),
+            "reason": entry.get("reason", ""),
+        }
+        for entry in skip_log
+    ]
+    if audit_records:
+        write_jsonl(run_dir / "relation_skipped_rules.jsonl", audit_records)
+
+    # Persist raw violations regardless of whether the compiler found
     # anything - an empty file is itself useful traceability.
     out_violations = run_dir / "relation_violations.jsonl"
     write_jsonl(out_violations, [v.as_dict() for v in violations])
 
-    # Convert to flat-issue contract, run through cluster_issues, and
-    # emit clusters.json / clusters.jsonl so the unified label UI
-    # picks the relation findings up alongside cleaning + multi-table.
+    # Convert to flat-issue contract, cluster, and emit
+    # clusters.json[l] / issues.json[l] for the label UI.
     flat_issues = relation_violations_to_flat_issues(violations)
     clusters = cluster_issues(flat_issues)
     cluster_dicts = [c.as_dict() for c in clusters]
@@ -640,47 +546,58 @@ def _run_violation_compilation_pass(
     write_jsonl(run_dir / "issues.jsonl", flat_issues)
     write_json(run_dir / "issues.json", list(flat_issues))
 
-    n_code_violations = len(violations) - n_llm_violations
+    n_code_violations = sum(1 for v in violations if v.detection_method == "code_verifier")
+    n_needs_review = sum(1 for v in violations if v.detection_method == "needs_review")
     n_rules_with_violations = len({v.relation_species_key for v in violations})
+    n_rejected = sum(1 for e in skip_log if e.get("outcome") == OUTCOME_REJECT)
+    n_needs_review_logged = sum(1 for e in skip_log if e.get("outcome") == OUTCOME_NEEDS_REVIEW)
+
     logger.info(
         "violation compilation: total %d violation(s) across %d rule(s) "
-        "(code=%d, llm=%d) -> %d cluster(s). Artifacts: %s, %s",
+        "(code=%d, needs_review=%d) -> %d cluster(s); rejected=%d. "
+        "Artifacts: %s, clusters.json",
         len(violations), n_rules_with_violations,
-        n_code_violations, n_llm_violations,
-        len(clusters),
-        out_violations.name, "clusters.json",
+        n_code_violations, n_needs_review,
+        len(clusters), n_rejected,
+        out_violations.name,
     )
     return {
         "layer": chosen_layer,
-        "code_path_enabled": enable_code_compile,
-        "llm_path_enabled": enable_llm_detect,
         "n_violations": len(violations),
         "n_code_violations": n_code_violations,
-        "n_llm_violations": n_llm_violations,
+        "n_needs_review_placeholders": n_needs_review,
         "n_rules_with_violations": n_rules_with_violations,
+        "n_rules_rejected": n_rejected,
+        "n_rules_needs_review": n_needs_review_logged,
         "n_clusters": len(clusters),
         "skipped_rules": _summarize_skip_log(skip_log),
         "config": {
             "min_pass_rate": float(min_pass_rate),
-            "max_violations_per_rule": int(max_violations_per_rule),
-            "min_confidence": str(min_confidence),
+            "max_pass_rate": float(max_pass_rate),
             "timeout_seconds": float(timeout_seconds),
-            "llm_max_rows_per_call": int(llm_max_rows_per_call),
-            "llm_max_violations_per_rule": int(llm_max_violations_per_rule),
         },
     }
 
 
 def _summarize_skip_log(skip_log: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
-    """Group ``compile_code_violations`` skip entries by reason for
-    summary.json. Per-rule diagnostics stay in the raw skip log on
-    disk if a future caller wants them; here we just want the
-    histogram."""
-    counts: Dict[str, int] = {}
+    """Histogram skip-log entries by ``outcome`` and ``reason`` for
+    ``summary.json``. Per-rule diagnostics stay in
+    ``relation_skipped_rules.jsonl`` on disk; here we just want the
+    counts so the dashboard can summarize at a glance."""
+    by_outcome: Dict[str, int] = {}
+    by_reason: Dict[str, int] = {}
     for entry in skip_log:
+        outcome = str(entry.get("outcome") or "unknown")
         reason = str(entry.get("reason") or "unknown")
-        counts[reason] = counts.get(reason, 0) + 1
-    return [{"reason": r, "count": c} for r, c in sorted(counts.items())]
+        by_outcome[outcome] = by_outcome.get(outcome, 0) + 1
+        by_reason[reason] = by_reason.get(reason, 0) + 1
+    return [
+        {"reason": f"__outcome__:{o}", "count": c}
+        for o, c in sorted(by_outcome.items())
+    ] + [
+        {"reason": r, "count": c}
+        for r, c in sorted(by_reason.items())
+    ]
 
 
 def _build_argparser() -> argparse.ArgumentParser:
@@ -844,38 +761,14 @@ def _build_argparser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
-        "--no-generalize",
-        action="store_true",
-        help=(
-            "Skip the post-discovery generalization pass. By default, "
-            "value-keyed rule families are clustered and rewritten as "
-            "one parametric rule via an extra LLM call."
-        ),
-    )
-    p.add_argument(
-        "--generalize-prompt",
-        type=str,
-        default="prompts/generalize_relations.yaml",
-        help="Path to the generalization prompt YAML.",
-    )
-    p.add_argument(
-        "--generalize-min-cluster",
-        type=int,
-        default=2,
-        help=(
-            "Skip generalization for value-keyed clusters smaller than "
-            "this many rules (default 2)."
-        ),
-    )
-    p.add_argument(
         "--no-validate",
         action="store_true",
         help=(
             "Skip the post-discovery empirical-validation pass. By "
-            "default, after aggregation/generalization the runner asks "
-            "the LLM to write a check(df) function for each rule and "
-            "runs it in a restricted sandbox to record per-rule "
-            "pass-rates in relation_verifications.jsonl."
+            "default, after aggregation the runner asks the LLM to "
+            "write a check(df) function for each rule and runs it "
+            "in a restricted sandbox to record per-rule pass-rates "
+            "in relation_verifications.jsonl."
         ),
     )
     p.add_argument(
@@ -911,11 +804,14 @@ def _build_argparser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--validate-layer",
-        choices=["auto", "generalized", "aggregated", "originals"],
-        default="auto",
+        choices=["auto", "union", "aggregated", "originals"],
+        default="union",
         help=(
-            "Which rule layer to validate. 'auto' picks the highest "
-            "available (generalized > aggregated > originals)."
+            "Which rule layer to validate. 'union' (default) covers all "
+            "post-aggregation rules: aggregated canonicals + singleton "
+            "originals that no canonical absorbed. 'auto' falls back "
+            "from aggregated to originals, but DROPS singleton originals "
+            "when aggregated is non-empty."
         ),
     )
     p.add_argument(
@@ -951,60 +847,36 @@ def _build_argparser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Skip the violation compilation pass. By default, after "
-            "validation, the runner re-executes each verifiable "
-            "check(df) to materialize per-row violations and runs a "
-            "whole-table LLM scan against non-code-verifiable rules. "
-            "Both paths are converted into clusters and persisted to "
-            "clusters.json so the unified label UI surfaces them."
-        ),
-    )
-    p.add_argument(
-        "--no-llm-detect-violations",
-        action="store_true",
-        help=(
-            "Disable only the LLM table-scan path of violation "
-            "compilation; the deterministic code path still runs. "
-            "Useful for offline/smoke runs without LLM access."
-        ),
-    )
-    p.add_argument(
-        "--detect-violations-prompt",
-        type=str,
-        default="prompts/detect_relation_violation.yaml",
-        help=(
-            "Path to the LLM table-scan prompt YAML "
-            "(default: prompts/detect_relation_violation.yaml)."
+            "validation, the runner classifies each validated rule "
+            "by pass-rate: rules in the keep band re-execute their "
+            "check(df) to materialize per-row violations; rules the "
+            "verifier could not score become needs-review "
+            "placeholders. The combined output is clustered and "
+            "persisted to clusters.json so the unified label UI "
+            "surfaces every kept rule for human review."
         ),
     )
     p.add_argument(
         "--violations-min-pass-rate",
         type=float,
-        default=0.85,
+        default=0.5,
         help=(
-            "Skip rules whose validated pass_rate is below this "
-            "threshold (default 0.85). Low pass-rate is usually a "
-            "hallucinated rule; we drop it instead of flooding the "
-            "label queue."
+            "Reject rules whose validated pass_rate is below this "
+            "threshold (default 0.5: drop rules where the majority of "
+            "rows already violate the proposed relation -- those are "
+            "almost certainly hallucinated). Raise toward 0.85 to be "
+            "stricter; lower toward 0 to keep every rule."
         ),
     )
     p.add_argument(
-        "--violations-max-per-rule",
-        type=int,
-        default=200,
+        "--violations-max-pass-rate",
+        type=float,
+        default=1.0 - 1e-9,
         help=(
-            "Cap on rows compiled per rule. A rule with more "
-            "violators than this is almost certainly miscoded; we "
-            "skip it (default 200)."
-        ),
-    )
-    p.add_argument(
-        "--violations-min-confidence",
-        choices=["low", "medium", "high"],
-        default="medium",
-        help=(
-            "Minimum rule confidence to compile (default 'medium'). "
-            "'low' compiles every rule; 'high' compiles only the "
-            "rules the LLM was very confident in."
+            "Reject rules whose pass_rate is at or above this "
+            "threshold (default ~1.0). A fully-satisfied rule has no "
+            "violations to surface. Set to 1.0 to keep pass_rate=1.0 "
+            "rules."
         ),
     )
     p.add_argument(
@@ -1016,28 +888,6 @@ def _build_argparser() -> argparse.ArgumentParser:
             "(default 8s). Independent of --validate-timeout because "
             "the compilation pass typically runs against larger "
             "frames than the validator did."
-        ),
-    )
-    p.add_argument(
-        "--violations-llm-max-rows",
-        type=int,
-        default=300,
-        help=(
-            "Whole-table LLM-scan: max rows rendered into the prompt "
-            "for a single relation (default 300). Tables larger than "
-            "this are truncated rather than chunked, because chunking "
-            "destroys the LLM's ability to spot inconsistencies that "
-            "span rows."
-        ),
-    )
-    p.add_argument(
-        "--violations-llm-max-per-rule",
-        type=int,
-        default=50,
-        help=(
-            "Whole-table LLM-scan: cap on rows the LLM is allowed to "
-            "flag per (relation, source) call (default 50). The "
-            "system prompt asks for the strongest cases first."
         ),
     )
     return p
@@ -1216,7 +1066,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         priors_section = ""
         spec = discovery_cfg.types.get(first_type.key)
         if spec is not None and spec.scope == "group":
-            from src.core.multi_row_priors import (
+            from src.core.row_dup.priors import (
                 compute_priors, render_group_blocks, render_priors_block,
             )
             priors = compute_priors(
@@ -1315,7 +1165,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 "mode and is not adaptive."
             )
             return 2
-        from src.core.relation_adaptive import (  # noqa: WPS433
+        from src.core.relations.adaptive import (  # noqa: WPS433
             AdaptiveSchemaDiscoverer,
             adaptive_summary_dict,
         )
@@ -1367,12 +1217,13 @@ def main(argv: Optional[list[str]] = None) -> int:
 
         # Optional aggregation pass: merge paraphrases of the same
         # rule (same source / error_type / columns) into a minimal
-        # canonical set. Runs BEFORE generalization so the
-        # value-keyed cluster the generalizer sees is clean.
+        # canonical set. The validator + violation compiler
+        # downstream read either the aggregated layer or the raw
+        # originals depending on what's available.
         agg_stats: Optional[Dict[str, Any]] = None
-        relations_for_generalize: Sequence[Any] = result.union_relations
+        agg_relations: Sequence[Any] = result.union_relations
         if not args.no_aggregate:
-            agg_stats, relations_for_generalize = _run_aggregation_pass(
+            agg_stats, agg_relations = _run_aggregation_pass(
                 run_dir=run_dir,
                 relations=result.union_relations,
                 digests=digests,
@@ -1387,25 +1238,6 @@ def main(argv: Optional[list[str]] = None) -> int:
                 min_cluster_size=args.aggregate_min_cluster,
             )
 
-        # Optional generalization pass: rewrite value-keyed rule
-        # families into single parametric rules.
-        gen_stats: Optional[Dict[str, Any]] = None
-        if not args.no_generalize:
-            gen_stats = _run_generalization_pass(
-                run_dir=run_dir,
-                relations=relations_for_generalize,
-                digests=digests,
-                source_frames=source_frames,
-                llm=llm,
-                model=model,
-                reasoning_effort=reasoning_effort,
-                reasoning_summary=reasoning_summary,
-                n_row_samples=args.n_row_samples,
-                concurrency=concurrency or 4,
-                prompt_path=_resolve(args.generalize_prompt, PROJECT_ROOT),
-                min_cluster_size=args.generalize_min_cluster,
-            )
-
         # Top-level summary.
         by_type: Dict[str, int] = {}
         for rel in result.union_relations:
@@ -1414,10 +1246,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         n_parse_errors = sum(1 for r in all_reports if r.parse_error)
 
         # Empirical validation pass (optional). Runs AFTER aggregation
-        # / generalization so we score the rules the user will actually
-        # see on the dashboard, but BEFORE summary.json + dashboard
-        # render so the verification stats land in summary.json and
-        # the report.html picks up relation_verifications.jsonl.
+        # so we score the rules the user will actually see on the
+        # dashboard, but BEFORE summary.json + dashboard render so the
+        # verification stats land in summary.json and the report.html
+        # picks up relation_verifications.jsonl.
         validation_stats: Optional[Dict[str, Any]] = None
         if not args.no_validate:
             validation_stats = _run_validation_pass(
@@ -1438,22 +1270,20 @@ def main(argv: Optional[list[str]] = None) -> int:
         # findings + clusters. Runs after validation (which produces
         # the ``check()`` code we re-execute) and before multi-table
         # (which has its own row-level pipeline).
+        #
+        # Pipeline (linear, no LLM detect):
+        #   * pass_rate < min  or  pass_rate >= max  -> reject (drop).
+        #   * min <= pass_rate < max                 -> compile rows.
+        #   * no pass_rate / verifier could not run  -> needs-review
+        #     placeholder so the labelling UI surfaces the rule.
         violations_stats: Optional[Dict[str, Any]] = None
         if not args.no_compile_violations and validation_stats is not None:
             violations_stats = _run_violation_compilation_pass(
                 run_dir=run_dir,
                 source_frames=source_frames,
-                llm=llm,
-                model=model,
-                detect_prompt_path=_resolve(args.detect_violations_prompt, PROJECT_ROOT),
-                enable_code_compile=True,
-                enable_llm_detect=not args.no_llm_detect_violations,
                 min_pass_rate=args.violations_min_pass_rate,
-                max_violations_per_rule=args.violations_max_per_rule,
-                min_confidence=args.violations_min_confidence,
+                max_pass_rate=args.violations_max_pass_rate,
                 timeout_seconds=args.violations_timeout,
-                llm_max_rows_per_call=args.violations_llm_max_rows,
-                llm_max_violations_per_rule=args.violations_llm_max_per_rule,
             )
 
         # Multi-table cross-sheet pass for inter_table_inconsistency.
@@ -1503,7 +1333,6 @@ def main(argv: Optional[list[str]] = None) -> int:
                     },
                     "csv_paths": [str(p) for p in csv_paths],
                     "aggregation": agg_stats,
-                    "generalization": gen_stats,
                     "validation": validation_stats,
                     "violations": violations_stats,
                     "multi_table": multi_table_stats,
@@ -1525,9 +1354,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     reports: List[Any] = []
     n_relations = 0
     all_rels: List[Any] = []
-    relations_for_generalize: Sequence[Any] = all_rels
+    agg_relations: Sequence[Any] = all_rels
     agg_stats: Optional[Dict[str, Any]] = None
-    gen_stats: Optional[Dict[str, Any]] = None
     validation_stats: Optional[Dict[str, Any]] = None
     violations_stats: Optional[Dict[str, Any]] = None
 
@@ -1542,12 +1370,12 @@ def main(argv: Optional[list[str]] = None) -> int:
 
         # Optional aggregation pass: merge paraphrases of the same
         # rule (same source / error_type / columns) into a minimal
-        # canonical set. Runs BEFORE generalization.
+        # canonical set.
         for rep in reports:
             all_rels.extend(rep.relations)
-        relations_for_generalize = all_rels
+        agg_relations = all_rels
         if not args.no_aggregate:
-            agg_stats, relations_for_generalize = _run_aggregation_pass(
+            agg_stats, agg_relations = _run_aggregation_pass(
                 run_dir=run_dir,
                 relations=all_rels,
                 digests=digests,
@@ -1562,26 +1390,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                 min_cluster_size=args.aggregate_min_cluster,
             )
 
-        # Optional generalization pass.
-        if not args.no_generalize:
-            gen_stats = _run_generalization_pass(
-                run_dir=run_dir,
-                relations=relations_for_generalize,
-                digests=digests,
-                source_frames=source_frames,
-                llm=llm,
-                model=model,
-                reasoning_effort=reasoning_effort,
-                reasoning_summary=reasoning_summary,
-                n_row_samples=args.n_row_samples,
-                concurrency=concurrency or 4,
-                prompt_path=_resolve(args.generalize_prompt, PROJECT_ROOT),
-                min_cluster_size=args.generalize_min_cluster,
-            )
-
         # Empirical-validation pass (optional). Mirrors the adaptive
-        # branch: runs after aggregation/generalization so the rules
-        # being scored match what the user sees on the dashboard.
+        # branch: runs after aggregation so the rules being scored
+        # match what the user sees on the dashboard.
         if not args.no_validate:
             validation_stats = _run_validation_pass(
                 run_dir=run_dir,
@@ -1598,28 +1409,23 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
 
         # Violation compilation (mirrors the adaptive branch).
+        # Rules the verifier could not score are kept as
+        # needs-review placeholders; rules with pass_rate in
+        # {>=max, <min} are rejected; the rest compile per-row.
         if not args.no_compile_violations and validation_stats is not None:
             violations_stats = _run_violation_compilation_pass(
                 run_dir=run_dir,
                 source_frames=source_frames,
-                llm=llm,
-                model=model,
-                detect_prompt_path=_resolve(args.detect_violations_prompt, PROJECT_ROOT),
-                enable_code_compile=True,
-                enable_llm_detect=not args.no_llm_detect_violations,
                 min_pass_rate=args.violations_min_pass_rate,
-                max_violations_per_rule=args.violations_max_per_rule,
-                min_confidence=args.violations_min_confidence,
+                max_pass_rate=args.violations_max_pass_rate,
                 timeout_seconds=args.violations_timeout,
-                llm_max_rows_per_call=args.violations_llm_max_rows,
-                llm_max_violations_per_rule=args.violations_llm_max_per_rule,
             )
 
     # Multi-table cross-sheet pass for inter_table_inconsistency.
     # Discovery only runs steps 1+2 (priors -> LLM-confirm groups);
     # step 3 (semantic detector) and step 4 (verifier) are owned by
     # the cleaning-detection runner. See ``_run_multi_table_pass`` and
-    # ``src.core.multi_table_pipeline`` for the split.
+    # ``src.core.multi_table.pipeline`` for the split.
     multi_table_stats: Optional[Dict[str, Any]] = None
     if multi_table_enabled:
         multi_table_stats = _run_multi_table_pass(
@@ -1669,7 +1475,6 @@ def main(argv: Optional[list[str]] = None) -> int:
                     "csv_glob": csv_glob,
                 },
                 "aggregation": agg_stats,
-                "generalization": gen_stats,
                 "validation": validation_stats,
                 "violations": violations_stats,
                 "multi_table": multi_table_stats,

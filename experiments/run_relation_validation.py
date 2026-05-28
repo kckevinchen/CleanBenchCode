@@ -17,7 +17,7 @@ Example::
         --concurrency 4
 
 ``--layer auto`` (default) prefers the highest-level rule layer
-present in the run dir: ``generalized`` > ``aggregated`` > originals.
+present in the run dir: ``aggregated`` > originals.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.core.data_loader import load_csv  # noqa: E402
 from src.core.jsonl_io import read_jsonl as _read_jsonl  # noqa: E402
 from src.core.llm_client import LLMClient  # noqa: E402
-from src.core.relation_validator import (  # noqa: E402
+from src.core.relations.validator import (  # noqa: E402
     load_validation_prompt,
     validate_relations,
     write_verifications_jsonl,
@@ -49,7 +49,6 @@ logger = logging.getLogger("run_relation_validation")
 
 
 _LAYER_FILES = {
-    "generalized": "relations_generalized.jsonl",
     "aggregated": "relations_aggregated.jsonl",
     "originals": "relations.jsonl",
 }
@@ -63,23 +62,19 @@ def _resolve_layer(
     With ``layer == "union"`` (default), validate the highest-level
     rule available for each rule lineage:
 
-      * Start with all ``generalized`` rules.
-      * Add ``aggregated`` rules whose ``species_key`` was NOT absorbed
-        by some generalized rule's ``generalized_from``.
-      * Add ``originals`` whose ``species_key`` was NOT absorbed by a
-        kept aggregated rule's ``aggregated_from`` and not absorbed by
-        a generalized rule's ``generalized_from``.
+      * Start with all ``aggregated`` rules.
+      * Add ``originals`` whose ``species_key`` was NOT absorbed by
+        a kept aggregated rule's ``aggregated_from``.
 
     This guarantees every original rule is represented in the
     validation set exactly once, at the highest abstraction layer it
     was lifted to.
 
-    With ``layer == "auto"`` (legacy), walk generalized -> aggregated
-    -> originals and return the first non-empty file. Other values
-    pick exactly one file.
+    With ``layer == "auto"`` (legacy), walk aggregated -> originals
+    and return the first non-empty file. Other values pick exactly
+    one file.
     """
     if layer == "union":
-        gen = _read_jsonl(run_dir / _LAYER_FILES["generalized"])
         agg = _read_jsonl(run_dir / _LAYER_FILES["aggregated"])
         orig = _read_jsonl(run_dir / _LAYER_FILES["originals"])
 
@@ -91,25 +86,18 @@ def _resolve_layer(
                         absorbed.add(str(k))
             return absorbed
 
-        absorbed_by_gen = _src_keys(gen, "generalized_from")
-        kept_agg = [
-            r for r in agg
-            if str(r.get("species_key") or "") not in absorbed_by_gen
-        ]
-        absorbed_by_agg = _src_keys(kept_agg, "aggregated_from")
+        absorbed_by_agg = _src_keys(agg, "aggregated_from")
         kept_orig = [
             r for r in orig
-            if str(r.get("species_key") or "") not in absorbed_by_gen
-            and str(r.get("species_key") or "") not in absorbed_by_agg
+            if str(r.get("species_key") or "") not in absorbed_by_agg
         ]
         out: List[tuple[str, Dict[str, Any]]] = []
-        out.extend(("generalized", r) for r in gen)
-        out.extend(("aggregated", r) for r in kept_agg)
+        out.extend(("aggregated", r) for r in agg)
         out.extend(("originals", r) for r in kept_orig)
         return out
 
     if layer == "auto":
-        for name in ("generalized", "aggregated", "originals"):
+        for name in ("aggregated", "originals"):
             rels = _read_jsonl(run_dir / _LAYER_FILES[name])
             if rels:
                 return [(name, r) for r in rels]
@@ -205,13 +193,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--layer", default="union",
-        choices=["union", "auto", "generalized", "aggregated", "originals"],
+        choices=["union", "auto", "aggregated", "originals"],
         help="Which rule layer to validate. 'union' (default) takes "
         "every rule at the highest abstraction layer it was lifted "
-        "to: all generalized rules + aggregated rules not absorbed "
-        "by a generalization + originals not absorbed by either. "
-        "'auto' (legacy) picks the first non-empty layer in order "
-        "generalized > aggregated > originals.",
+        "to: all aggregated rules + originals not absorbed by an "
+        "aggregation. 'auto' (legacy) picks the first non-empty "
+        "layer in order aggregated > originals.",
     )
     p.add_argument(
         "--prompt", type=Path,

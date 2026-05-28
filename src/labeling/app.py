@@ -41,9 +41,13 @@ import logging
 import os
 import re
 import threading
+import time
+import uuid
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple, Union
 
 import pandas as pd
 from fastapi import Body, FastAPI, HTTPException, Query
@@ -51,21 +55,32 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from ..core.data_loader import load_csv
+from ..core.llm_client import LLMClient
 from ..core.text_normalize import NormalizeOptions, normalize_frame
+from . import correction_suggester
+from . import phone_format
+from ._helpers import _scalar
 from .export import (
     _slug_for_error_type,
+    find_label_conflicts,
+    materialize_label_benchmark,
     materialize_label_benchmark_by_error_type,
     write_benchmark,
     write_benchmark_by_error_type,
 )
+from .inconsistency_export import materialize_inconsistency_benchmark
 from .runs import (
     JobManager,
     RunRegistry,
     list_datasets,
     load_config_defaults,
     load_taxonomy_keys,
+    _load_run_metadata,
+    _save_run_metadata,
 )
 from .schema import (
+    CellNote,
+    CellNoteIn,
     Exclusion,
     ExclusionIn,
     ExclusionScope,
@@ -76,18 +91,67 @@ from .schema import (
     LabelTarget,
     MultiTableLabel,
     MultiTableLabelIn,
+    ColumnClusters,
+    ColumnClustersIn,
+    ColumnLabelStatus,
     cell_target_id,
+    column_cluster_target_id,
 )
 from .store import LabelStore
+from .cell_notes_store import CellNotesStore
 from .exclusions_store import ExclusionStore
 from .multi_table_label_store import MultiTableLabelStore
-from .relation_review_store import (
-    RelationReviewStore,
-    ReviewIn as RelationReviewIn,
-    ReviewDecision as RelationReviewDecision,
-)
+from .column_cluster_store import ColumnClusterStore
+from .column_cluster_queue import iter_column_cluster_targets
+from .routers import cell_notes as cell_notes_router
+from .routers import compare as compare_router
+from .routers import exclusions as exclusions_router
+from .routers import launcher as launcher_router
+from .routers import multi_table as multi_table_router
+from .routers import relation_reviews as relation_reviews_router
+from .routers import stats as stats_router
+from .routers._context import RouterContext
 
 logger = logging.getLogger(__name__)
+
+
+# Cells that carry a trivial-cosmetic anomaly. Used by the
+# ``tag-trivial-whitespace`` endpoint to decide which existing labels
+# should get a ``TRIVIAL`` note tag. Bundles:
+#   1. /^[ ]|[ ]$|[ ]{2,}/   -- edge or 2+ internal ASCII spaces.
+#   2. /[\t\u00A0\n\r\u2028\u2029\u200B\u200C\u200D\u00AD\uFEFF]/
+#      -- tab, NBSP, line breaks, zero-width chars, soft hyphen, BOM.
+#   3. /,[A-Za-z]/           -- missing space after a comma
+#                               (e.g. ``Gas,Oil``, ``HOME,LLC``).
+#                               Bypasses decimals like ``1,234``.
+#   4. / [)\]}]/             -- single space before a closing bracket
+#                               (e.g. ``Trust )``).
+#   5. /'S(?=\W|$)/          -- capital ``S`` immediately after an
+#                               apostrophe at word boundary
+#                               (e.g. ``Defender'S Office`` ->
+#                               ``Defender's``).
+#   6. /\s=\S|\S=\s/         -- ``=`` with whitespace on only one
+#                               side (e.g. ``1 lb =16``).
+# The ``has-ws`` class in ``frontend/labeling/label.js`` still uses
+# only (1)+(2) for the CSV-viewer red-underline; this regex is
+# specifically the trivial-tagger rule and is mirrored in
+# ``label.js`` as ``_WS_MARKER_RE``. Kept narrower in
+# ``experiments/auto_label_whitespace_anomalies.py`` (which creates
+# new labels rather than tagging existing ones).
+_WHITESPACE_ANOMALY_RE = re.compile(
+    r"^ | $|  +"
+    r"|[\t\u00A0\n\r\u2028\u2029\u200B\u200C\u200D\u00AD\uFEFF]"
+    r"|,[A-Za-z]"
+    r"| [)\]}]"
+    r"|'S(?=\W|$)"
+    r"|\s=\S|\S=\s"
+)
+
+
+def _has_whitespace_anomaly(value: str) -> bool:
+    if not value:
+        return False
+    return _WHITESPACE_ANOMALY_RE.search(value) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +412,17 @@ def _canonicalize_cluster_columns(
 class RunContext:
     """Lazy read-only view of one run dir."""
 
+    # Pipeline-written artifacts the context snapshots at construction.
+    # ``RunCache.get()`` re-stats these to detect re-runs of the
+    # detection/relation pipelines that rewrote the run dir under a
+    # live server, and rebuilds the context so the UI doesn't keep
+    # serving the pre-rerun in-memory view. Operator-written stores
+    # (labels.jsonl / exclusions.jsonl) are mutated through this same
+    # process and so don't need mtime tracking here.
+    _PIPELINE_ARTIFACTS: Tuple[str, ...] = (
+        "summary.json", "clusters.json", "issues.json",
+    )
+
     def __init__(self, run_dir: Path) -> None:
         self.run_dir = Path(run_dir).resolve()
         if not self.run_dir.is_dir():
@@ -356,6 +431,13 @@ class RunContext:
         self.summary: Dict[str, Any] = self._read_json("summary.json") or {}
         self.clusters: List[Dict[str, Any]] = self._read_json("clusters.json") or []
         self.issues: List[Dict[str, Any]] = self._read_json("issues.json") or []
+        # Snapshot the on-disk mtimes the context's clusters/issues/
+        # summary state was loaded from, so RunCache can detect when a
+        # rerun has invalidated us.
+        self._artifact_mtimes: Dict[str, float] = {
+            name: self._artifact_mtime(name)
+            for name in self._PIPELINE_ARTIFACTS
+        }
 
         cfg = (self.summary.get("config") or {}) if isinstance(self.summary, dict) else {}
         self.sources: Dict[str, Path] = {}
@@ -463,6 +545,12 @@ class RunContext:
         self._issue_by_id = {i["id"]: i for i in self.issues if "id" in i}
 
         self.store = LabelStore(self.run_dir / "labels.jsonl")
+        # Per-cell note overrides (override the cluster's ``note`` for
+        # a single (source, row, column) at export time). See
+        # :mod:`src.labeling.cell_notes_store` for the storage format.
+        self.cell_notes_store = CellNotesStore(
+            self.run_dir / "cell_notes.jsonl"
+        )
         # Per-source exclusions (whole CSV / specific rows / specific
         # columns the operator marked as too messy to label). Loaded
         # eagerly so the UI can render existing strikethroughs without
@@ -544,6 +632,29 @@ class RunContext:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to parse %s: %s", path, exc)
             return None
+
+    def _artifact_mtime(self, name: str) -> float:
+        """Return the current mtime of ``<run_dir>/<name>`` or 0.0 if
+        the file is missing. Used by :meth:`is_stale` to detect
+        out-of-band rewrites of pipeline artifacts."""
+        try:
+            return (self.run_dir / name).stat().st_mtime
+        except OSError:
+            return 0.0
+
+    def is_stale(self) -> bool:
+        """Return True if any of the pipeline-written artifacts the
+        context snapshotted at construction has a newer mtime on disk.
+
+        :class:`RunCache` uses this to detect reruns of the detection /
+        relation-validation pipelines that rewrote ``clusters.json``,
+        ``issues.json`` or ``summary.json`` under a live server, and to
+        rebuild the context so the UI stops serving the pre-rerun view.
+        """
+        for name, cached_mtime in self._artifact_mtimes.items():
+            if self._artifact_mtime(name) > cached_mtime:
+                return True
+        return False
 
     def _backfill_multi_table_sources(self) -> None:
         """Populate ``self.sources`` from a sibling ``data/`` tree when
@@ -781,7 +892,19 @@ class RunCache:
         with self._lock:
             ctx = self._cache.get(run_id)
             if ctx is not None:
-                return ctx
+                if not ctx.is_stale():
+                    return ctx
+                # Pipeline artifacts have been rewritten under us
+                # (typical cause: an out-of-band re-run of
+                # ``experiments.run_relation_discovery`` /
+                # ``experiments.revalidate_relations`` /
+                # ``experiments.run_detection``). Evict and rebuild so
+                # the UI stops serving the pre-rerun view.
+                self._cache.pop(run_id, None)
+                logger.info(
+                    "RunCache: rebuilding stale context for run_id=%s",
+                    run_id,
+                )
         try:
             ctx = RunContext(rd)
         except FileNotFoundError as exc:
@@ -795,6 +918,89 @@ class RunCache:
         the run dir from disk. Safe to call for non-cached IDs."""
         with self._lock:
             self._cache.pop(run_id, None)
+
+
+# ---------------------------------------------------------------------------
+# In-memory background-job tracker for batch correction-suggestion runs.
+#
+# Tiny by design: we hold onto the result dict in memory until the
+# server restarts. Batch jobs typically finish in tens of seconds (the
+# LLM cache covers most of the work) so persisting them across restarts
+# is overkill; the operator can always click the batch button again to
+# rebuild from cache. Kept module-level so a single ThreadPool is
+# shared across requests within one server process.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _CorrectionJob:
+    """State for one async batch correction job.
+
+    ``status`` transitions: ``queued`` -> ``running`` -> ``done`` |
+    ``error``. ``progress`` is updated by the dispatch progress callback
+    so the UI can render a "12 / 87 LLM calls done" hint.
+    """
+
+    job_id: str
+    run_id: str
+    targets: List[Tuple[str, str, str]] = field(default_factory=list)
+    status: str = "queued"            # queued | running | done | error
+    phase: str = ""                    # "phase A" / "phase B" / ""
+    done: int = 0
+    total: int = 0
+    started_at: Optional[float] = None
+    finished_at: Optional[float] = None
+    error: Optional[str] = None
+    # Per-cluster suggestion payload, ready for the UI. Keyed by
+    # ``f"{source}\x00{column}\x00{cluster_local_id}"`` for JSON-safe
+    # transport (tuple keys can't be serialised).
+    results: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+
+
+class _CorrectionJobRegistry:
+    """Thread-safe registry + bounded executor for correction jobs.
+
+    Concurrency is intentionally low (max_workers=2): the underlying
+    ``dispatch_groups`` already fans out per-LLM-call concurrency
+    internally, so two simultaneous batch jobs would otherwise hammer
+    the LLM endpoint.
+    """
+
+    def __init__(self, max_workers: int = 2) -> None:
+        self._lock = threading.Lock()
+        self._jobs: Dict[str, _CorrectionJob] = {}
+        self._executor = ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix="correction-job",
+        )
+
+    def create(
+        self, run_id: str, targets: List[Tuple[str, str, str]],
+    ) -> _CorrectionJob:
+        job = _CorrectionJob(
+            job_id=uuid.uuid4().hex[:16],
+            run_id=run_id,
+            targets=list(targets),
+        )
+        with self._lock:
+            self._jobs[job.job_id] = job
+        return job
+
+    def get(self, job_id: str) -> Optional[_CorrectionJob]:
+        with self._lock:
+            return self._jobs.get(job_id)
+
+    def submit(
+        self, job: _CorrectionJob, fn,
+    ) -> None:
+        """Enqueue ``fn(job)`` on the background executor."""
+        self._executor.submit(fn, job)
+
+
+# Single registry per process. ``create_app`` doesn't know about
+# multi-tenancy, so a module-global is fine here (mirrors how
+# ``RunCache`` and the launcher's ``JobManager`` are scoped).
+_correction_jobs = _CorrectionJobRegistry()
 
 
 # ---------------------------------------------------------------------------
@@ -821,13 +1027,6 @@ def create_app(
     registry = RunRegistry(outputs_dir)
     jobs = JobManager(project_root)
     cache = RunCache(outputs_dir)
-
-    # Compare-runs cache: results of ``diff_runs(a, b)`` keyed by
-    # (a, b, mtime_a, mtime_b). diff_runs scans both issues.jsonl
-    # files and indexes every cell, so it's worth memoising for
-    # repeated UI calls (cells endpoint pages through the same diff).
-    _diff_lock = threading.Lock()
-    _diff_cache: Dict[tuple, Any] = {}
 
     # Resolve once at app-creation time so every request can compare
     # resolved sub-paths against this root cheaply.
@@ -877,30 +1076,6 @@ def create_app(
             raise HTTPException(404, f"run not found: {run_id}")
         return rd
 
-    def _get_diff(run_a: str, run_b: str) -> Dict[str, Any]:
-        from experiments.compare_runs import diff_runs  # lazy import
-        a_dir = _run_dir_or_404(run_a)
-        b_dir = _run_dir_or_404(run_b)
-        # mtime of issues.jsonl is the only thing that matters for
-        # the diff result. Missing file -> 404 inside diff_runs.
-        try:
-            mtime_a = (a_dir / "issues.jsonl").stat().st_mtime
-            mtime_b = (b_dir / "issues.jsonl").stat().st_mtime
-        except FileNotFoundError as exc:
-            raise HTTPException(404, f"missing issues.jsonl: {exc}") from exc
-        key = (run_a, run_b, mtime_a, mtime_b)
-        with _diff_lock:
-            cached = _diff_cache.get(key)
-            if cached is not None:
-                return cached
-            # Bound cache size so we don't accumulate stale pair-results.
-            if len(_diff_cache) >= 8:
-                _diff_cache.clear()
-        result = diff_runs(a_dir, b_dir)
-        with _diff_lock:
-            _diff_cache[key] = result
-        return result
-
     app = FastAPI(title="Data-cleaning workbench", docs_url="/api/docs")
 
     # Defense-in-depth CSP. The labelling UI is self-hosted (modules
@@ -928,6 +1103,27 @@ def create_app(
         return response
 
     # =====================================================================
+    # Register routers (split out of this file - see src/labeling/routers/)
+    # =====================================================================
+
+    router_ctx = RouterContext(
+        project_root=project_root,
+        outputs_dir=outputs_dir,
+        static_dir=static_dir,
+        annotator=annotator,
+        registry=registry,
+        jobs=jobs,
+        cache=cache,
+    )
+    launcher_router.register(app, router_ctx)
+    cell_notes_router.register(app, router_ctx)
+    exclusions_router.register(app, router_ctx)
+    multi_table_router.register(app, router_ctx)
+    stats_router.register(app, router_ctx)
+    relation_reviews_router.register(app, router_ctx)
+    compare_router.register(app, router_ctx)
+
+    # =====================================================================
     # Runs listing + per-run endpoints
     # =====================================================================
 
@@ -940,17 +1136,51 @@ def create_app(
         }
 
     @app.delete("/api/runs/{run_id}")
-    def delete_run(run_id: str) -> Dict[str, Any]:
+    def delete_run(run_id: str, force: bool = False) -> Dict[str, Any]:
         # _safe_run_dir enforces both syntactic checks AND that the
         # resolved path is a direct child of outputs_dir, so a symlink
         # in outputs/<id> can't redirect rmtree outside the workbench.
         run_dir = _safe_run_dir(run_id)
         if not run_dir.is_dir():
             raise HTTPException(404, f"run not found: {run_id}")
+        # Server-side safety net: starred runs are explicitly opted
+        # out of accidental deletion. The dashboard re-confirms with
+        # the operator before sending ``?force=true``; CLI / scripted
+        # deletes must also pass it. Without this guard a careless
+        # bulk-delete request could wipe a pinned run.
+        if not force:
+            meta = _load_run_metadata(run_dir)
+            if meta.get("starred"):
+                raise HTTPException(
+                    409,
+                    f"run {run_id!r} is starred; pass ?force=true to confirm",
+                )
         cache.invalidate(run_id)
         import shutil
         shutil.rmtree(run_dir)
         return {"ok": True, "run_id": run_id}
+
+    @app.patch("/api/runs/{run_id}")
+    def patch_run(run_id: str, payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+        """Update operator-editable run metadata (display_name, starred,
+        notes). Body keys are merged with existing sidecar - unknown
+        keys are silently dropped. Returns the run's full updated
+        ``RunInfo`` payload so the client can replace the row in place.
+        """
+        run_dir = _run_dir_or_404(run_id)
+        try:
+            _save_run_metadata(run_dir, payload or {})
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        # Re-parse so the response carries the merged metadata fields
+        # already attached to the rest of the run's RunInfo (counts,
+        # artifact flags, ...). The dashboard replaces the row in
+        # place from this payload, no extra refresh needed.
+        info = registry.get(run_id)
+        if info is None:
+            raise HTTPException(404, f"run not found: {run_id}")
+        return info.to_dict()
+
 
     @app.get("/api/runs/{run_id}")
     def get_run(run_id: str) -> Dict[str, Any]:
@@ -1327,6 +1557,487 @@ def create_app(
                 "error": record.error,
             }
         return result
+
+    # -------- column-cluster value-corrections (LLM suggest + persist) --
+    #
+    # Live counterpart to the offline
+    # ``experiments.export_inconsistency_benchmark_with_llm`` script.
+    # The shared logic lives in :mod:`src.labeling.correction_suggester`
+    # so the on-disk LLM cache is binary-compatible between the two
+    # entry points - re-running the export after the operator has
+    # used these endpoints will pick up cached samples for free.
+    #
+    # The persisted output is a per-cluster ``value_corrections``
+    # mapping on the latest column-cluster Label record (see
+    # :class:`LabelIn.value_corrections`). Operators may save partial
+    # mappings; an absent key means "drop this value from the
+    # benchmark export" rather than "use LLM suggestion".
+
+    def _parse_cluster_target(cluster_id: str) -> Tuple[str, str, str]:
+        """Decode the ``colclust\\x00src\\x00col\\x00cN`` target.
+
+        Raises ``HTTPException(400)`` for malformed payloads so the
+        endpoint can short-circuit with a friendly error.
+        """
+        parts = correction_suggester.parse_colclust_target_id(cluster_id)
+        if parts is None:
+            raise HTTPException(
+                400,
+                f"invalid column-cluster id: {cluster_id!r} "
+                f"(expected 'colclust\\x00src\\x00col\\x00cN')",
+            )
+        return parts
+
+    def _suggestions_to_payload(
+        suggestions: List[correction_suggester.ValueSuggestion],
+    ) -> List[Dict[str, Any]]:
+        """Trim a list of ``ValueSuggestion`` to the shape the UI wants.
+
+        We hide the per-sample raw lists (heavy, only useful for
+        diagnostic export) and keep just the consensus + agreement +
+        provenance hints needed to render the table.
+        """
+        out: List[Dict[str, Any]] = []
+        for s in suggestions:
+            out.append({
+                "value": s.value,
+                "suggestion": s.suggestion,
+                "agreement": s.agreement,
+                "n_valid_samples": s.n_valid_samples,
+                "n_total_samples": s.n_total_samples,
+                "would_drop_per_export_rule": s.would_drop_per_export_rule,
+                "rows": s.rows,
+            })
+        return out
+
+    def _saved_value_corrections_for(
+        ctx: "RunContext", target_id: str,
+    ) -> Dict[str, Union[str, List[str]]]:
+        """Fetch the latest persisted ``value_corrections`` for a target.
+
+        Empty dict when the cluster has no label record yet, or its
+        latest record carries an empty mapping.
+        """
+        latest = ctx.store.latest_for(target_id)
+        if latest is None:
+            return {}
+        return dict(latest.value_corrections or {})
+
+    @app.post(
+        "/api/runs/{run_id}/clusters/{cluster_id}/suggest-corrections"
+    )
+    def suggest_cluster_corrections(
+        run_id: str, cluster_id: str,
+        payload: Dict[str, Any] = Body(default_factory=dict),
+    ) -> Dict[str, Any]:
+        """Run the LLM correction suggester for ONE column-cluster.
+
+        Synchronous; typically completes in a few seconds when the
+        cache is warm and 30-90 s on a cold cluster (K=3 + retry-4).
+        The UI uses this for the per-cluster "Generate corrections"
+        button.
+
+        Body fields (all optional):
+          * ``samples`` (int, default 3) - K self-consistency samples.
+          * ``samples_threshold`` (float, default 0.5) - vote frac.
+          * ``retry_samples`` (int, default 4) - extra samples when
+            consensus = [original_value].
+          * ``model`` (str, default ``"gpt-5.2"``).
+          * ``reasoning_effort`` (str, default ``"medium"``).
+          * ``row_context_rows`` (int, default 3).
+
+        Returns ``{"suggestions": [...], "saved_value_corrections": {...}}``
+        where each suggestion describes one (value, rows) tuple in the
+        cluster.
+        """
+        ctx = cache.get(run_id)
+        s, c, lid = _parse_cluster_target(cluster_id)
+        if s not in ctx.sources:
+            raise HTTPException(404, f"source not found: {s}")
+
+        samples = int(payload.get("samples", 3))
+        samples_threshold = float(payload.get("samples_threshold", 0.5))
+        retry_samples = int(payload.get("retry_samples", 4))
+        model = str(payload.get("model", "gpt-5.2"))
+        reasoning_effort = str(payload.get("reasoning_effort", "medium"))
+        row_context_rows = int(payload.get("row_context_rows", 3))
+
+        try:
+            llm_client = LLMClient()
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(500, f"LLM client unavailable: {exc}")
+
+        try:
+            results = correction_suggester.suggest_corrections_for_clusters(
+                ctx.run_dir,
+                targets=[(s, c, lid)],
+                llm_client=llm_client,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                samples=samples,
+                samples_threshold=samples_threshold,
+                retry_samples=retry_samples,
+                row_context_rows=row_context_rows,
+                concurrency=8,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(
+                404,
+                f"missing run artifact for correction suggestion: {exc}",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "suggest_corrections failed for run=%s cluster=%s",
+                run_id, cluster_id,
+            )
+            raise HTTPException(500, f"correction suggestion failed: {exc}")
+
+        suggestions = results.get((s, c, lid), [])
+        if not suggestions:
+            raise HTTPException(
+                404,
+                f"no draft cluster matched target {cluster_id!r} "
+                f"(check column_cluster_drafts.jsonl in this run)",
+            )
+        return {
+            "cluster_id": cluster_id,
+            "source": s,
+            "column": c,
+            "cluster_local_id": lid,
+            "suggestions": _suggestions_to_payload(suggestions),
+            "saved_value_corrections": _saved_value_corrections_for(
+                ctx, cluster_id,
+            ),
+        }
+
+    @app.get(
+        "/api/runs/{run_id}/clusters/{cluster_id}/corrections"
+    )
+    def get_cluster_corrections(
+        run_id: str, cluster_id: str,
+    ) -> Dict[str, Any]:
+        """Return the latest persisted ``value_corrections`` for a cluster
+        plus any cached LLM suggestions (no LLM calls).
+
+        The UI calls this when opening a cluster: if
+        ``saved_value_corrections`` is non-empty, the UI shows the
+        operator's curated mapping; if it is empty AND
+        ``cached_suggestions`` are available, the UI offers a one-click
+        "Use cached suggestions" affordance. Otherwise the operator
+        must invoke ``POST /suggest-corrections`` to spend LLM budget.
+        """
+        ctx = cache.get(run_id)
+        s, c, lid = _parse_cluster_target(cluster_id)
+        if s not in ctx.sources:
+            raise HTTPException(404, f"source not found: {s}")
+
+        saved = _saved_value_corrections_for(ctx, cluster_id)
+
+        # Cache-only path: pass dry_run=True so dispatch_groups returns
+        # whatever lives in inconsistency_llm_cache.jsonl without ever
+        # constructing an LLM client.
+        cached_suggestions: List[Dict[str, Any]] = []
+        try:
+            results = correction_suggester.suggest_corrections_for_clusters(
+                ctx.run_dir,
+                targets=[(s, c, lid)],
+                llm_client=None,
+                samples=3,
+                samples_threshold=0.5,
+                retry_samples=4,
+                row_context_rows=3,
+                concurrency=1,
+                dry_run=True,
+            )
+            cached_suggestions = _suggestions_to_payload(
+                results.get((s, c, lid), []),
+            )
+        except FileNotFoundError:
+            # Run still missing draft artifact - that's fine; saved
+            # corrections (if any) are still returned below.
+            cached_suggestions = []
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "get_cluster_corrections cache-replay failed for "
+                "run=%s cluster=%s: %s",
+                run_id, cluster_id, exc,
+            )
+            cached_suggestions = []
+
+        return {
+            "cluster_id": cluster_id,
+            "source": s,
+            "column": c,
+            "cluster_local_id": lid,
+            "saved_value_corrections": saved,
+            "cached_suggestions": cached_suggestions,
+        }
+
+    @app.post(
+        "/api/runs/{run_id}/clusters/{cluster_id}/corrections"
+    )
+    def save_cluster_corrections(
+        run_id: str, cluster_id: str,
+        payload: Dict[str, Any] = Body(...),
+    ) -> Dict[str, Any]:
+        """Persist a ``value_corrections`` mapping for one cluster.
+
+        Body fields:
+          * ``value_corrections`` (dict, required) - mapping from each
+            original surface form in the cluster to its correction
+            (scalar = one-direction, list = multi-direction). An ABSENT
+            key means "drop this value from the benchmark export".
+          * ``note_tag`` (str, optional, default ``"[manual]"``) -
+            short prefix appended to the existing note for audit trail.
+            Common values: ``"[llm-suggested]"`` (operator accepted the
+            LLM consensus verbatim), ``"[llm-edited]"`` (operator edited
+            the LLM consensus), ``"[manual]"`` (operator typed the
+            corrections from scratch).
+
+        Builds a fresh Label record from the latest cluster verdict's
+        fields (status / source / column / columns / confirmed_canonical /
+        note) plus the new ``value_corrections`` and the appended
+        ``note_tag``. Requires a prior verdict in {tp, unsure}; saving
+        corrections on an FP/skip cluster is rejected.
+        """
+        ctx = cache.get(run_id)
+        s, c, lid = _parse_cluster_target(cluster_id)
+        if s not in ctx.sources:
+            raise HTTPException(404, f"source not found: {s}")
+
+        raw = payload.get("value_corrections")
+        if not isinstance(raw, dict):
+            raise HTTPException(
+                400, "value_corrections must be a JSON object",
+            )
+        # Coerce + validate: keys must be strings, values must be
+        # str | list[str]; reject any other shape so we don't silently
+        # store junk that the export pipeline later mishandles.
+        normalized: Dict[str, Union[str, List[str]]] = {}
+        for k, v in raw.items():
+            if not isinstance(k, str):
+                raise HTTPException(
+                    400, f"value_corrections keys must be strings, got {k!r}",
+                )
+            if isinstance(v, str):
+                normalized[k] = v
+            elif isinstance(v, list):
+                if not all(isinstance(x, str) for x in v):
+                    raise HTTPException(
+                        400,
+                        f"value_corrections[{k!r}] list elements must be strings",
+                    )
+                normalized[k] = list(v)
+            else:
+                raise HTTPException(
+                    400,
+                    f"value_corrections[{k!r}] must be string or list of strings, "
+                    f"got {type(v).__name__}",
+                )
+
+        latest = ctx.store.latest_for(cluster_id)
+        if latest is None:
+            raise HTTPException(
+                404,
+                f"cluster {cluster_id!r} has no prior verdict; "
+                f"label it tp/unsure before saving corrections",
+            )
+        if latest.status not in (LabelStatus.TP, LabelStatus.UNSURE):
+            raise HTTPException(
+                400,
+                f"cluster verdict is {latest.status!r}; "
+                f"corrections are only valid for status in {{tp, unsure}}",
+            )
+
+        note_tag = str(payload.get("note_tag") or "[manual]").strip() or "[manual]"
+        prior_note = (latest.note or "").strip()
+        if note_tag in prior_note:
+            new_note = prior_note
+        elif prior_note:
+            new_note = f"{note_tag}; {prior_note}"
+        else:
+            new_note = note_tag
+
+        new_label = Label(
+            target=LabelTarget.COLUMN_CLUSTER,
+            target_id=cluster_id,
+            source=latest.source,
+            row=latest.row,
+            column=latest.column,
+            columns=list(latest.columns),
+            status=latest.status,
+            corrected_value=latest.corrected_value,
+            corrected_values=dict(latest.corrected_values),
+            confirmed_canonical=latest.confirmed_canonical,
+            value_corrections=normalized,
+            note=new_note,
+            annotator=(payload.get("annotator") or annotator).strip()
+                or annotator,
+        )
+        ctx.store.append(new_label)
+        return {
+            "cluster_id": cluster_id,
+            "saved_value_corrections": normalized,
+            "note": new_note,
+        }
+
+    # -------- batch correction-suggestion job (async) ------------------
+    #
+    # Enumerates every TP/unsure column-cluster in the run (optionally
+    # filtered to one source), kicks off the same shared dispatcher in
+    # a background thread, and returns a job-id the UI can poll. Cache
+    # hits make most batches finish in seconds; cold runs may take
+    # several minutes.
+
+    @app.post("/api/runs/{run_id}/correction-jobs")
+    def start_correction_job(
+        run_id: str,
+        payload: Dict[str, Any] = Body(default_factory=dict),
+    ) -> Dict[str, Any]:
+        """Start a background correction-suggestion job.
+
+        Body fields (all optional):
+          * ``source`` (str) - restrict the job to this source CSV.
+            Default: every source in the run.
+          * ``samples``, ``samples_threshold``, ``retry_samples``,
+            ``model``, ``reasoning_effort``, ``row_context_rows`` -
+            same defaults as ``suggest-corrections``.
+
+        Returns ``{"job_id", "total_targets", "status": "queued"}``.
+        Poll ``GET /correction-jobs/{job_id}`` for progress + final
+        results.
+        """
+        ctx = cache.get(run_id)
+        source_filter = payload.get("source")
+        if source_filter is not None:
+            if not isinstance(source_filter, str):
+                raise HTTPException(400, "source filter must be a string")
+            if source_filter not in ctx.sources:
+                raise HTTPException(404, f"source not found: {source_filter}")
+
+        # Walk every saved column-cluster Label record and pick out
+        # those with a TP/unsure verdict. We iterate the LabelStore
+        # rather than re-parsing drafts so we naturally get only the
+        # clusters the operator has actually reviewed.
+        seen: set = set()
+        targets: List[Tuple[str, str, str]] = []
+        for lab in ctx.store.all():
+            if lab.target != LabelTarget.COLUMN_CLUSTER:
+                continue
+            if lab.status not in (LabelStatus.TP, LabelStatus.UNSURE):
+                continue
+            tid = lab.target_id
+            if tid in seen:
+                continue  # latest-wins; first hit per id is the latest
+            seen.add(tid)
+            parsed = correction_suggester.parse_colclust_target_id(tid)
+            if parsed is None:
+                continue
+            s, c, lid = parsed
+            if source_filter is not None and s != source_filter:
+                continue
+            # latest_for is order-independent; use it as the source of truth
+            latest = ctx.store.latest_for(tid)
+            if latest is None or latest.status not in (
+                LabelStatus.TP, LabelStatus.UNSURE,
+            ):
+                continue
+            targets.append((s, c, lid))
+
+        if not targets:
+            raise HTTPException(
+                404,
+                "no TP/unsure column-cluster verdicts in this run "
+                + (f"for source {source_filter!r}" if source_filter else ""),
+            )
+
+        samples = int(payload.get("samples", 3))
+        samples_threshold = float(payload.get("samples_threshold", 0.5))
+        retry_samples = int(payload.get("retry_samples", 4))
+        model = str(payload.get("model", "gpt-5.2"))
+        reasoning_effort = str(payload.get("reasoning_effort", "medium"))
+        row_context_rows = int(payload.get("row_context_rows", 3))
+
+        job = _correction_jobs.create(run_id, targets)
+
+        def _run(job: _CorrectionJob) -> None:
+            job.status = "running"
+            job.started_at = time.time()
+
+            def _progress(phase: str, done: int, total: int) -> None:
+                # Dispatch fires this once per finished LLM call; the
+                # registry is module-global so writes are visible to
+                # the GET endpoint without further locking (single
+                # writer per job).
+                job.phase = phase
+                job.done = done
+                job.total = total
+
+            try:
+                llm_client = LLMClient()
+            except Exception as exc:  # noqa: BLE001
+                job.status = "error"
+                job.error = f"LLM client unavailable: {exc}"
+                job.finished_at = time.time()
+                return
+
+            try:
+                results = correction_suggester.suggest_corrections_for_clusters(
+                    ctx.run_dir,
+                    targets=job.targets,
+                    llm_client=llm_client,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    samples=samples,
+                    samples_threshold=samples_threshold,
+                    retry_samples=retry_samples,
+                    row_context_rows=row_context_rows,
+                    concurrency=8,
+                    progress_cb=_progress,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception(
+                    "correction batch job failed run=%s job=%s",
+                    job.run_id, job.job_id,
+                )
+                job.status = "error"
+                job.error = str(exc)
+                job.finished_at = time.time()
+                return
+
+            for (s, c, lid), suggs in results.items():
+                key = f"{s}\x00{c}\x00{lid}"
+                job.results[key] = _suggestions_to_payload(suggs)
+            job.status = "done"
+            job.finished_at = time.time()
+
+        _correction_jobs.submit(job, _run)
+        return {
+            "job_id": job.job_id,
+            "total_targets": len(targets),
+            "status": job.status,
+        }
+
+    @app.get("/api/runs/{run_id}/correction-jobs/{job_id}")
+    def get_correction_job(run_id: str, job_id: str) -> Dict[str, Any]:
+        """Return job state for polling. Result payload is included in
+        the same response when ``status == "done"``."""
+        job = _correction_jobs.get(job_id)
+        if job is None or job.run_id != run_id:
+            raise HTTPException(404, f"correction job not found: {job_id}")
+        return {
+            "job_id": job.job_id,
+            "run_id": job.run_id,
+            "status": job.status,
+            "phase": job.phase,
+            "done": job.done,
+            "total": job.total,
+            "total_targets": len(job.targets),
+            "started_at": job.started_at,
+            "finished_at": job.finished_at,
+            "error": job.error,
+            "results": job.results if job.status == "done" else {},
+        }
 
     @app.get("/api/runs/{run_id}/web-verifications")
     def list_web_verifications(run_id: str) -> Dict[str, Any]:
@@ -1738,6 +2449,97 @@ def create_app(
             "shadowed_fn_count": shadowed,
         }
 
+    @app.get("/api/runs/{run_id}/fn-cells")
+    def list_fn_cells(run_id: str) -> Dict[str, Any]:
+        """Return every active FN cell label in the run.
+
+        Used by the label-queue frontend to surface operator-marked
+        false negatives alongside cluster findings (so the operator
+        can revisit / clear them without scrolling the CSV grid). A
+        cell is ``shadowed`` when a TP / PARTIAL cluster verdict
+        covers the same (source, row, column); the queue drops
+        shadowed entries because the cluster verdict supersedes the
+        FN claim.
+        """
+        ctx = cache.get(run_id)
+        latest = ctx.store.latest_by_target()
+
+        # LLM cluster coverage indexed by (source, row, column). An
+        # FN cell label that lands on a cell the LLM ALREADY flagged
+        # is duplicative -- the cluster will surface in the queue on
+        # its own, so the FN entry would render as a second row for
+        # the same cell. We tag those FNs as ``shadowed`` so the
+        # frontend (which already drops shadowed FNs) collapses the
+        # pair down to the single cluster entry the operator can
+        # verdict directly.
+        cluster_cover: Dict[tuple, str] = {}
+        for c in ctx.clusters:
+            src = c.get("source")
+            row = c.get("row")
+            if not src or not isinstance(row, int):
+                continue
+            cid = c.get("cluster_id", "")
+            lab = latest.get(cid)
+            # "any cluster" coverage: a labelled cluster's verdict
+            # is more useful to surface than its mere presence, so
+            # record the verdict when present; an unlabelled cluster
+            # still counts as coverage (``unlabeled`` sentinel).
+            if lab is not None and lab.target == LabelTarget.CLUSTER:
+                st = lab.status.value
+                if st == "skip":
+                    continue
+            else:
+                st = "unlabeled"
+            for col in (c.get("columns") or []):
+                key = (src, int(row), col)
+                rank = {
+                    "tp": 5, "partial": 4, "fp": 3,
+                    "unsure": 2, "unlabeled": 1,
+                }
+                cur = cluster_cover.get(key)
+                if cur is None or rank.get(st, 0) > rank.get(cur, 0):
+                    cluster_cover[key] = st
+
+        items: List[Dict[str, Any]] = []
+        # Statuses we surface in the FN list: the original FN claim
+        # plus the verdicts the operator can attach to that claim via
+        # the FN detail panel (tp/partial/unsure/skip). FP and
+        # UNLABELED tombstone the cell and never appear here
+        # (``latest_by_target`` already drops unlabeled).
+        _fn_visible_statuses = {
+            LabelStatus.FN, LabelStatus.TP, LabelStatus.PARTIAL,
+            LabelStatus.UNSURE, LabelStatus.SKIP,
+        }
+        for tid, lab in latest.items():
+            if lab.target != LabelTarget.CELL:
+                continue
+            if lab.status not in _fn_visible_statuses:
+                continue
+            if lab.row is None or not lab.column or not lab.source:
+                continue
+            key = (lab.source, int(lab.row), lab.column)
+            shadowing = cluster_cover.get(key)
+            # Any LLM cluster on the same cell shadows the FN: the
+            # queue would otherwise show two rows (the LLM cluster +
+            # the operator's FN claim) for the same (row, column).
+            shadowed = shadowing is not None
+            items.append({
+                "target_id": tid,
+                "source": lab.source,
+                "row": int(lab.row),
+                "column": lab.column,
+                "status": lab.status.value,
+                "corrected_value": lab.corrected_value,
+                "note": lab.note or "",
+                "annotator": lab.annotator or "",
+                "ts": (
+                    lab.ts.isoformat() if hasattr(lab.ts, "isoformat") else lab.ts
+                ),
+                "shadowed": shadowed,
+                "shadowed_by": shadowing if shadowed else None,
+            })
+        return {"items": items}
+
     @app.get("/api/runs/{run_id}/labels")
     def list_labels(run_id: str) -> Dict[str, Any]:
         ctx = cache.get(run_id)
@@ -1756,6 +2558,111 @@ def create_app(
         elif payload.target == LabelTarget.ISSUE:
             if ctx.issue(payload.target_id) is None:
                 raise HTTPException(404, f"issue not found: {payload.target_id}")
+        elif payload.target == LabelTarget.COLUMN_CLUSTER:
+            # Column-cluster verdicts are independent per cluster:
+            # labelling c1 does not finalize the column's clustering.
+            # We accept the verdict if the cluster_id exists either
+            # in a saved ``column_clusters.jsonl`` record (column
+            # board has run) OR in the column's draft JSONL (LLM
+            # proposal not yet finalized). Drafts use ``c{idx+1}``
+            # in proposal order, matching the synthetic target_ids
+            # surfaced by ``list_column_clusters``.
+            #
+            # We deliberately do NOT auto-promote drafts to a
+            # ``ColumnClusters`` record: that record represents a
+            # disjoint partition (only the column-board UI builds
+            # one), whereas LLM drafts may overlap. Persisting a
+            # subset of drafts here would mark the column as
+            # ``labeled`` and hide the remaining drafts from the
+            # queue, blocking the operator from voting on them.
+            if not payload.source or not payload.column:
+                raise HTTPException(
+                    400, "column_cluster labels require source and column",
+                )
+            if payload.source not in ctx.sources:
+                raise HTTPException(404, f"source not found: {payload.source}")
+            # ``target_id`` of the form ``colclust\x00src\x00col\x00cN``.
+            parts = payload.target_id.split("\x00")
+            if len(parts) != 4 or parts[0] != "colclust":
+                raise HTTPException(
+                    400,
+                    f"invalid column_cluster target_id: {payload.target_id!r}",
+                )
+            local_id = parts[3]
+            store = _cc_store(run_id)
+            rec = store.latest_for(payload.source, payload.column)
+            in_record = (
+                rec is not None
+                and rec.status == ColumnLabelStatus.LABELED
+                and any(cl.cluster_id == local_id for cl in rec.clusters)
+            )
+            in_drafts = False
+            if not in_record:
+                drafts = _load_drafts_for_column(
+                    run_id, payload.source, payload.column,
+                )
+                # Mirror the c{idx+1}-in-draft-order convention used
+                # by ``list_column_clusters`` when surfacing drafts.
+                # A draft is a usable target if it has >= 2 string
+                # values (same minimum the listing enforces).
+                draft_ids: set = set()
+                for idx, dr in enumerate(drafts, start=1):
+                    raw = dr.get("values") or []
+                    str_count = sum(
+                        1 for v in raw
+                        if isinstance(v, str) and v
+                        or (isinstance(v, dict)
+                            and isinstance(v.get("value"), str)
+                            and v.get("value"))
+                    )
+                    if str_count >= 2:
+                        draft_ids.add(f"c{idx}")
+                in_drafts = local_id in draft_ids
+            if not (in_record or in_drafts):
+                raise HTTPException(
+                    404,
+                    f"cluster {local_id!r} not found in "
+                    f"{payload.source!r}/{payload.column!r}; "
+                    f"no saved record or matching draft",
+                )
+            # Validate ``confirmed_canonical`` (if set) against the
+            # cluster's actual value-set. The operator may only
+            # endorse one of the cluster's surface forms; rejecting
+            # arbitrary strings here keeps the synthesised
+            # ``ColumnClusters`` records valid (their schema enforces
+            # the same constraint).
+            if payload.confirmed_canonical is not None:
+                cluster_values: set = set()
+                if in_record:
+                    for cl in rec.clusters:
+                        if cl.cluster_id == local_id:
+                            cluster_values = {cv.value for cv in cl.values}
+                            break
+                else:
+                    drafts = _load_drafts_for_column(
+                        run_id, payload.source, payload.column,
+                    )
+                    idx = int(local_id[1:]) - 1
+                    if 0 <= idx < len(drafts):
+                        for v in drafts[idx].get("values") or []:
+                            if isinstance(v, str) and v:
+                                cluster_values.add(v)
+                            elif (isinstance(v, dict)
+                                  and isinstance(v.get("value"), str)
+                                  and v.get("value")):
+                                cluster_values.add(v["value"])
+                if payload.confirmed_canonical not in cluster_values:
+                    raise HTTPException(
+                        400,
+                        f"confirmed_canonical "
+                        f"{payload.confirmed_canonical!r} is not a "
+                        f"value of cluster {local_id!r}",
+                    )
+            payload = payload.model_copy(update={
+                "target_id": column_cluster_target_id(
+                    payload.source, payload.column, local_id,
+                ),
+            })
         else:  # CELL
             # Cell labels carry FN (false negative). Require the same
             # (source, row, column) triple in the payload so the
@@ -1768,11 +2675,25 @@ def create_app(
                 )
             if payload.source not in ctx.sources:
                 raise HTTPException(404, f"source not found: {payload.source}")
-            if payload.status not in (LabelStatus.FN, LabelStatus.FP):
-                # FP-on-cell is allowed for clearing a previous FN.
+            # Cell labels carry an operator-only claim that this cell
+            # is (or was) an error the LLM missed. ``TP`` is deliberately
+            # excluded: a true-positive is a verdict on an LLM detection,
+            # which only the cluster path owns -- there is no detection
+            # at an unflagged cell to affirm. The supported verdicts
+            # carry the operator's confidence on the FN claim; FP and
+            # UNLABELED are tombstones that clear the FN.
+            _allowed_cell_statuses = {
+                LabelStatus.FN, LabelStatus.PARTIAL,
+                LabelStatus.UNSURE, LabelStatus.SKIP,
+                LabelStatus.FP, LabelStatus.UNLABELED,
+            }
+            if payload.status not in _allowed_cell_statuses:
                 raise HTTPException(
                     400,
-                    "cell labels only support status=fn (or fp to clear)",
+                    "cell labels support fn/partial/unsure/skip "
+                    "(verdict on the operator's claim) or fp / "
+                    "unlabeled (clear the cell); tp belongs to the "
+                    "cluster path",
                 )
             payload = payload.model_copy(update={
                 "target_id": cell_target_id(
@@ -1865,12 +2786,43 @@ def create_app(
                 continue
             cid = c.get("cluster_id", "")
             lab = latest.get(cid)
-            if lab is None or lab.target != LabelTarget.CLUSTER:
+            # Only a cluster carrying an ACTIVE verdict
+            # (tp/fp/partial/unsure) counts as coverage that blocks
+            # propagation: the operator has ruled on it, so auto-FN'ing
+            # its same-value siblings would clobber that decision. An
+            # UNLABELLED cluster means the operator hasn't ruled yet,
+            # and a SKIP is a deferred (non-)decision -- in both cases
+            # we are free to propagate the FN to the sibling cell (the
+            # operator can still verdict the cluster itself later).
+            if not (
+                lab is not None
+                and lab.target == LabelTarget.CLUSTER
+                and lab.status in (
+                    LabelStatus.TP, LabelStatus.FP,
+                    LabelStatus.PARTIAL, LabelStatus.UNSURE,
+                )
+            ):
                 continue
-            if lab.status == LabelStatus.SKIP:
-                continue
-            for col in (c.get("columns") or []):
+            cluster_cols = list(c.get("columns") or [])
+            for col in cluster_cols:
                 covered.add((r, col))
+            # Detections inside the cluster may flag many more rows
+            # than the cluster's anchor row (typo clusters often carry
+            # a single anchor row=N but a detection whose
+            # ``affected_rows`` lists every row holding the same bad
+            # value). Those rows ARE covered by the LLM finding -
+            # auto-FN'ing them would double-count what the cluster
+            # verdict already settles. Treat each detection's
+            # ``affected_rows`` x ``columns`` as covered, falling
+            # back to the cluster's columns when the detection omits
+            # its own column list.
+            for det in (c.get("detections") or ()):
+                det_cols = list(det.get("columns") or cluster_cols)
+                for ar in (det.get("affected_rows") or ()):
+                    if not isinstance(ar, int):
+                        continue
+                    for col in det_cols:
+                        covered.add((ar, col))
         cell_labels: set = set()
         for tid, lab in latest.items():
             if lab.target != LabelTarget.CELL or lab.source != source:
@@ -1927,6 +2879,434 @@ def create_app(
             "cells": propagated_cells,
         }
 
+    @app.post("/api/runs/{run_id}/labels/tag-trivial-whitespace")
+    def tag_trivial_whitespace(
+        run_id: str, payload: Dict[str, Any] = Body(default_factory=dict),
+    ) -> Dict[str, Any]:
+        """Append the literal token ``TRIVIAL`` to the ``note`` of every
+        TP / PARTIAL / FN label whose underlying cell value matches the
+        red-underline whitespace-anomaly rule used by the CSV viewer.
+
+        Why this exists: the auto-whitespace detector (see
+        ``experiments/auto_label_whitespace_anomalies.py``) finds
+        edge / double / non-printable whitespace in cells. Such typos
+        are mechanical and uninteresting compared with semantic typos,
+        so the operator wants them flagged ``TRIVIAL`` in the note so
+        downstream benchmark consumers can choose to weight or filter
+        them out without losing the label.
+
+        Idempotent: any label whose latest ``note`` already contains
+        ``TRIVIAL`` (case-insensitive substring) is skipped. Re-running
+        the endpoint after manual additions is a no-op.
+
+        Payload (all optional):
+          * ``source``   - limit the scan to one CSV.
+          * ``statuses`` - list of statuses to include (default
+            ``["tp", "partial", "fn"]``). The ``fn`` cell-target labels
+            from the auto-whitespace pass are the bulk of real
+            whitespace typos; ``tp``/``partial`` cluster verdicts pick
+            up the LLM-found ones.
+          * ``dry_run``  - if true, return the candidate list without
+            writing any labels. The UI uses this to power the preview.
+          * ``annotator`` - override annotator on the new records.
+        Response always includes ``candidates`` (list of dicts with
+        ``target_id``, ``source``, ``row``, ``column``, ``value``,
+        ``status``, ``current_note``) plus counts:
+          * ``tagged``                - records appended (0 in dry_run)
+          * ``skipped_already_tagged`` - candidates whose note already
+            had ``TRIVIAL``
+          * ``skipped_no_value``       - labels whose target cell could
+            not be read (deleted source / out-of-range row)
+          * ``scanned``                - latest labels considered
+        """
+        ctx = cache.get(run_id)
+        source_filter = payload.get("source") or None
+        if source_filter is not None and source_filter not in ctx.sources:
+            raise HTTPException(404, f"source not found: {source_filter}")
+        dry_run = bool(payload.get("dry_run"))
+        raw_statuses = payload.get("statuses")
+        if raw_statuses is None:
+            wanted_statuses = {
+                LabelStatus.TP, LabelStatus.PARTIAL, LabelStatus.FN,
+            }
+        else:
+            if not isinstance(raw_statuses, list) or not raw_statuses:
+                raise HTTPException(
+                    400, "statuses must be a non-empty list of status names",
+                )
+            wanted_statuses = set()
+            for s in raw_statuses:
+                try:
+                    wanted_statuses.add(LabelStatus(str(s).lower()))
+                except ValueError as exc:
+                    raise HTTPException(
+                        400, f"invalid status: {s!r}",
+                    ) from exc
+        ann = (payload.get("annotator") or annotator).strip() or annotator
+
+        latest = ctx.store.latest_by_target()
+        # Index clusters by id for O(1) lookup of (row, columns) given
+        # a CLUSTER label.
+        cluster_by_id: Dict[str, Dict[str, Any]] = {}
+        for c in ctx.clusters:
+            cid = c.get("cluster_id")
+            if isinstance(cid, str):
+                cluster_by_id[cid] = c
+
+        # Per-source dataframe cache: ``ctx.load_frame`` already
+        # memoises but we capture failures to avoid reloading a missing
+        # source for every candidate.
+        frame_cache: Dict[str, Optional[pd.DataFrame]] = {}
+
+        def _frame_for(src: str) -> Optional[pd.DataFrame]:
+            if src in frame_cache:
+                return frame_cache[src]
+            try:
+                fr = ctx.load_frame(src)
+            except (FileNotFoundError, KeyError):
+                fr = None
+            frame_cache[src] = fr
+            return fr
+
+        candidates: List[Dict[str, Any]] = []
+        skipped_already_tagged = 0
+        skipped_no_value = 0
+        scanned = 0
+        # Stable order: by (source, row, column, target_id) so the
+        # preview is reproducible run-to-run.
+        items = sorted(
+            latest.items(),
+            key=lambda kv: (
+                kv[1].source or "",
+                kv[1].row if kv[1].row is not None else -1,
+                kv[1].column or "",
+                kv[0],
+            ),
+        )
+        for tid, lab in items:
+            if lab.status not in wanted_statuses:
+                continue
+            scanned += 1
+            # Resolve (source, row, column) for the label. CELL labels
+            # carry these directly; CLUSTER labels need a cluster lookup.
+            # COLUMN_CLUSTER and ISSUE labels don't fit the spacing-rule
+            # model (no single anchor cell), so skip them.
+            if lab.target == LabelTarget.CELL:
+                src = lab.source
+                row_idx = lab.row
+                cols_to_check: List[str] = [lab.column] if lab.column else []
+            elif lab.target == LabelTarget.CLUSTER:
+                rec = cluster_by_id.get(lab.target_id)
+                if rec is None:
+                    continue
+                src = rec.get("source")
+                row_idx = rec.get("row")
+                cols_to_check = [
+                    c for c in (lab.columns or rec.get("columns") or [])
+                    if isinstance(c, str)
+                ]
+            else:
+                continue
+
+            if not src or row_idx is None or not cols_to_check:
+                continue
+            if source_filter is not None and src != source_filter:
+                continue
+            frame = _frame_for(src)
+            if frame is None:
+                skipped_no_value += 1
+                continue
+            try:
+                row_int = int(row_idx)
+            except (TypeError, ValueError):
+                skipped_no_value += 1
+                continue
+            if not (0 <= row_int < len(frame)):
+                skipped_no_value += 1
+                continue
+
+            # Find the columns whose value triggers the spacing rule.
+            # Even if the operator labelled multiple columns at once,
+            # we only flag TRIVIAL when at least one of them is a true
+            # whitespace anomaly. Surface the matching cells so the
+            # preview can show the operator exactly what's being marked.
+            ws_hits: List[Dict[str, Any]] = []
+            for col in cols_to_check:
+                if col not in frame.columns:
+                    continue
+                v = _scalar(frame.iat[row_int, frame.columns.get_loc(col)])
+                if _has_whitespace_anomaly(v):
+                    ws_hits.append({"column": col, "value": v})
+            if not ws_hits:
+                continue
+
+            current_note = lab.note or ""
+            already_tagged = "TRIVIAL" in current_note.upper()
+            if already_tagged:
+                skipped_already_tagged += 1
+                # Surface the entry so the UI can show "X already
+                # tagged" without an extra request, but mark it so
+                # the preview doesn't double-count it.
+                candidates.append({
+                    "target_id": tid,
+                    "target": lab.target.value,
+                    "source": src,
+                    "row": row_int,
+                    "column": cols_to_check[0],
+                    "columns": cols_to_check,
+                    "ws_hits": ws_hits,
+                    "status": lab.status.value,
+                    "current_note": current_note,
+                    "already_tagged": True,
+                })
+                continue
+
+            candidates.append({
+                "target_id": tid,
+                "target": lab.target.value,
+                "source": src,
+                "row": row_int,
+                "column": cols_to_check[0],
+                "columns": cols_to_check,
+                "ws_hits": ws_hits,
+                "status": lab.status.value,
+                "current_note": current_note,
+                "already_tagged": False,
+            })
+
+        to_tag = [c for c in candidates if not c["already_tagged"]]
+        if dry_run:
+            return {
+                "dry_run": True,
+                "scanned": scanned,
+                "tagged": 0,
+                "to_tag": len(to_tag),
+                "skipped_already_tagged": skipped_already_tagged,
+                "skipped_no_value": skipped_no_value,
+                "candidates": candidates,
+            }
+
+        # Build new label records that mirror the latest existing
+        # record for each target but with " TRIVIAL" appended to the
+        # note. The label store is append-only and ``latest_by_target``
+        # already returns the most-recent fields, so we can copy
+        # everything verbatim.
+        batch: List[Label] = []
+        for entry in to_tag:
+            lab = latest[entry["target_id"]]
+            new_note = (lab.note + " TRIVIAL").strip() if lab.note else "TRIVIAL"
+            batch.append(Label(
+                target=lab.target,
+                target_id=lab.target_id,
+                source=lab.source,
+                row=lab.row,
+                column=lab.column,
+                columns=list(lab.columns) if lab.columns else [],
+                status=lab.status,
+                corrected_value=lab.corrected_value,
+                corrected_values=dict(lab.corrected_values) if lab.corrected_values else {},
+                confirmed_canonical=lab.confirmed_canonical,
+                value_corrections=(
+                    dict(lab.value_corrections) if lab.value_corrections else {}
+                ),
+                note=new_note,
+                annotator=ann,
+            ))
+        if batch:
+            ctx.store.append_many(batch)
+
+        return {
+            "dry_run": False,
+            "scanned": scanned,
+            "tagged": len(batch),
+            "to_tag": len(to_tag),
+            "skipped_already_tagged": skipped_already_tagged,
+            "skipped_no_value": skipped_no_value,
+            "candidates": candidates,
+        }
+
+    @app.post("/api/runs/{run_id}/labels/tag-trivial-phone-format")
+    def tag_trivial_phone_format(
+        run_id: str, payload: Dict[str, Any] = Body(default_factory=dict),
+    ) -> Dict[str, Any]:
+        """Auto-detect phone-format columns, bulk-label the format
+        variants as FN, and SKIP every cluster touching such a column.
+
+        Phone numbers stored in mixed surface formats (``(575) 433-0200``
+        vs ``575-433-0200``) are a mechanical inconsistency, not a
+        semantic typo. This endpoint mirrors ``tag-trivial-whitespace``:
+        it finds columns whose values are >= ``threshold`` phone-shaped
+        (``src.labeling.phone_format``), votes a column-majority canonical
+        template, and for every row whose surface form differs (but whose
+        digit count matches, so a clean reformat exists) writes a
+        cell-level FN label carrying the canonical ``corrected_value``.
+        Clusters anchored on a phone column are SKIPped so they drop out
+        of the active queue. Both records are tagged ``TRIVIAL
+        phone_format`` in the note.
+
+        Idempotent: a cell / cluster whose latest label already carries
+        the ``TRIVIAL phone_format`` tag is surfaced as ``already_tagged``
+        and never re-written, so re-running is a no-op.
+
+        Payload (all optional):
+          * ``source``         - limit the scan to one CSV (404 if absent).
+          * ``threshold``      - min phone-shaped fraction for a column to
+            count as a phone column (default 0.80).
+          * ``min_phone_rows`` - min phone-shaped rows required (default 5).
+          * ``dry_run``        - return candidates without writing.
+          * ``annotator``      - override annotator on the new records.
+        Response: ``columns`` (one ``{source, column, template,
+        digit_count, cells_to_correct, clusters_to_skip}`` per detected
+        column), ``cell_candidates``, ``cluster_candidates`` (each with
+        ``already_tagged``), and the ``cells_written`` / ``clusters_written``
+        counts (0 in dry_run / on an idempotent re-run).
+        """
+        ctx = cache.get(run_id)
+        source_filter = payload.get("source") or None
+        if source_filter is not None and source_filter not in ctx.sources:
+            raise HTTPException(404, f"source not found: {source_filter}")
+        dry_run = bool(payload.get("dry_run"))
+        try:
+            threshold = float(
+                payload.get("threshold", phone_format.DEFAULT_COLUMN_THRESHOLD)
+            )
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(400, "threshold must be a number") from exc
+        try:
+            min_phone_rows = int(
+                payload.get("min_phone_rows", phone_format.DEFAULT_MIN_PHONE_ROWS)
+            )
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(400, "min_phone_rows must be an integer") from exc
+        ann = (payload.get("annotator") or annotator).strip() or annotator
+
+        phone_tag = "TRIVIAL phone_format"
+        latest = ctx.store.latest_by_target()
+
+        def _already_tagged(target_id: str) -> bool:
+            lab = latest.get(target_id)
+            return lab is not None and phone_tag.lower() in (lab.note or "").lower()
+
+        sources_to_scan = (
+            [source_filter] if source_filter is not None else list(ctx.sources)
+        )
+
+        columns_summary: List[Dict[str, Any]] = []
+        cell_candidates: List[Dict[str, Any]] = []
+        cluster_candidates: List[Dict[str, Any]] = []
+        seen_cluster_ids: set[str] = set()
+
+        for src in sources_to_scan:
+            try:
+                frame = ctx.load_frame(src)
+            except (FileNotFoundError, KeyError):
+                continue
+            for col_obj in frame.columns:
+                col = str(col_obj)
+                rows = [
+                    (i, "" if pd.isna(v) else str(v))
+                    for i, v in enumerate(frame[col_obj].tolist())
+                ]
+                majority, corrections = phone_format.find_phone_corrections(
+                    rows, threshold=threshold, min_phone_rows=min_phone_rows,
+                )
+                if majority is None:
+                    continue
+                template, digit_count = majority
+
+                col_cells: List[Dict[str, Any]] = []
+                for corr in corrections:
+                    tid = cell_target_id(src, corr.row, col)
+                    col_cells.append({
+                        "target_id": tid,
+                        "source": src,
+                        "row": corr.row,
+                        "column": col,
+                        "original_value": corr.original,
+                        "canonical": corr.canonical,
+                        "already_tagged": _already_tagged(tid),
+                    })
+
+                col_clusters: List[Dict[str, Any]] = []
+                for c in ctx.clusters:
+                    if c.get("source") != src:
+                        continue
+                    cid = c.get("cluster_id")
+                    if not isinstance(cid, str) or cid in seen_cluster_ids:
+                        continue
+                    ccols = [
+                        x for x in (c.get("columns") or []) if isinstance(x, str)
+                    ]
+                    if col not in ccols:
+                        continue
+                    seen_cluster_ids.add(cid)
+                    col_clusters.append({
+                        "target_id": cid,
+                        "source": src,
+                        "row": c.get("row"),
+                        "columns": ccols,
+                        "already_tagged": _already_tagged(cid),
+                    })
+
+                columns_summary.append({
+                    "source": src,
+                    "column": col,
+                    "template": template,
+                    "digit_count": digit_count,
+                    "cells_to_correct": len(col_cells),
+                    "clusters_to_skip": len(col_clusters),
+                })
+                cell_candidates.extend(col_cells)
+                cluster_candidates.extend(col_clusters)
+
+        cells_written = 0
+        clusters_written = 0
+        if not dry_run:
+            batch: List[Label] = []
+            for cand in cell_candidates:
+                if cand["already_tagged"]:
+                    continue
+                batch.append(Label(
+                    target=LabelTarget.CELL,
+                    target_id=cand["target_id"],
+                    source=cand["source"],
+                    row=cand["row"],
+                    column=cand["column"],
+                    columns=[cand["column"]],
+                    status=LabelStatus.FN,
+                    corrected_value=cand["canonical"],
+                    note=phone_tag,
+                    annotator=ann,
+                ))
+                cells_written += 1
+            for cand in cluster_candidates:
+                if cand["already_tagged"]:
+                    continue
+                batch.append(Label(
+                    target=LabelTarget.CLUSTER,
+                    target_id=cand["target_id"],
+                    source=cand["source"],
+                    row=cand["row"],
+                    columns=cand["columns"],
+                    status=LabelStatus.SKIP,
+                    note=phone_tag,
+                    annotator=ann,
+                ))
+                clusters_written += 1
+            if batch:
+                ctx.store.append_many(batch)
+
+        return {
+            "dry_run": dry_run,
+            "threshold": threshold,
+            "min_phone_rows": min_phone_rows,
+            "columns": columns_summary,
+            "cell_candidates": cell_candidates,
+            "cluster_candidates": cluster_candidates,
+            "cells_written": cells_written,
+            "clusters_written": clusters_written,
+        }
+
     @app.post("/api/runs/{run_id}/clusters/propagate-status")
     def propagate_cluster_status(
         run_id: str, payload: Dict[str, Any] = Body(...),
@@ -1941,16 +3321,26 @@ def create_app(
         the other clusters carrying the same value should also be
         ``fp``, since the LLM was wrong globally about this value.
 
-        Skip rules:
+        Same-value siblings are OVERRIDDEN (latest-wins): the operator
+        clicked propagation precisely because this value's verdict
+        should be uniform, so a prior (often contradictory) label is
+        replaced rather than preserved. The exceptions:
           - the seed cluster itself (the caller already labelled it);
-          - clusters that already carry a non-skip verdict from any
-            annotator (never overwrite prior decisions);
-          - clusters whose anchor cell value differs from the seed.
+          - clusters whose anchor cell value differs from the seed;
+          - a sibling that already carries the IDENTICAL status from the
+            SAME annotator -> no-op (avoids a redundant audit record).
+
+        ``status`` accepts tp / fp / partial / unsure / skip; ``skip``
+        spreads the skip verdict across sibling clusters on the column
+        (distinct from the row-level skip cascade). ``fn`` is rejected --
+        only cells carry fn.
 
         Required keys: ``source``, ``row``, ``column``, ``status``.
         Optional: ``note``, ``annotator``.
-        Response: ``{"propagated": int, "skipped_existing": int,
-                     "matched": int, "clusters": [...]}``.
+        Response: ``{"matched": int, "propagated": int,
+                     "overridden_existing": int, "unchanged": int,
+                     "skipped_existing": int (back-compat, always 0),
+                     "clusters": [...]}``.
         """
         source = payload.get("source")
         row = payload.get("row")
@@ -1970,15 +3360,18 @@ def create_app(
             status = LabelStatus(str(status_raw).lower())
         except ValueError as exc:
             raise HTTPException(400, f"invalid status: {status_raw!r}") from exc
-        # FN doesn't apply to cluster verdicts; SKIP has its own
-        # row-cascade path so we don't replicate it here.
+        # FN never applies to cluster verdicts (only cells carry fn).
+        # SKIP is allowed: it spreads the skip verdict to sibling
+        # clusters on the column (distinct from the row-level skip
+        # cascade).
         if status not in (
-            LabelStatus.TP, LabelStatus.FP,
-            LabelStatus.PARTIAL, LabelStatus.UNSURE,
+            LabelStatus.TP, LabelStatus.FP, LabelStatus.PARTIAL,
+            LabelStatus.UNSURE, LabelStatus.SKIP,
         ):
             raise HTTPException(
                 400,
-                "status must be one of tp/fp/partial/unsure for cluster propagation",
+                "status must be one of tp/fp/partial/unsure/skip for "
+                "cluster propagation",
             )
 
         ctx = cache.get(run_id)
@@ -2004,7 +3397,12 @@ def create_app(
         latest = ctx.store.latest_by_target()
         propagated_clusters: List[Dict[str, Any]] = []
         batch: List[Label] = []
+        # Retained for back-compat with older UI callers; propagation now
+        # OVERRIDES prior verdicts (latest-wins) instead of skipping, so
+        # this stays 0.
         skipped_existing = 0
+        overridden_existing = 0
+        unchanged = 0
         matched = 0
         for c in ctx.clusters:
             if c.get("source") != source:
@@ -2029,16 +3427,24 @@ def create_app(
             if v != target_value:
                 continue
             matched += 1
-            # Don't clobber prior verdicts (any non-skip cluster label
-            # from any annotator).
             existing = latest.get(cid)
-            if (
+            has_verdict = (
                 existing is not None
                 and existing.target == LabelTarget.CLUSTER
-                and existing.status != LabelStatus.SKIP
+            )
+            # No-op when the sibling already carries the identical verdict
+            # from the same annotator: re-appending would only pollute the
+            # append-only audit log with a duplicate record.
+            if (
+                has_verdict
+                and existing.status == status
+                and (existing.annotator or "") == ann
             ):
-                skipped_existing += 1
+                unchanged += 1
                 continue
+            # Otherwise OVERRIDE the prior verdict (latest-wins).
+            if has_verdict:
+                overridden_existing += 1
             batch.append(Label(
                 target=LabelTarget.CLUSTER,
                 target_id=cid,
@@ -2065,6 +3471,8 @@ def create_app(
             "status": status.value,
             "matched": matched,
             "propagated": len(propagated_clusters),
+            "overridden_existing": overridden_existing,
+            "unchanged": unchanged,
             "skipped_existing": skipped_existing,
             "clusters": propagated_clusters,
         }
@@ -2080,525 +3488,704 @@ def create_app(
     # appends a tombstone record sharing the same id.
     # ---------------------------------------------------------------
 
-    @app.get("/api/runs/{run_id}/exclusions")
-    def list_exclusions(run_id: str) -> Dict[str, Any]:
-        ctx = cache.get(run_id)
-        actives = ctx.exclusions_store.active()
-        return {"items": [e.model_dump() for e in actives]}
-
-    @app.post("/api/runs/{run_id}/exclusions")
-    def post_exclusion(run_id: str, payload: ExclusionIn) -> Exclusion:
-        ctx = cache.get(run_id)
-        if payload.source not in ctx.sources:
-            raise HTTPException(404, f"source not found: {payload.source}")
-        if payload.scope == ExclusionScope.CSV:
-            if payload.rows or payload.columns:
-                raise HTTPException(
-                    400, "scope=csv must not carry rows / columns",
-                )
-        elif payload.scope == ExclusionScope.ROWS:
-            if not payload.rows:
-                raise HTTPException(400, "scope=rows requires non-empty rows")
-        elif payload.scope == ExclusionScope.COLUMNS:
-            if not payload.columns:
-                raise HTTPException(
-                    400, "scope=columns requires non-empty columns",
-                )
-        return ctx.exclusions_store.add(payload, annotator=annotator)
-
-    @app.delete("/api/runs/{run_id}/exclusions/{exclusion_id}")
-    def delete_exclusion(run_id: str, exclusion_id: str) -> Dict[str, Any]:
-        ctx = cache.get(run_id)
-        tomb = ctx.exclusions_store.remove(exclusion_id, annotator=annotator)
-        if tomb is None:
-            raise HTTPException(404, f"exclusion not found: {exclusion_id}")
-        return {"ok": True, "id": exclusion_id}
-
     # ---------------------------------------------------------------
-    # Relation-review endpoints (approve / reject / add custom).
-    # Backed by ``<run_dir>/relation_reviews.jsonl``. Latest decision
-    # per ``relation_id`` (= species_key) wins. ``added`` decisions
-    # carry a full ``relation`` snapshot so user-authored relations
-    # survive when the LLM rerun changes the discovered set.
+    # Column-clusters labelling (inconsistency error type).
+    # Backed by ``<run_dir>/column_clusters.jsonl``. Each labelled
+    # column carries an optional set of value-clusters identifying
+    # standardization groups (e.g. {"BBB", "ABC HS"} -> same school).
+    # Single source of truth: the latest record per (source, column).
     # ---------------------------------------------------------------
 
-    _relation_review_stores: Dict[str, RelationReviewStore] = {}
-    _relation_review_lock = threading.Lock()
+    _cc_label_stores: Dict[str, ColumnClusterStore] = {}
+    _cc_label_lock = threading.Lock()
 
-    def _relation_review_store(run_id: str) -> RelationReviewStore:
+    def _cc_store(run_id: str) -> ColumnClusterStore:
         rd = cache._safe_run_dir(run_id)
         if not rd.is_dir():
             raise HTTPException(404, f"run not found: {run_id}")
-        with _relation_review_lock:
-            store = _relation_review_stores.get(run_id)
+        with _cc_label_lock:
+            store = _cc_label_stores.get(run_id)
             if store is None:
-                store = RelationReviewStore(rd / "relation_reviews.jsonl")
-                _relation_review_stores[run_id] = store
+                store = ColumnClusterStore(rd / "column_clusters.jsonl")
+                _cc_label_stores[run_id] = store
             return store
 
-    @app.get("/api/runs/{run_id}/relation-reviews")
-    def list_relation_reviews(run_id: str) -> Dict[str, Any]:
-        store = _relation_review_store(run_id)
-        records = [r.model_dump(mode="json") for r in store.all()]
-        latest = {
-            rid: rec.model_dump(mode="json")
-            for rid, rec in store.latest_by_relation().items()
-        }
-        return {"records": records, "latest": latest}
+    def _load_drafts_for_column(
+        run_id: str, source: str, column: str,
+    ) -> List[Dict[str, Any]]:
+        """Return the latest LLM ``draft_clusters`` for a (source, column).
 
-    @app.post("/api/runs/{run_id}/relation-reviews")
-    def post_relation_review(
-        run_id: str,
-        payload: RelationReviewIn,
-    ) -> Dict[str, Any]:
-        if payload.decision == RelationReviewDecision.ADDED:
-            if payload.relation is None:
-                raise HTTPException(
-                    400,
-                    "decision=added requires a 'relation' snapshot in the body",
-                )
-            if not payload.relation.kind:
-                raise HTTPException(400, "relation.kind is required")
-            if not payload.relation.columns:
-                raise HTTPException(400, "relation.columns must be non-empty")
-        store = _relation_review_store(run_id)
-        record = store.append(payload)
-        return {
-            "record": record.model_dump(mode="json"),
-            "latest": {
-                rid: rec.model_dump(mode="json")
-                for rid, rec in store.latest_by_relation().items()
-            },
-        }
+        Reads ``<run_dir>/column_cluster_drafts.jsonl`` and applies
+        latest-wins (the file is append-only, so a later record for
+        the same (source, column) supersedes an earlier one). Returns
+        an empty list when the run has no draft file or no draft for
+        this pair. Each draft dict carries ``{values, canonical,
+        agreement, kind}`` -- the same shape persisted by
+        ``experiments.run_column_clustering``.
 
-    # ---------------------------------------------------------------
-    # Multi-table inconsistency labelling.
-    # Backed by ``<run_dir>/multi_table_labels.jsonl``. Each finding is
-    # keyed by ``violation_id`` (shared across the 1+ rows the LLM
-    # detector emitted for a single inconsistency); a single human
-    # verdict per finding is the source of truth, with full append-only
-    # history. Inputs are read from ``multi_table_violations.jsonl``,
-    # ``multi_table_groups.jsonl``, and ``multi_table_verifications.jsonl``
-    # written by the relation-discovery pipeline.
-    # ---------------------------------------------------------------
-
-    _mt_label_stores: Dict[str, MultiTableLabelStore] = {}
-    _mt_label_lock = threading.Lock()
-
-    def _mt_label_store(run_id: str) -> MultiTableLabelStore:
+        Used by:
+          * :func:`list_column_clusters` to surface drafts as queue
+            items in columns that have no labelled record yet.
+          * :func:`post_label` to lazily promote drafts to a real
+            record on the operator's first verdict.
+        """
         rd = cache._safe_run_dir(run_id)
-        if not rd.is_dir():
-            raise HTTPException(404, f"run not found: {run_id}")
-        with _mt_label_lock:
-            store = _mt_label_stores.get(run_id)
-            if store is None:
-                store = MultiTableLabelStore(rd / "multi_table_labels.jsonl")
-                _mt_label_stores[run_id] = store
-            return store
+        drafts_path = rd / "column_cluster_drafts.jsonl"
+        if not drafts_path.exists():
+            return []
+        found: Optional[List[Dict[str, Any]]] = None
+        try:
+            with drafts_path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if (rec.get("source") == source
+                            and rec.get("column") == column):
+                        found = rec.get("draft_clusters") or []
+        except OSError as exc:
+            logger.warning(
+                "_load_drafts_for_column: read failed: %s", exc,
+            )
+            return []
+        return found or []
 
-    def _read_multi_table_violations(
-        run_dir: Path,
-    ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, List[Dict[str, Any]]]]:
-        """Load ``multi_table_violations.jsonl`` and group per finding.
+    def _column_value_counts(
+        ctx: "RunContext", source: str, column: str,
+    ) -> Tuple[Dict[str, int], int]:
+        """Return ``(value -> count, n_rows)`` for one CSV column.
 
-        Returns ``(by_id, rows_by_id)`` where ``by_id`` is a dict from
-        ``violation_id`` to the *first* record seen (used for finding-
-        level metadata: kind, workbook, group_id, rationale) and
-        ``rows_by_id`` carries every record sharing that id (one per
-        affected (sheet, row) location, ordered as they appear on disk).
+        Empty strings (``""``) are excluded from the count map -- a
+        standardization cluster over a blank value is meaningless. The
+        empty-cell tally is still reflected in the returned ``n_rows``
+        for context.
         """
-        path = run_dir / "multi_table_violations.jsonl"
-        by_id: Dict[str, Dict[str, Any]] = {}
-        rows_by_id: Dict[str, List[Dict[str, Any]]] = {}
-        if not path.exists():
-            return by_id, rows_by_id
-        with path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except Exception:  # noqa: BLE001
-                    continue
-                vid = rec.get("violation_id")
-                if not vid:
-                    continue
-                rows_by_id.setdefault(vid, []).append(rec)
-                by_id.setdefault(vid, rec)
-        return by_id, rows_by_id
+        frame = ctx.load_frame(source)
+        if column not in frame.columns:
+            raise HTTPException(
+                404, f"column not found in {source}: {column}",
+            )
+        series = frame[column].astype(str)
+        n_rows = int(len(series))
+        counts: Dict[str, int] = {}
+        for val in series:
+            if val == "":
+                continue
+            counts[val] = counts.get(val, 0) + 1
+        return counts, n_rows
 
-    def _read_multi_table_verifications(
-        run_dir: Path,
-    ) -> Dict[str, Dict[str, Any]]:
-        """Load LLM verifier verdicts keyed by ``violation_id``. Latest
-        record per id wins (the writer already dedupes, but the read
-        path is defensive)."""
-        path = run_dir / "multi_table_verifications.jsonl"
-        out: Dict[str, Dict[str, Any]] = {}
-        if not path.exists():
-            return out
-        with path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except Exception:  # noqa: BLE001
-                    continue
-                vid = rec.get("violation_id")
-                if vid:
-                    out[vid] = rec
-        return out
-
-    def _read_multi_table_groups(run_dir: Path) -> Dict[Tuple[str, str], Dict[str, Any]]:
-        """Load resolved-group records keyed by ``(workbook, group_id)``.
-
-        Each line in ``multi_table_groups.jsonl`` is one workbook's full
-        resolver output (sheets + groups + column_mapping + primary_key).
-        We flatten it into a per-group lookup so the detail endpoint can
-        attach the group's column mapping + PK to a violation without
-        re-scanning the file each call.
-        """
-        path = run_dir / "multi_table_groups.jsonl"
-        out: Dict[Tuple[str, str], Dict[str, Any]] = {}
-        if not path.exists():
-            return out
-        with path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except Exception:  # noqa: BLE001
-                    continue
-                workbook = rec.get("workbook") or ""
-                for g in rec.get("groups") or []:
-                    gid = g.get("group_id") or ""
-                    out[(workbook, gid)] = {**g, "workbook": workbook}
-        return out
-
-    @app.get("/api/runs/{run_id}/multi-table-violations")
-    def list_multi_table_violations(
+    @app.get("/api/runs/{run_id}/inconsistency-columns")
+    def list_inconsistency_columns(
         run_id: str,
-        workbook: Optional[str] = None,
-        kind: Optional[str] = None,
-        status: Optional[str] = None,
-        limit: int = Query(500, ge=1, le=5000),
-        offset: int = Query(0, ge=0),
+        source: Optional[str] = None,
+        min_distinct: int = Query(2, ge=1),
+        # A column whose distinct-value ratio (n_distinct / n_rows)
+        # exceeds this is hidden. Defaults to ``1.0`` so every
+        # column with >= ``min_distinct`` distinct values surfaces
+        # for human review (matches the column-clustering driver,
+        # which sends them all to the LLM proposer). Lower the
+        # value to re-enable the historical PK / free-text guard.
+        max_distinct_ratio: float = Query(1.0, gt=0.0, le=1.0),
+        # Maximum total candidates returned in one response. Defaults
+        # generously; the UI is expected to scope by ``source``.
+        limit: int = Query(2000, ge=1, le=20000),
     ) -> Dict[str, Any]:
-        """Paginated index of multi-table findings.
+        """Enumerate candidate columns for standardization labelling.
 
-        One entry per ``violation_id`` (so multi-row findings collapse
-        to a single queue item). Each entry carries the LLM verifier's
-        verdict + the human verdict (if any) so the UI can drive its
-        filter dropdowns and queue rendering off this single response.
+        For each (source, column) the response carries:
+          * ``n_rows`` - total rows in the source.
+          * ``n_distinct`` - distinct non-empty values.
+          * ``top_values`` - up to 3 most-frequent values + counts
+            (so the UI can render a queue hint).
+          * ``status`` / ``n_clusters`` / ``annotator`` / ``ts`` from
+            the latest ``column_clusters.jsonl`` record, or
+            ``"unlabeled"`` when nothing has been written yet.
+
+        Cardinality filter: ``min_distinct`` excludes columns that
+        mathematically can't form a cluster (< 2 distinct values).
+        ``max_distinct_ratio`` defaults to ``1.0`` -- every other
+        column is surfaced for human review. Callers that want the
+        old PK / free-text guard can pass a lower value.
         """
         ctx = cache.get(run_id)
-        by_id, rows_by_id = _read_multi_table_violations(ctx.run_dir)
-        verifications = _read_multi_table_verifications(ctx.run_dir)
-        store = _mt_label_store(run_id)
-        latest = store.latest_by_violation()
+        store = _cc_store(run_id)
+        latest = store.latest_by_column()
+
+        # Build a (source, column) -> n_draft_clusters index from
+        # column_cluster_drafts.jsonl. Only a fraction of candidate
+        # columns actually produce non-empty drafts (~7% in practice),
+        # so the frontend's "Has draft" filter and the queue sort
+        # need this signal up front - otherwise the operator clicks
+        # through dozens of empty-draft columns before finding one
+        # the LLM had anything to say about. Returns an empty map if
+        # the file is missing (single-pass / non-adaptive runs).
+        n_draft_index: Dict[Tuple[str, str], int] = {}
+        try:
+            rd = ctx.run_dir
+            drafts_path = rd / "column_cluster_drafts.jsonl"
+            if drafts_path.exists():
+                with drafts_path.open("r", encoding="utf-8") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            d = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        s = d.get("source") or ""
+                        c = d.get("column") or ""
+                        if not s or not c:
+                            continue
+                        dc = d.get("draft_clusters") or []
+                        n_draft_index[(s, c)] = len(dc)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "inconsistency-columns: failed to index drafts: %s", exc,
+            )
+            n_draft_index = {}
 
         items: List[Dict[str, Any]] = []
-        kind_set: Dict[str, int] = {}
-        wb_set: Dict[str, int] = {}
-        for vid, rec in by_id.items():
-            wb_val = rec.get("workbook") or ""
-            kn = rec.get("kind") or ""
-            wb_set[wb_val] = wb_set.get(wb_val, 0) + 1
-            kind_set[kn] = kind_set.get(kn, 0) + 1
-            if workbook and wb_val != workbook:
+        sources = [source] if source else list(ctx.sources.keys())
+        for src in sources:
+            if src not in ctx.sources:
                 continue
-            if kind and kn != kind:
+            try:
+                frame = ctx.load_frame(src)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "inconsistency-columns: failed to load %s: %s",
+                    src, exc,
+                )
                 continue
-            human = latest.get(vid)
-            human_status = human.status.value if human else "unlabeled"
-            if status and status != human_status:
+            n_rows = int(len(frame))
+            if n_rows == 0:
                 continue
-            ver = verifications.get(vid) or {}
-            sheets = sorted({
-                str(r.get("sheet") or "") for r in rows_by_id.get(vid, [])
-            })
-            items.append({
-                "violation_id": vid,
-                "workbook": wb_val,
-                "group_id": rec.get("group_id") or "",
-                "group_kind": rec.get("group_kind") or "",
-                "kind": kn,
-                "sheets": sheets,
-                "n_rows": len(rows_by_id.get(vid, [])),
-                "columns": list(rec.get("columns") or []),
-                "llm_verdict": ver.get("verdict"),
-                "llm_confidence": ver.get("confidence"),
-                "label_status": human_status,
-                "label_ts": human.ts if human else None,
-                "label_annotator": human.annotator if human else None,
-                "note": human.note if human else "",
-            })
+            for col in frame.columns:
+                series = frame[col].astype(str)
+                counts: Dict[str, int] = {}
+                for val in series:
+                    if val == "":
+                        continue
+                    counts[val] = counts.get(val, 0) + 1
+                n_distinct = len(counts)
+                if n_distinct < min_distinct:
+                    continue
+                if n_rows > 0 and n_distinct / n_rows > max_distinct_ratio:
+                    continue
+                top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:3]
+                rec = latest.get((src, col))
+                # ``n_draft_clusters`` is the count of LLM-proposed
+                # candidate clusters for this column (0 means the LLM
+                # ran but didn't find anything, distinguishable from
+                # "no LLM pass ran at all" only via the run's overall
+                # drafts file existence -- which the queue payload
+                # doesn't surface).
+                n_drafts = n_draft_index.get((src, col), 0)
+                items.append({
+                    "source": src,
+                    "column": col,
+                    "n_rows": n_rows,
+                    "n_distinct": n_distinct,
+                    "top_values": [
+                        {"value": v, "count": c} for v, c in top
+                    ],
+                    "status": rec.status.value if rec else
+                        ColumnLabelStatus.UNLABELED.value,
+                    "n_clusters": len(rec.clusters) if rec else 0,
+                    "n_draft_clusters": n_drafts,
+                    "annotator": rec.annotator if rec else None,
+                    "ts": rec.ts if rec else None,
+                })
 
-        # Stable order: workbook, group, kind, vid (so the queue is
-        # deterministic across reloads).
+        # Stable order: unlabeled first (most actionable), then
+        # columns with at least one LLM-proposed cluster (so the
+        # operator lands on something the LLM actually flagged
+        # instead of scrolling through dozens of empty drafts),
+        # then by source / column.
+        order = {
+            ColumnLabelStatus.UNLABELED.value: 0,
+            ColumnLabelStatus.LABELED.value: 1,
+            ColumnLabelStatus.NO_INCONSISTENCY.value: 2,
+            ColumnLabelStatus.DROPPED_OVERLAPPING.value: 3,
+            ColumnLabelStatus.DROPPED_MESSY.value: 4,
+        }
         items.sort(key=lambda x: (
-            x["workbook"], x["group_id"], x["kind"], x["violation_id"],
+            order.get(x["status"], 99),
+            0 if x["n_draft_clusters"] > 0 else 1,
+            x["source"],
+            x["column"],
         ))
         total = len(items)
+        # Headline count of how many entries in the full queue
+        # carry an LLM-proposed cluster -- the frontend uses this
+        # to decide whether to surface a "with LLM draft" filter
+        # button.
+        total_with_draft = sum(
+            1 for it in items if it["n_draft_clusters"] > 0
+        )
         return {
             "total": total,
-            "offset": offset,
-            "limit": limit,
-            "items": items[offset: offset + limit],
-            "facets": {
-                "workbooks": sorted(wb_set.keys()),
-                "kinds": sorted(kind_set.keys()),
-            },
+            "total_with_draft": total_with_draft,
+            "items": items[:limit],
         }
 
-    @app.get("/api/runs/{run_id}/multi-table-violations/{violation_id}")
-    def get_multi_table_violation(
-        run_id: str, violation_id: str,
+    @app.get(
+        "/api/runs/{run_id}/columns/{source}/{column}/values"
+    )
+    def get_column_values(
+        run_id: str, source: str, column: str,
+        # When the column has thousands of distinct values, return
+        # only the top-N by frequency. The labelling UI shows them
+        # ordered; rare-tail singletons are surfaced via a separate
+        # tray in Slice 6.
+        limit: int = Query(500, ge=1, le=10000),
     ) -> Dict[str, Any]:
-        """Detail endpoint: every linked row + group context + verdict.
+        """Return distinct values + per-value counts for one column.
 
-        Returns the complete row contents (every column the CSV has,
-        not just the flagged ones) so the labeller can audit values
-        outside the LLM's narrow snapshot. ``ground_columns`` mirrors
-        the union of every row's CSV columns so the frontend can
-        align panels even when the two sheets have different schemas.
+        Used by the column-board frontend (Slice 6) to render the
+        clusterable value list. Empty cells are excluded from the
+        value list but counted in the ``n_empty`` summary so the
+        operator can tell whether the column has missing data.
         """
         ctx = cache.get(run_id)
-        by_id, rows_by_id = _read_multi_table_violations(ctx.run_dir)
-        rec = by_id.get(violation_id)
-        if rec is None:
-            raise HTTPException(404, f"violation not found: {violation_id}")
-        rows = rows_by_id.get(violation_id, [])
-
-        verifications = _read_multi_table_verifications(ctx.run_dir)
-        groups = _read_multi_table_groups(ctx.run_dir)
-        group = groups.get(
-            (rec.get("workbook") or "", rec.get("group_id") or ""),
-        )
-
-        # Resolve full row contents from the CSVs themselves so the
-        # labeller can see every column - not just the LLM's narrow
-        # snapshot. Falls back to the snapshot when the CSV cannot be
-        # loaded (deleted dataset, mismatched workbook, ...).
-        full_rows: List[Dict[str, Any]] = []
-        for r in rows:
-            sheet = r.get("sheet") or ""
-            row_idx = r.get("row")
-            full: Dict[str, Any] = {}
-            cols: List[str] = []
-            try:
-                if sheet and isinstance(row_idx, int):
-                    frame = ctx.load_frame(sheet)
-                    cols = list(frame.columns)
-                    if 0 <= row_idx < len(frame):
-                        for c in cols:
-                            full[c] = _scalar(frame.iat[row_idx, frame.columns.get_loc(c)])
-            except FileNotFoundError:
-                pass
-            except Exception as exc:  # noqa: BLE001 - defensive
-                logger.debug(
-                    "failed to load row %s:%s for violation %s: %s",
-                    sheet, row_idx, violation_id, exc,
-                )
-            # ``MultiTableViolation.values`` is the LLM-emitted
-            # snapshot of the flagged cells. Two shapes are written by
-            # the two strategies:
-            #   - compiler  : flat ``{<canonical>: <value>, "primary_key": [...]}``
-            #   - semantic  : ``{"evidence": ..., "kind_detail": ...,
-            #                    "row_snapshot": {<canonical>: <value>}}``
-            # The frontend expects a flat ``{column: value}`` map so it
-            # can render the cell when the full CSV row can't be loaded
-            # (deleted dataset, relations runs without ``csv_paths``,
-            # header_synonym findings with row=-1, ...). Normalise both
-            # shapes here, prefer the nested ``row_snapshot`` when
-            # present, and strip metadata keys (``primary_key`` is
-            # exposed under ``group``; ``evidence`` / ``kind_detail``
-            # are diagnostic only and not column values).
-            raw_values = dict(r.get("values") or {})
-            nested = raw_values.get("row_snapshot")
-            if isinstance(nested, dict) and nested:
-                snap_raw = dict(nested)
-            else:
-                snap_raw = {
-                    k: v for k, v in raw_values.items()
-                    if k not in {"evidence", "kind_detail",
-                                 "row_snapshot", "primary_key"}
-                }
-            full_rows.append({
-                "sheet": sheet,
-                "row": row_idx,
-                "columns": cols,
-                "values": full,
-                "snapshot": snap_raw,
-                "flagged_columns": list(r.get("columns") or []),
-                "linked": list(r.get("linked") or []),
-            })
-
-        # Union of all columns across rows so the UI can stack panels.
-        # Mapping (canonical -> per-sheet raw column name) lets the
-        # frontend align the comparison even when the two sheets use
-        # different headers for the same logical attribute.
-        column_mapping: Dict[str, Dict[str, str]] = {}
-        primary_key: List[str] = []
-        if group is not None:
-            for canonical, entries in (group.get("column_mapping") or {}).items():
-                column_mapping[canonical] = {
-                    e.get("sheet") or "": e.get("column") or ""
-                    for e in entries or []
-                }
-            primary_key = list(group.get("primary_key") or [])
-
-        store = _mt_label_store(run_id)
-        human = store.latest_for(violation_id)
-        history = store.history(violation_id)
-        ver = verifications.get(violation_id) or {}
-
+        if source not in ctx.sources:
+            raise HTTPException(404, f"source not found: {source}")
+        counts, n_rows = _column_value_counts(ctx, source, column)
+        items = [
+            {"value": v, "count": c}
+            for v, c in sorted(
+                counts.items(), key=lambda kv: (-kv[1], kv[0]),
+            )
+        ]
+        n_empty = n_rows - sum(counts.values())
         return {
-            "violation_id": violation_id,
-            "workbook": rec.get("workbook") or "",
-            "group_id": rec.get("group_id") or "",
-            "group_kind": rec.get("group_kind") or "",
-            "kind": rec.get("kind") or "",
-            "rationale": rec.get("rationale") or "",
-            "rows": full_rows,
-            "group": {
-                "primary_key": primary_key,
-                "column_mapping": column_mapping,
-                "rationale": (group or {}).get("rationale") or "",
-                "sheets": list((group or {}).get("sheets") or []),
-            } if group else None,
-            "llm_verdict": {
-                "verdict": ver.get("verdict"),
-                "confidence": ver.get("confidence"),
-                "rationale": ver.get("rationale"),
-            } if ver else None,
-            "label": human.model_dump(mode="json") if human else None,
+            "source": source,
+            "column": column,
+            "n_rows": n_rows,
+            "n_empty": n_empty,
+            "n_distinct": len(counts),
+            "values": items[:limit],
+            "truncated": len(items) > limit,
+        }
+
+    @app.get(
+        "/api/runs/{run_id}/columns/{source}/{column}/clusters"
+    )
+    def get_column_clusters(
+        run_id: str, source: str, column: str,
+    ) -> Dict[str, Any]:
+        """Return the latest column-clusters record for (source, column).
+
+        ``record`` is ``null`` when nothing has been written yet.
+        ``history`` carries every append-only record for the (source,
+        column) pair in write order (oldest first).
+        """
+        store = _cc_store(run_id)
+        latest = store.latest_for(source, column)
+        history = store.history(source, column)
+        return {
+            "record": latest.model_dump(mode="json") if latest else None,
             "history": [h.model_dump(mode="json") for h in history],
         }
 
-    @app.post("/api/runs/{run_id}/multi-table-labels")
-    def post_multi_table_label(
-        run_id: str, payload: MultiTableLabelIn,
+    @app.post(
+        "/api/runs/{run_id}/columns/{source}/{column}/clusters"
+    )
+    def post_column_clusters(
+        run_id: str, source: str, column: str,
+        payload: ColumnClustersIn,
     ) -> Dict[str, Any]:
-        """Record a human verdict on a multi-table finding.
+        """Write a column-clusters record.
 
-        The ``violation_id`` MUST exist in the run's
-        ``multi_table_violations.jsonl`` - the server validates against
-        the file rather than blindly accepting any id, so a stale or
-        forged id can't poison the store.
+        The path's ``source`` / ``column`` win over the payload's --
+        the frontend sends them in the body for convenience but the
+        URL is the source of truth. Cluster invariants are enforced
+        by :class:`ColumnClustersIn`'s validators; this handler
+        additionally validates that every clustered value actually
+        appears in the column (so a stale draft can't poison the
+        record).
         """
         ctx = cache.get(run_id)
-        by_id, _ = _read_multi_table_violations(ctx.run_dir)
-        if payload.violation_id not in by_id:
+        if source not in ctx.sources:
+            raise HTTPException(404, f"source not found: {source}")
+        # Validate that values referenced by clusters exist in the
+        # column. We don't validate the count fields against the
+        # actual count -- the human/LLM annotator may quote a stale
+        # count from a draft; the scorer joins against the live CSV
+        # anyway. But if a value isn't in the column at all the
+        # record is unusable downstream.
+        counts, _ = _column_value_counts(ctx, source, column)
+        unknown: List[str] = []
+        for cl in payload.clusters:
+            for cv in cl.values:
+                if cv.value not in counts:
+                    unknown.append(cv.value)
+        if unknown:
             raise HTTPException(
-                404, f"violation not found: {payload.violation_id}",
+                400,
+                f"values not present in {source}/{column}: "
+                f"{unknown[:5]}{'...' if len(unknown) > 5 else ''}",
             )
 
-        store = _mt_label_store(run_id)
-        # Echo metadata from the violation record into the label so
-        # the JSONL is self-describing (no need to cross-reference
-        # violations.jsonl when consuming labels downstream).
-        rec = by_id[payload.violation_id]
-        record = MultiTableLabel(
-            violation_id=payload.violation_id,
-            workbook=payload.workbook or rec.get("workbook") or "",
-            group_id=payload.group_id or rec.get("group_id") or "",
-            kind=payload.kind or rec.get("kind") or "",
+        store = _cc_store(run_id)
+        record = ColumnClusters(
+            source=source,
+            column=column,
             status=payload.status,
-            note=payload.note or "",
+            drop_reason=payload.drop_reason,
+            clusters=payload.clusters,
+            note=payload.note,
             annotator=(
                 (payload.annotator or annotator).strip() or annotator
             ),
         )
         saved = store.append(record)
         return {
-            "label": saved.model_dump(mode="json"),
+            "record": saved.model_dump(mode="json"),
             "history": [
                 h.model_dump(mode="json")
-                for h in store.history(payload.violation_id)
+                for h in store.history(source, column)
             ],
         }
 
-    @app.get("/api/runs/{run_id}/multi-table-labels")
-    def list_multi_table_labels(run_id: str) -> Dict[str, Any]:
-        """All multi-table labels written for this run (full history +
-        latest-per-violation roll-up)."""
-        store = _mt_label_store(run_id)
-        latest = {
-            vid: rec.model_dump(mode="json")
-            for vid, rec in store.latest_by_violation().items()
-        }
-        records = [r.model_dump(mode="json") for r in store.all()]
-        return {"records": records, "latest": latest}
+    @app.get(
+        "/api/runs/{run_id}/columns/{source}/{column}/draft"
+    )
+    def get_column_draft(
+        run_id: str, source: str, column: str,
+    ) -> Dict[str, Any]:
+        """Return the LLM-proposed draft clusters for (source, column).
 
-    @app.get("/api/runs/{run_id}/stats")
-    def stats(run_id: str) -> Dict[str, Any]:
+        Reads ``<run_dir>/column_cluster_drafts.jsonl`` (written by
+        ``experiments.run_column_clustering``). When the run has no
+        draft file, or no draft for this column, returns
+        ``{"draft": null}``. When multiple drafts exist for the same
+        (source, column), latest-wins (the file is append-only).
+        """
+        rd = cache._safe_run_dir(run_id)
+        if not rd.is_dir():
+            raise HTTPException(404, f"run not found: {run_id}")
+        drafts_path = rd / "column_cluster_drafts.jsonl"
+        if not drafts_path.exists():
+            return {"draft": None}
+        found: Optional[Dict[str, Any]] = None
+        try:
+            with drafts_path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except Exception:  # noqa: BLE001 - skip malformed
+                        continue
+                    if (rec.get("source") == source
+                            and rec.get("column") == column):
+                        found = rec
+        except OSError as exc:
+            logger.warning("get_column_draft: read failed: %s", exc)
+            return {"draft": None}
+        return {"draft": found}
+
+    # ------------------------------------------------------------------
+    # Column endpoints with the action *before* the column name + a
+    # ``{column:path}`` converter so the column can contain literal
+    # slashes (e.g. "Project Name/Description"). Starlette decodes
+    # ``%2F`` to ``/`` before path matching, so the original routes
+    # of the form ``.../{column}/<action>`` 404 on columns with a
+    # slash. These aliases mount the *same* handlers under a path
+    # shape that places ``column`` as the trailing path segment.
+    # The original routes are kept for backward compatibility.
+    # ------------------------------------------------------------------
+
+    @app.get("/api/runs/{run_id}/columns/{source}/values/{column:path}")
+    def get_column_values_alias(
+        run_id: str, source: str, column: str,
+        limit: int = Query(500, ge=1, le=10000),
+    ) -> Dict[str, Any]:
+        return get_column_values(run_id, source, column, limit)
+
+    @app.get("/api/runs/{run_id}/columns/{source}/clusters/{column:path}")
+    def get_column_clusters_alias(
+        run_id: str, source: str, column: str,
+    ) -> Dict[str, Any]:
+        return get_column_clusters(run_id, source, column)
+
+    @app.post("/api/runs/{run_id}/columns/{source}/clusters/{column:path}")
+    def post_column_clusters_alias(
+        run_id: str, source: str, column: str,
+        payload: ColumnClustersIn,
+    ) -> Dict[str, Any]:
+        return post_column_clusters(run_id, source, column, payload)
+
+    @app.get("/api/runs/{run_id}/columns/{source}/draft/{column:path}")
+    def get_column_draft_alias(
+        run_id: str, source: str, column: str,
+    ) -> Dict[str, Any]:
+        return get_column_draft(run_id, source, column)
+
+    @app.get("/api/runs/{run_id}/column-clusters")
+    def list_column_clusters(
+        run_id: str,
+        source: Optional[str] = None,
+        status: Optional[str] = None,
+        include_drafts: bool = True,
+        limit: int = Query(5000, ge=1, le=20000),
+    ) -> Dict[str, Any]:
+        """Flatten every saved column-cluster into queue-ready items.
+
+        One JSON object per ``StdCluster`` across every (source,
+        column) record in ``column_clusters.jsonl``. Each item carries
+        the data the cell-level label page needs to:
+          * render a queue row (source, column, kind, n_values),
+          * paint the CSV (full ``values`` list + canonical),
+          * render the right pane (kind, canonical, agreement, llm
+            suggestion if drafted), and
+          * route a TP/FP/Partial/Unsure/Skip verdict back through
+            ``POST /labels`` (synthetic ``target_id``).
+
+        The verdict (``label_status``) is joined from the labels
+        store so the queue dot color is consistent with cell-level
+        clusters on first paint - no extra fetch needed.
+
+        When ``include_drafts`` is true (the default), LLM-proposed
+        draft clusters are *also* surfaced for columns whose
+        ``column_clusters.jsonl`` record is missing or not in the
+        ``labeled`` state. Synthetic items use ``c{idx+1}`` local
+        ids matching the draft order and carry
+        ``draft_pending: true``. The first verdict on such an item
+        lazy-promotes the column's full draft list to a real
+        record (see ``post_label``'s COLUMN_CLUSTER branch) so the
+        cluster_id assignment stays deterministic.
+
+        Filters:
+          * ``source`` - exact CSV basename match.
+          * ``status`` - one of ``unlabeled``/``tp``/``fp``/``partial``
+            /``unsure``/``skip`` (matches the joined verdict).
+          * ``include_drafts`` - set to ``false`` to hide unsaved
+            drafts (matches the legacy behavior).
+        """
         ctx = cache.get(run_id)
-        latest = ctx.store.latest_by_target()
+        store = _cc_store(run_id)
+        latest_records = store.latest_by_column()
+        label_index = ctx.store.latest_by_target()
 
-        def _bucket(cluster_ids: List[str]) -> LabelStats:
-            counts = {"tp": 0, "fp": 0, "partial": 0, "unsure": 0, "skip": 0, "unlabeled": 0}
-            for cid in cluster_ids:
-                label = latest.get(cid)
-                key = label.status.value if label else "unlabeled"
-                counts[key] = counts.get(key, 0) + 1
-            return LabelStats(total=len(cluster_ids), **counts)
+        # Pre-load draft clusters so we can attach the agreement /
+        # canonical-suggestion to each saved cluster whose value-set
+        # matches a draft cluster's value-set. The match key is the
+        # ``frozenset`` of cluster values (canonical-agnostic) - the
+        # operator may have chosen a different canonical than the
+        # LLM did but the cluster's *identity* is the value-set.
+        # We deliberately don't surface drafts here that were never
+        # saved into a record (see endpoint docstring).
+        draft_lookup: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+        try:
+            drafts_path = ctx.run_dir / "column_cluster_drafts.jsonl"
+            if drafts_path.exists():
+                with drafts_path.open("r", encoding="utf-8") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            d = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        key = (d.get("source") or "", d.get("column") or "")
+                        if not key[0] or not key[1]:
+                            continue
+                        draft_lookup[key] = d.get("draft_clusters") or []
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("list_column_clusters: draft index failed: %s", exc)
+            draft_lookup = {}
 
-        by_source: Dict[str, List[str]] = {}
-        all_ids: List[str] = []
-        for c in ctx.clusters:
-            cid = c.get("cluster_id")
-            if not cid:
+        items: List[Dict[str, Any]] = []
+        for (src, col), rec in latest_records.items():
+            if source and src != source:
                 continue
-            all_ids.append(cid)
-            by_source.setdefault(c.get("source", ""), []).append(cid)
+            # Only surface clusters from records the operator actively
+            # *labelled* (status=labeled). Records flagged
+            # no_inconsistency / dropped_* by the operator carry no
+            # clusters anyway, so this is mostly defensive.
+            if rec.status != ColumnLabelStatus.LABELED:
+                continue
+            drafts = draft_lookup.get((src, col), [])
+            for cl in rec.clusters:
+                target_id = column_cluster_target_id(src, col, cl.cluster_id)
+                lbl = label_index.get(target_id)
+                label_status = (
+                    lbl.status.value if lbl is not None else "unlabeled"
+                )
+                if status and label_status != status:
+                    continue
+                # Match this cluster's value-set against the LLM draft
+                # to surface the LLM's proposed canonical + agreement.
+                # Use frozenset so the order doesn't matter.
+                value_set = frozenset(cv.value for cv in cl.values)
+                llm_canonical: Optional[str] = None
+                llm_agreement: Optional[float] = None
+                llm_kind: Optional[str] = None
+                llm_target_style: Optional[str] = None
+                for dc in drafts:
+                    dvs = frozenset(dc.get("values") or [])
+                    if dvs == value_set:
+                        llm_canonical = dc.get("canonical")
+                        llm_agreement = dc.get("agreement")
+                        llm_kind = dc.get("kind")
+                        ts = dc.get("target_style")
+                        llm_target_style = ts if isinstance(ts, str) and ts else None
+                        break
+                items.append({
+                    "target_id": target_id,
+                    "source": src,
+                    "column": col,
+                    "cluster_local_id": cl.cluster_id,
+                    "kind": cl.kind.value,
+                    "canonical_value": cl.canonical_value,
+                    "values": [
+                        {"value": cv.value, "count": cv.count}
+                        for cv in cl.values
+                    ],
+                    "n_values": len(cl.values),
+                    "annotator": rec.annotator,
+                    "ts": rec.ts,
+                    "label_status": label_status,
+                    "label_note": (lbl.note if lbl else ""),
+                    "label_confirmed_canonical": (
+                        lbl.confirmed_canonical if lbl else None
+                    ),
+                    "label_value_corrections": (
+                        dict(lbl.value_corrections) if lbl and lbl.value_corrections else {}
+                    ),
+                    "llm_canonical": llm_canonical,
+                    "llm_agreement": llm_agreement,
+                    "llm_kind": llm_kind,
+                    "llm_target_style": llm_target_style,
+                    "from_draft": llm_canonical is not None,
+                    "draft_pending": False,
+                    "is_col_cluster": True,
+                    "error_types": ["inconsistency"],
+                })
+                if len(items) >= limit:
+                    break
+            if len(items) >= limit:
+                break
 
-        # Cell-level FN counts. We tally only the *latest* state per
-        # cell key, so re-labelling a cell as FP doesn't double-count.
-        # Cells that are simultaneously TP via cluster are reported as
-        # ``shadowed`` so the operator sees the double-labelling.
-        fn_total = 0
-        fn_shadowed = 0
-        fn_by_source: Dict[str, int] = {}
-        # Build a quick (source,row,col) -> cluster-state lookup so we
-        # can detect shadowing without re-scanning every cluster.
-        covered: Dict[tuple, str] = {}
-        for c in ctx.clusters:
-            cid = c.get("cluster_id", "")
-            lab = latest.get(cid)
-            if lab is None or lab.target != LabelTarget.CLUSTER:
-                continue
-            st = lab.status.value
-            if st not in ("tp", "partial"):
-                continue
-            row = c.get("row")
-            if not isinstance(row, int):
-                continue
-            for col in (c.get("columns") or []):
-                covered[(c.get("source", ""), row, col)] = st
-        for lab in latest.values():
-            if lab.target != LabelTarget.CELL or lab.status != LabelStatus.FN:
-                continue
-            if lab.row is None or not lab.column:
-                continue
-            fn_total += 1
-            fn_by_source[lab.source] = fn_by_source.get(lab.source, 0) + 1
-            if (lab.source, int(lab.row), lab.column) in covered:
-                fn_shadowed += 1
+        # Surface LLM drafts as queue items for columns whose record
+        # is missing or not in the ``labeled`` state. The synthetic
+        # ``target_id`` uses ``c{idx+1}`` matching the draft order so
+        # the lazy-promotion in ``post_label`` lines up. Drafts in
+        # columns that ARE labelled are skipped here -- they only
+        # participate as a cross-reference for the LLM hint (handled
+        # above) since their value-sets are already represented by
+        # the saved clusters.
+        if include_drafts and len(items) < limit:
+            labeled_columns: set = {
+                (src, col)
+                for (src, col), rec in latest_records.items()
+                if rec.status == ColumnLabelStatus.LABELED
+            }
+            for (src, col), drafts in draft_lookup.items():
+                if source and src != source:
+                    continue
+                if (src, col) in labeled_columns:
+                    continue
+                for idx, dc in enumerate(drafts, start=1):
+                    raw_values = dc.get("values") or []
+                    # Normalise to {value, count} dicts. Drafts written
+                    # by ``run_column_clustering`` may store plain
+                    # strings; backfill count=1 so the frontend's
+                    # ``data-raw`` paint path still finds the cell.
+                    norm_values: List[Dict[str, Any]] = []
+                    for v in raw_values:
+                        if isinstance(v, dict):
+                            val = v.get("value")
+                            cnt = v.get("count") or 1
+                        else:
+                            val = v
+                            cnt = 1
+                        if not isinstance(val, str) or not val:
+                            continue
+                        norm_values.append({"value": val, "count": int(cnt)})
+                    if len(norm_values) < 2:
+                        continue
+                    local_id = f"c{idx}"
+                    target_id = column_cluster_target_id(src, col, local_id)
+                    lbl = label_index.get(target_id)
+                    label_status = (
+                        lbl.status.value if lbl is not None else "unlabeled"
+                    )
+                    if status and label_status != status:
+                        continue
+                    canonical = dc.get("canonical") or dc.get("canonical_value")
+                    seen = {nv["value"] for nv in norm_values}
+                    if canonical not in seen:
+                        canonical = None
+                    ts = dc.get("target_style")
+                    target_style = ts if isinstance(ts, str) and ts else None
+                    items.append({
+                        "target_id": target_id,
+                        "source": src,
+                        "column": col,
+                        "cluster_local_id": local_id,
+                        "kind": dc.get("kind") or "untagged",
+                        "canonical_value": canonical,
+                        "values": norm_values,
+                        "n_values": len(norm_values),
+                        "annotator": None,
+                        "ts": None,
+                        "label_status": label_status,
+                        "label_note": (lbl.note if lbl else ""),
+                        "label_confirmed_canonical": (
+                            lbl.confirmed_canonical if lbl else None
+                        ),
+                        "label_value_corrections": (
+                            dict(lbl.value_corrections) if lbl and lbl.value_corrections else {}
+                        ),
+                        "llm_canonical": canonical,
+                        "llm_agreement": dc.get("agreement"),
+                        "llm_kind": dc.get("kind") or "untagged",
+                        "llm_target_style": target_style,
+                        "from_draft": True,
+                        "draft_pending": True,
+                        "is_col_cluster": True,
+                        "error_types": ["inconsistency"],
+                    })
+                    if len(items) >= limit:
+                        break
+                if len(items) >= limit:
+                    break
+        # Stable order: source, column, then cluster_local_id. The
+        # frontend re-bins by source for the sidebar groups, but a
+        # deterministic order keeps the queue snapshot stable
+        # across reloads.
+        items.sort(key=lambda it: (it["source"], it["column"], it["cluster_local_id"]))
+        return {"items": items, "total": len(items)}
 
+    @app.get("/api/runs/{run_id}/column-cluster-stats")
+    def column_cluster_stats(run_id: str) -> Dict[str, Any]:
+        """Dashboard summary: per-status counts of (source, column) pairs.
+
+        Only counts pairs that have an explicit record. The frontend
+        derives ``inconsistency_columns_total`` (the queue size) from
+        the ``/inconsistency-columns`` listing, not this endpoint.
+        """
+        store = _cc_store(run_id)
+        latest = store.latest_by_column()
+        by_status: Dict[str, int] = {}
+        n_clusters_total = 0
+        for rec in latest.values():
+            by_status[rec.status.value] = by_status.get(rec.status.value, 0) + 1
+            n_clusters_total += len(rec.clusters)
         return {
-            "overall": _bucket(all_ids).model_dump(),
-            "by_source": {src: _bucket(ids).model_dump() for src, ids in by_source.items()},
-            "fn": {
-                "total": fn_total,
-                "shadowed": fn_shadowed,
-                "by_source": fn_by_source,
-            },
+            "labelled_columns": len(latest),
+            "by_status": by_status,
+            "n_clusters_total": n_clusters_total,
         }
 
     @app.get("/api/runs/{run_id}/labeling-effort")
@@ -2880,6 +4467,68 @@ def create_app(
             kept.append(cell)
         return kept
 
+    def _materialize_inconsistency_cells_for_export(
+        ctx: "RunContext",
+    ) -> List[Any]:
+        """Cache-only inconsistency benchmark cells for the live
+        export endpoints.
+
+        Same materialiser the offline
+        ``experiments.export_inconsistency_benchmark_with_llm`` CLI
+        uses, but with ``dry_run=True`` and ``llm_client=None`` so
+        the request handler never spends LLM dollars: every prompt
+        is looked up in ``inconsistency_llm_cache.jsonl`` and any
+        groups without a cache hit fall back to either the operator's
+        saved ``value_corrections`` (authoritative) or the cluster-
+        rescue null-emit path. Returns ``[]`` if the run has no
+        inconsistency artifacts (no ``column_cluster_drafts.jsonl``
+        or no TP/unsure column-cluster verdicts).
+
+        Failures are swallowed and logged: a partial export (typo
+        cells only) is strictly better than failing the download.
+        """
+        try:
+            return materialize_inconsistency_benchmark(
+                ctx.run_dir, dry_run=True, llm_client=None,
+            )
+        except Exception:  # noqa: BLE001 - export must never crash on bad cache.
+            logger.exception(
+                "[export] inconsistency materialisation failed for "
+                "run %s; falling back to typo-only cells",
+                ctx.run_dir.name,
+            )
+            return []
+
+    @app.get("/api/runs/{run_id}/export/conflicts")
+    def export_conflicts(run_id: str) -> Dict[str, Any]:
+        """Pre-export sanity check: groups of (source, column,
+        original_value) cells whose ``label`` verdicts disagree.
+
+        Runs against the SAME materialised benchmark the
+        :func:`export_benchmark` endpoint would emit (including the
+        same exclusion filter), so what the UI shows here is exactly
+        the conflict set the operator's downloaded JSONL would carry.
+
+        Empty ``conflicts`` => safe to export. Each conflict group
+        carries the (source, column, original_value) triple, the
+        distinct labels involved, and a per-cell list (row, label,
+        corrected_value, cluster_ids, note) so the UI can let the
+        operator jump straight to each offending cell.
+        """
+        ctx = cache.get(run_id)
+        cells = materialize_label_benchmark(
+            ctx.clusters, ctx.store,
+            value_resolver=_make_value_resolver(ctx),
+            cell_note_overrides=ctx.cell_notes_store.active_overrides(),
+        )
+        # Inconsistency cells share the (source, row, column,
+        # original_value) key space so any divergent labels across
+        # the typo and inconsistency pipelines surface here too.
+        cells.extend(_materialize_inconsistency_cells_for_export(ctx))
+        cells = _apply_exclusions_to_cells(ctx, cells)
+        conflicts = find_label_conflicts(cells)
+        return {"conflicts": conflicts}
+
     @app.get("/api/runs/{run_id}/export/benchmark")
     def export_benchmark(run_id: str) -> FileResponse:
         ctx = cache.get(run_id)
@@ -2889,7 +4538,12 @@ def create_app(
         cells = materialize_label_benchmark(
             ctx.clusters, ctx.store,
             value_resolver=_make_value_resolver(ctx),
+            cell_note_overrides=ctx.cell_notes_store.active_overrides(),
         )
+        # Append cache-only inconsistency cells so column-cluster-only
+        # runs (where ``clusters.json`` is empty) still get a populated
+        # benchmark from this single endpoint.
+        cells.extend(_materialize_inconsistency_cells_for_export(ctx))
         cells = _apply_exclusions_to_cells(ctx, cells)
         out_path = ctx.run_dir / "benchmark.jsonl"
         tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
@@ -2929,7 +4583,17 @@ def create_app(
         buckets = materialize_label_benchmark_by_error_type(
             ctx.clusters, ctx.store,
             value_resolver=_make_value_resolver(ctx),
+            cell_note_overrides=ctx.cell_notes_store.active_overrides(),
         )
+        # Fold inconsistency cells in under the natural bucket key.
+        # Their ``error_types=["inconsistency"]`` means they always
+        # land in a single slot; cells with empty error_types would
+        # land in ``_uncategorized`` but the inconsistency exporter
+        # never emits such cells.
+        for inc_cell in _materialize_inconsistency_cells_for_export(ctx):
+            for et in (inc_cell.error_types or ["_uncategorized"]):
+                slug = _slug_for_error_type(et)
+                buckets.setdefault(slug, []).append(inc_cell)
         # Reuse cell-level filter on each bucket; cells are object
         # instances shared across buckets but the filter is
         # idempotent so the duplication is harmless.
@@ -3009,7 +4673,15 @@ def create_app(
         buckets = materialize_label_benchmark_by_error_type(
             ctx.clusters, ctx.store,
             value_resolver=_make_value_resolver(ctx),
+            cell_note_overrides=ctx.cell_notes_store.active_overrides(),
         )
+        # Mirror the per-type bundle: inconsistency cells fold in
+        # under the bucket key derived from their error_types so the
+        # single-type endpoint also serves them.
+        for inc_cell in _materialize_inconsistency_cells_for_export(ctx):
+            for et in (inc_cell.error_types or ["_uncategorized"]):
+                inc_slug = _slug_for_error_type(et)
+                buckets.setdefault(inc_slug, []).append(inc_cell)
         rows = buckets.get(slug)
         # Apply exclusions BEFORE the empty-bucket 404, so a bucket
         # that only ever held excluded cells now correctly returns 404
@@ -3071,6 +4743,14 @@ def create_app(
         normalised frame the rest of the labelling backend uses, so
         the cell coordinates inside the sanitised file still align
         with ``original_value`` recorded in the benchmark.
+
+        The ZIP preserves each source's directory structure relative
+        to the longest path prefix all sources share - so e.g. a run
+        targeting ``data/<corpus>/<workbook>/<sheet>.csv`` for many
+        workbooks is bundled as ``<workbook>/<sheet>.csv``. When all
+        sources share no ancestor above the basename (single-source
+        runs, or sources scattered across unrelated trees), the bundle
+        falls back to flat basenames.
         """
         ctx = cache.get(run_id)
         actives = ctx.exclusions_store.active()
@@ -3093,6 +4773,53 @@ def create_app(
                     if c is not None:
                         bucket.add(str(c))
 
+        # Build the per-source arcname map. We prefer paths relative
+        # to the deepest directory all in-bundle sources share, so the
+        # zip retains the meaningful corpus layout (e.g.
+        # ``<workbook>/<sheet>.csv``) without leaking absolute paths.
+        # When the common ancestor would degenerate to "no shared
+        # parent" (e.g. mixed corpora) we fall back to the raw basename
+        # so the export still succeeds.
+        included = [
+            (source, src_path)
+            for source, src_path in sorted(ctx.sources.items())
+            if source not in excluded_files
+        ]
+        try:
+            resolved_paths = [p.resolve() for _, p in included]
+        except OSError:
+            resolved_paths = [Path(p) for _, p in included]
+        common_prefix: Optional[Path] = None
+        if len(resolved_paths) >= 2:
+            try:
+                common_str = os.path.commonpath(
+                    [str(p) for p in resolved_paths]
+                )
+                cp = Path(common_str)
+                # Only use the ancestor when it's a proper directory
+                # above the files. ``commonpath`` returns a parent dir
+                # for distinct files; if it equals one of the paths we
+                # have a degenerate single-file case.
+                if cp.is_dir() and not any(p == cp for p in resolved_paths):
+                    common_prefix = cp
+            except ValueError:
+                # Mixed drive letters / unrelated trees - fall back.
+                common_prefix = None
+
+        def _arcname(src_path: Path, source: str) -> str:
+            if common_prefix is not None:
+                try:
+                    rp = src_path.resolve()
+                    rel = rp.relative_to(common_prefix)
+                    rel_str = rel.as_posix()
+                    # Defence in depth: never let a resolved path
+                    # escape the prefix (symlink games, etc.).
+                    if not rel_str.startswith("..") and rel_str:
+                        return rel_str
+                except (OSError, ValueError):
+                    pass
+            return source
+
         out_dir = ctx.run_dir / "sanitised_sources"
         out_dir.mkdir(parents=True, exist_ok=True)
         zip_path = ctx.run_dir / f"sanitised_sources_{run_id}.zip"
@@ -3100,9 +4827,8 @@ def create_app(
         with zipfile.ZipFile(
             tmp_zip, "w", compression=zipfile.ZIP_DEFLATED
         ) as zf:
-            for source, src_path in sorted(ctx.sources.items()):
-                if source in excluded_files:
-                    continue
+            for source, src_path in included:
+                arcname = _arcname(src_path, source)
                 drop_rows = per_source_rows.get(source) or set()
                 drop_cols = per_source_cols.get(source) or set()
                 if not drop_rows and not drop_cols:
@@ -3110,7 +4836,7 @@ def create_app(
                     # encoding / quoting / mixed dtypes survive.
                     if not src_path.exists():
                         continue
-                    zf.write(src_path, arcname=source)
+                    zf.write(src_path, arcname=arcname)
                     continue
                 # Row / column exclusions: re-emit via the loaded frame
                 # so the dropped slices line up with the indices the
@@ -3130,13 +4856,16 @@ def create_app(
                 # Materialise the sanitised frame to disk first so
                 # zipfile can stream its bytes; the directory is
                 # reused on every export so it doubles as an
-                # inspectable artefact under <run_dir>.
-                out_path = out_dir / source
+                # inspectable artefact under <run_dir>. Use the same
+                # arcname-relative layout on disk as in the zip so an
+                # operator browsing the run dir sees the full corpus
+                # structure, not flat basenames.
+                out_path = out_dir / arcname
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
                 frame.to_csv(tmp_path, index=False)
                 os.replace(tmp_path, out_path)
-                zf.write(out_path, arcname=source)
+                zf.write(out_path, arcname=arcname)
         os.replace(tmp_zip, zip_path)
         return FileResponse(
             zip_path,
@@ -3225,223 +4954,57 @@ def create_app(
     # Compare runs (cell-level bucket diff between two runs)
     # =====================================================================
 
-    @app.get("/api/compare")
-    def compare_summary(
-        run_a: str = Query(..., description="Run id A"),
-        run_b: str = Query(..., description="Run id B"),
-    ) -> Dict[str, Any]:
-        """Per-bucket overlap table + source alignment for two runs.
-
-        Does not return the per-cell diff list (that endpoint is
-        paginated separately) so this stays cheap to call from the
-        UI's run-picker preview.
-        """
-        if run_a == run_b:
-            raise HTTPException(400, "run_a and run_b must differ")
-        diff = _get_diff(run_a, run_b)
-        return {
-            "run_a": run_a,
-            "run_b": run_b,
-            "n_a_issues": diff["n_a_issues"],
-            "n_b_issues": diff["n_b_issues"],
-            "n_diff_cells": diff["n_diff_cells"],
-            "sources": diff["sources"],
-            "by_bucket": diff["by_bucket"],
-        }
-
-    @app.get("/api/compare/cells")
-    def compare_cells(
-        run_a: str = Query(...),
-        run_b: str = Query(...),
-        side: Optional[str] = Query(None, description="a_only | b_only | both"),
-        bucket: Optional[str] = Query(None),
-        source: Optional[str] = Query(None),
-        offset: int = Query(0, ge=0),
-        limit: int = Query(50, ge=1, le=500),
-    ) -> Dict[str, Any]:
-        """Paginated diff cells, optionally filtered by side/bucket/source."""
-        if run_a == run_b:
-            raise HTTPException(400, "run_a and run_b must differ")
-        diff = _get_diff(run_a, run_b)
-        cells = diff["diff_cells"]
-        if side:
-            if side not in ("a_only", "b_only", "both"):
-                raise HTTPException(400, f"invalid side: {side!r}")
-            cells = [c for c in cells if c["side"] == side]
-        if bucket:
-            cells = [c for c in cells if bucket in (c.get("buckets") or [c.get("bucket")])]
-        if source:
-            cells = [c for c in cells if c["source"] == source]
-        total = len(cells)
-        page = cells[offset:offset + limit]
-        return {
-            "run_a": run_a,
-            "run_b": run_b,
-            "total": total,
-            "offset": offset,
-            "limit": limit,
-            "cells": page,
-        }
-
-    @app.get("/api/compare/cell")
-    def compare_cell(
-        run_a: str = Query(...),
-        run_b: str = Query(...),
-        source: str = Query(...),
-        row: int = Query(..., ge=0),
-        column: str = Query(...),
-    ) -> Dict[str, Any]:
-        """All issues from both runs for a single cell (drawer detail)."""
-        if run_a == run_b:
-            raise HTTPException(400, "run_a and run_b must differ")
-        from experiments.compare_runs import diff_cell_detail
-        a_dir = _run_dir_or_404(run_a)
-        b_dir = _run_dir_or_404(run_b)
-        try:
-            return diff_cell_detail(a_dir, b_dir,
-                                    source=source, row=row, column=column)
-        except FileNotFoundError as exc:
-            raise HTTPException(404, str(exc)) from exc
-
-    # =====================================================================
-    # Launcher
-    # =====================================================================
-
-    @app.get("/api/launcher/config")
-    def launcher_config() -> Dict[str, Any]:
-        defaults = load_config_defaults(project_root)
-        # Relation-discovery prompt: surface the subset of error types
-        # for which we have a discovery template, so the UI can filter
-        # the chip list down to multi-column / multi-row / multi-table
-        # types only.
-        relations_types: List[str] = []
-        relations_type_scopes: Dict[str, str] = {}
-        try:
-            import yaml
-            disc_path = project_root / "prompts" / "discover_relations.yaml"
-            if disc_path.is_file():
-                raw = yaml.safe_load(disc_path.read_text(encoding="utf-8")) or {}
-                types_node = raw.get("types") or {}
-                if isinstance(types_node, dict):
-                    relations_types = sorted(types_node.keys())
-                    # Surface per-type scope so the launcher chip can
-                    # show a tooltip explaining that ``table`` types
-                    # only fire on multi-sheet workbooks.
-                    for et_key, et_node in types_node.items():
-                        if isinstance(et_node, dict):
-                            scope = str(et_node.get("scope") or "row")
-                            relations_type_scopes[et_key] = scope
-        except Exception:  # noqa: BLE001
-            relations_types = []
-            relations_type_scopes = {}
-        return {
-            "project_root": str(project_root),
-            "defaults": defaults,
-            "error_types": load_taxonomy_keys(project_root),
-            "relations_error_types": relations_types,
-            "relations_error_type_scopes": relations_type_scopes,
-            "datasets": list_datasets(project_root / "data"),
-            "scopes": ["single-column", "multi-column", "multi-row", "multi-table"],
-            "column_modes": ["auto", "single", "all"],
-            "modes": ["single", "adaptive"],
-            "reasoning_efforts": ["low", "medium", "high"],
-            "gt_modes": ["fixed", "adaptive"],
-        }
-
-    @app.get("/api/launcher/jobs")
-    def list_jobs() -> Dict[str, Any]:
-        return {"jobs": [j.to_dict() for j in jobs.list()]}
-
-    @app.post("/api/launcher/jobs")
-    def launch_job(payload: Dict[str, Any]) -> Dict[str, Any]:
-        kind = (payload.get("kind") or "detection").lower()
-        params = payload.get("params") or {}
-        try:
-            if kind == "detection":
-                job = jobs.launch_detection(params)
-            elif kind == "report":
-                run_id = payload.get("run_id")
-                if not run_id:
-                    raise HTTPException(400, "run_id is required for kind=report")
-                try:
-                    job = jobs.launch_report(run_id)
-                except FileNotFoundError as exc:
-                    raise HTTPException(404, str(exc)) from exc
-            elif kind in ("curate", "curate_tables", "curate_pbi"):
-                # Unified curate launcher; legacy kind aliases preserved
-                # so old UI builds and any saved client requests still work.
-                job = jobs.launch_curate(params)
-            elif kind == "relations":
-                job = jobs.launch_relations(params)
-            elif kind == "relation_report":
-                run_id = payload.get("run_id")
-                if not run_id:
-                    raise HTTPException(400, "run_id is required for kind=relation_report")
-                try:
-                    job = jobs.launch_relation_report(run_id)
-                except FileNotFoundError as exc:
-                    raise HTTPException(404, str(exc)) from exc
-            elif kind == "relation_validation":
-                run_id = payload.get("run_id")
-                if not run_id:
-                    raise HTTPException(400, "run_id is required for kind=relation_validation")
-                try:
-                    job = jobs.launch_relation_validation(run_id, params=params)
-                except FileNotFoundError as exc:
-                    raise HTTPException(404, str(exc)) from exc
-            elif kind == "column_verify":
-                run_id = payload.get("run_id")
-                if not run_id:
-                    raise HTTPException(400, "run_id is required for kind=column_verify")
-                try:
-                    job = jobs.launch_column_verify(run_id, params=params)
-                except FileNotFoundError as exc:
-                    raise HTTPException(404, str(exc)) from exc
-            else:
-                raise HTTPException(400, f"unknown kind: {kind}")
-        except (FileNotFoundError, ValueError) as exc:
-            raise HTTPException(400, str(exc)) from exc
-        return job.to_dict()
-
-    @app.get("/api/launcher/jobs/{job_id}")
-    def get_job(job_id: str) -> Dict[str, Any]:
-        job = jobs.get(job_id)
-        if job is None:
-            raise HTTPException(404, f"job not found: {job_id}")
-        return job.to_dict()
-
-    @app.get("/api/launcher/jobs/{job_id}/log")
-    def get_job_log(
-        job_id: str,
-        offset: int = Query(0, description="Byte offset; use next_offset to tail."),
-    ) -> Dict[str, Any]:
-        try:
-            return jobs.read_log(job_id, offset=offset)
-        except KeyError as exc:
-            raise HTTPException(404, f"job not found: {job_id}") from exc
-
-    @app.post("/api/launcher/jobs/{job_id}/cancel")
-    def cancel_job(job_id: str) -> Dict[str, Any]:
-        job = jobs.cancel(job_id)
-        if job is None:
-            raise HTTPException(404, f"job not found: {job_id}")
-        return job.to_dict()
-
-    @app.delete("/api/launcher/jobs/{job_id}")
-    def delete_job(job_id: str) -> Dict[str, Any]:
-        try:
-            jobs.delete(job_id)
-        except KeyError as exc:
-            raise HTTPException(404, f"job not found: {job_id}") from exc
-        except ValueError as exc:
-            raise HTTPException(409, str(exc)) from exc
-        return {"ok": True, "job_id": job_id}
-
     # =====================================================================
     # Static UI + root
     # =====================================================================
 
-    app.mount("/ui", StaticFiles(directory=str(static_dir), html=True), name="ui")
+    class _NoCacheHTMLStaticFiles(StaticFiles):
+        """StaticFiles subclass that forces revalidation on HTML responses.
+
+        HTML files anchor every other static asset on the page (script and
+        link tags with cache-bust query strings). If the browser pins a
+        stale HTML, it loads stale JS/CSS without the new query strings
+        and never picks up new code.
+
+        For ``.html`` (and the bare directory index) we send
+        ``Cache-Control: no-cache`` so the browser must revalidate with
+        the server on every load. ETag-based 304s mean revalidation is
+        cheap when the file hasn't changed. Other assets keep their
+        default headers (ETag + Last-Modified, no Cache-Control), which
+        is fine because cache-bust query strings invalidate them.
+        """
+
+        async def get_response(self, path, scope):  # type: ignore[override]
+            response = await super().get_response(path, scope)
+            try:
+                # Detect HTML by the actual served content-type rather than
+                # the request path; that way directory indexes (path="")
+                # and any other indirect paths also pick up the header.
+                content_type = response.headers.get("content-type", "").lower()
+                # Also force revalidation on the JS/CSS bundles. The
+                # cache-bust query strings in index.html cover the *first*
+                # load of a new build, but operators frequently keep a tab
+                # open across deploys; without an explicit Cache-Control
+                # the browser may reuse the cached label.js indefinitely
+                # (until the tab is hard-refreshed). ETag-based 304s keep
+                # the revalidation cost negligible when the file is
+                # unchanged.
+                if (
+                    content_type.startswith("text/html")
+                    or content_type.startswith("text/javascript")
+                    or content_type.startswith("application/javascript")
+                    or content_type.startswith("text/css")
+                ):
+                    response.headers["Cache-Control"] = "no-cache, must-revalidate"
+            except Exception:  # pragma: no cover - defensive
+                pass
+            return response
+
+    app.mount(
+        "/ui",
+        _NoCacheHTMLStaticFiles(directory=str(static_dir), html=True),
+        name="ui",
+    )
 
     @app.get("/")
     def root() -> RedirectResponse:
@@ -3461,23 +5024,33 @@ def _cluster_summary(c: Mapping[str, Any]) -> Dict[str, Any]:
     if isinstance(syn, Mapping):
         primary = syn.get("primary_error_type")
     error_types = list(c.get("error_types") or [])
-    # For row_duplication clusters, surface the duplicate-group row
-    # list (union of every detection's ``affected_rows`` plus the
-    # primary row) so the queue panel can show "rows: 5, 12, 27" at
-    # a glance instead of forcing the operator to open each cluster
-    # and scan the context table.
+    # Surface the union of every detection's ``affected_rows`` plus
+    # the primary row so the queue panel can show "rows: 5, 12, 27"
+    # at a glance instead of forcing the operator to open each
+    # cluster and scan the context table. Originally this was only
+    # populated for ``row_duplication`` clusters; relation rules
+    # (string_calculation_inconsistency, FD, etc.) also fire on many
+    # rows but collapse to ONE cluster after the per-incident
+    # aggregation in ``compile_code_violations``, so the same
+    # affected-rows surface is what tells the labeller "this single
+    # TP click covers N rows".
     affected_rows: List[int] = []
-    if "row_duplication" in error_types:
-        seen: set = set()
-        primary_row = c.get("row")
-        if isinstance(primary_row, (int, float)):
-            seen.add(int(primary_row))
-        for d in c.get("detections") or []:
-            for r in (d.get("affected_rows") or []) if isinstance(d, Mapping) else []:
-                try:
-                    seen.add(int(r))
-                except (TypeError, ValueError):
-                    continue
+    seen: set = set()
+    primary_row = c.get("row")
+    if isinstance(primary_row, (int, float)):
+        seen.add(int(primary_row))
+    for d in c.get("detections") or []:
+        if not isinstance(d, Mapping):
+            continue
+        for r in d.get("affected_rows") or ():
+            try:
+                seen.add(int(r))
+            except (TypeError, ValueError):
+                continue
+    # Only surface when there are MORE rows than just the primary;
+    # singleton clusters get an empty list so the existing UI guards
+    # (`affected_rows.length > 1`) keep their meaning.
+    if len(seen) > 1:
         affected_rows = sorted(seen)
     # Verdict / strategy: row_duplication clusters carry these on
     # each detection. We surface the strongest verdict (duplicate
@@ -3527,7 +5100,3 @@ def _cluster_summary(c: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _scalar(v: Any) -> str:
-    if v is None:
-        return ""
-    return str(v)

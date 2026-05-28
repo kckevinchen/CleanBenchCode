@@ -85,6 +85,8 @@ def register(app: FastAPI, ctx: RouterContext) -> None:
                 job = jobs.launch_curate(params)
             elif kind == "relations":
                 job = jobs.launch_relations(params)
+            elif kind == "relation_detection":
+                job = jobs.launch_relation_detection(params)
             elif kind == "relation_report":
                 run_id = payload.get("run_id")
                 if not run_id:
@@ -107,6 +109,14 @@ def register(app: FastAPI, ctx: RouterContext) -> None:
                     raise HTTPException(400, "run_id is required for kind=column_verify")
                 try:
                     job = jobs.launch_column_verify(run_id, params=params)
+                except FileNotFoundError as exc:
+                    raise HTTPException(404, str(exc)) from exc
+            elif kind == "web_verify":
+                run_id = payload.get("run_id")
+                if not run_id:
+                    raise HTTPException(400, "run_id is required for kind=web_verify")
+                try:
+                    job = jobs.launch_web_verify(run_id, params=params)
                 except FileNotFoundError as exc:
                     raise HTTPException(404, str(exc)) from exc
             else:

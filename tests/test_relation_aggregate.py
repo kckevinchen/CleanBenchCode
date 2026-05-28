@@ -1,4 +1,4 @@
-"""Tests for src.core.relation_aggregate: paraphrase-merging via LLM.
+"""Tests for src.core.relations.aggregate: paraphrase-merging via LLM.
 
 Uses a stub LLM that yields canned JSON responses so we can drive
 the aggregation pipeline deterministically.
@@ -14,7 +14,7 @@ import pandas as pd
 import pytest
 
 from src.core.llm_client import LLMResponse
-from src.core.relation_aggregate import (
+from src.core.relations.aggregate import (
     AggregationOutcome,
     AggregationPromptConfig,
     AggregationResult,

@@ -1,10 +1,10 @@
-"""Tests for ``src.core.multi_row_priors``."""
+"""Tests for ``src.core.row_dup.priors``."""
 
 from __future__ import annotations
 
 import pandas as pd
 
-from src.core.multi_row_priors import (
+from src.core.row_dup.priors import (
     DuplicateSubset,
     IdentityConflict,
     MultiRowPriors,

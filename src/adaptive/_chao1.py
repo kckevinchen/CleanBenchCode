@@ -99,7 +99,7 @@ def frequency_of_frequencies(
 
     * **Interpretation A (Bernoulli per pass)** -- ``r`` is the number
       of passes (out of ``num_runs``) that observed the species. Used
-      by :mod:`src.core.relation_adaptive` and
+      by :mod:`src.core.relations.adaptive` and
       :mod:`src.adaptive.inner_loop` where a "pass" is one LLM call
       and the question is "did the species appear at least once in
       this pass?". Under this interpretation ``r`` is bounded by

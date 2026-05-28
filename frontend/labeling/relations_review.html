@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'" />
+  <title>Relation review</title>
+  <script src="./viewport-zoom.js"></script>
+  <link rel="stylesheet" href="./styles.css?v=2" />
+  <style>
+    /* Slim review layout: sidebar filters + queue · center detail. */
+    body.review-mode { display:grid; grid-template-columns: 320px 1fr; grid-template-rows: auto 1fr; min-height:100vh; }
+    body.review-mode header { grid-column: 1 / 3; }
+    body.review-mode .sidebar { border-right:1px solid var(--border,#2a2f3a); overflow:auto; }
+    body.review-mode .center { padding: 16px 24px; overflow:auto; }
+    .review-queue .qitem { border:1px solid var(--border,#2a2f3a); border-radius:6px; padding:8px 10px; margin:6px 0; cursor:pointer; }
+    .review-queue .qitem:hover { background:rgba(255,255,255,0.04); }
+    .review-queue .qitem.active { border-color:#7aa2f7; background:rgba(122,162,247,0.08); }
+    .review-queue .qitem .kind { font-weight:600; font-size:0.85em; }
+    .review-queue .qitem .columns { font-size:0.78em; color:#9aa3b8; }
+    .review-queue .qitem .pred { font-size:0.82em; margin-top:4px; opacity:0.9; }
+    .review-queue .qitem .meta { display:flex; gap:6px; align-items:center; margin-top:4px; font-size:0.75em; }
+    .verdict-pill { padding:1px 6px; border-radius:8px; font-size:0.7em; text-transform:uppercase; letter-spacing:0.04em; }
+    .verdict-pill.approved { background:rgba(46,160,67,0.18); color:#3fb950; }
+    .verdict-pill.rejected { background:rgba(248,81,73,0.18); color:#f85149; }
+    .verdict-pill.added    { background:rgba(167,139,250,0.18); color:#c4b5fd; }
+    .verdict-pill.cleared  { background:rgba(255,255,255,0.08); color:#9aa3b8; }
+    .verdict-pill.unreviewed { background:rgba(255,255,255,0.04); color:#737a8c; }
+    .detail-card { border:1px solid var(--border,#2a2f3a); border-radius:8px; padding:14px 16px; max-width:980px; }
+    .detail-card h2 { margin:0 0 8px 0; font-size:1.1em; }
+    .detail-card .row { margin:6px 0; }
+    .detail-card .label { display:inline-block; min-width:110px; color:#9aa3b8; font-size:0.85em; }
+    .detail-card pre.predicate { white-space:pre-wrap; background:rgba(255,255,255,0.04); padding:8px; border-radius:4px; font-size:0.9em; }
+    .actions-row { display:flex; gap:8px; margin-top:14px; flex-wrap:wrap; }
+    .actions-row button { padding:6px 14px; border-radius:6px; border:1px solid var(--border,#2a2f3a); background:transparent; color:inherit; cursor:pointer; font-size:0.9em; }
+    .actions-row button.approve { border-color:#3fb950; color:#3fb950; }
+    .actions-row button.approve:hover, .actions-row button.approve.active { background:rgba(46,160,67,0.18); }
+    .actions-row button.reject { border-color:#f85149; color:#f85149; }
+    .actions-row button.reject:hover, .actions-row button.reject.active { background:rgba(248,81,73,0.18); }
+    .actions-row button.clear:hover { background:rgba(255,255,255,0.06); }
+    .counts-bar { font-size:0.8em; color:#9aa3b8; padding:6px 0; }
+    .filter-stack { display:flex; flex-direction:column; gap:10px; padding:10px 12px; }
+    .filter-stack label { font-size:0.78em; color:#9aa3b8; display:block; }
+    .filter-stack select, .filter-stack input[type="text"] { width:100%; padding:5px 7px; background:rgba(255,255,255,0.04); border:1px solid var(--border,#2a2f3a); color:inherit; border-radius:4px; }
+    .verification { font-size:0.85em; }
+    .pass-rate-good { color:#3fb950; }
+    .pass-rate-mid { color:#d29922; }
+    .pass-rate-bad { color:#f85149; }
+    .empty-note { color:#737a8c; padding:30px; text-align:center; }
+    .sample-rows pre { white-space:pre-wrap; background:rgba(255,255,255,0.03); padding:6px; border-radius:4px; font-size:0.78em; margin:4px 0; }
+  </style>
+</head>
+<body class="review-mode">
+  <header>
+    <div class="title">
+      <h1><a href="./" style="color:inherit;">Data-cleaning workbench</a> <span class="muted">· review relations</span></h1>
+      <div class="meta" id="run-meta">loading…</div>
+    </div>
+    <div class="actions">
+      <a href="./">← Runs</a>
+      <a id="launch-detect-link" href="./?tab=launch&prefill=relation_detection" title="Launch the violation-detection step using these review decisions">Launch detection →</a>
+    </div>
+  </header>
+
+  <aside class="sidebar" id="sidebar">
+    <div class="filter-stack">
+      <div>
+        <label for="filter-layer">Layer</label>
+        <select id="filter-layer">
+          <option value="auto" selected>auto (aggregated &gt; originals)</option>
+          <option value="aggregated">aggregated</option>
+          <option value="originals">originals</option>
+        </select>
+      </div>
+      <div>
+        <label for="filter-error-type">Error type</label>
+        <select id="filter-error-type"><option value="">(all)</option></select>
+      </div>
+      <div>
+        <label for="filter-verdict">Verdict</label>
+        <select id="filter-verdict">
+          <option value="" selected>(all)</option>
+          <option value="unreviewed">unreviewed</option>
+          <option value="approved">approved</option>
+          <option value="rejected">rejected</option>
+          <option value="added">added</option>
+          <option value="cleared">cleared</option>
+        </select>
+      </div>
+      <div>
+        <label for="filter-search">Search predicate / columns</label>
+        <input id="filter-search" type="text" placeholder="" />
+      </div>
+      <div class="counts-bar" id="counts-bar">—</div>
+    </div>
+    <div class="review-queue" id="queue"></div>
+  </aside>
+
+  <main class="center" id="center">
+    <div id="detail"><div class="empty-note">Select a relation on the left.</div></div>
+  </main>
+
+  <script type="module" src="./relations_review.js"></script>
+</body>
+</html>

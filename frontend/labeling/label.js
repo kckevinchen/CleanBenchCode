@@ -68,23 +68,56 @@ const state = {
   // without re-walking ``items``.
   //   columnAuditCellLookup: Map<"src\x00col\x00row", auditItem>
   columnAuditCellLookup: new Map(),
+  // Per-cell note overrides. Keyed by "${source}\x00${row}\x00${column}".
+  // Hydrated once at bootstrap from GET /cell-notes; mutated locally
+  // after every POST so the detail pane re-renders see the latest
+  // value without a round-trip. Empty (absent) entries mean "use the
+  // enclosing cluster's note".
+  cellNoteOverrides: new Map(),
 };
 
 const CSV_WINDOW = 80; // rows above/below the target row
 
-const $ = (sel) => document.querySelector(sel);
-
-async function api(path, options = {}) {
-  const res = await fetch(path, {
-    headers: { "content-type": "application/json" },
-    ...options,
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => res.statusText);
-    throw new Error(`${res.status} ${text}`);
+// Cap unbounded caches so a long labelling session doesn't bloat
+// browser memory. Both Maps are insertion-ordered in JS, so we can
+// trim from the front (oldest entry) on overflow. Numbers chosen so
+// the operator's recent navigation window is always cached but we
+// don't accumulate hundreds of MB of CSV slices over a session.
+//   * csvCache: each entry is a slice of ~161 rows × ~10 cols of
+//     raw cell data. 64 slices ≈ 100k cell strings, well-bounded.
+//   * cellState: each entry is a per-source ``/cells`` map. The
+//     operator typically toggles between 1-3 sources at a time;
+//     20 source-caches covers heavy multi-source sessions.
+const CSV_CACHE_MAX = 64;
+const CELL_STATE_MAX = 20;
+function _trimMap(map, max) {
+  if (map.size <= max) return;
+  // ``map.keys()`` yields insertion order; delete oldest until under cap.
+  const drop = map.size - max;
+  let i = 0;
+  for (const k of map.keys()) {
+    if (i >= drop) break;
+    map.delete(k);
+    i += 1;
   }
-  return res.json();
 }
+// Hoist key into MRU position: delete + reinsert. Used by hot lookups
+// so caches behave like an LRU rather than a fixed FIFO window.
+function _touchKey(map, key) {
+  if (!map.has(key)) return;
+  const v = map.get(key);
+  map.delete(key);
+  map.set(key, v);
+}
+
+import { $, api, escapeHtml } from "./shared/utils.js";
+
+// label.js historically had two near-identical helpers (``escape`` and
+// ``escapeAttr``); both forward to the shared escapeHtml so call sites
+// don't need touching. The single helper is OWASP-safe for both text
+// and attribute contexts.
+const escape = escapeHtml;
+const escapeAttr = escapeHtml;
 
 function toast(msg, ms = 1500) {
   const el = $("#toast");
@@ -115,6 +148,43 @@ const CLUSTER_TO_MT_STATUS = {
   // ``skip`` intentionally omitted: not a valid MT verdict.
 };
 function isMtItem(item) { return !!(item && item.is_mt); }
+// FN cell items are operator-marked false negatives surfaced as
+// first-class queue rows. The synthetic ``cluster_id`` is
+// ``fn:<source>:<row>:<column>`` so the queue's selection /
+// navigation machinery (which keys off ``cluster_id``) keeps working
+// without a special case beyond the ``is_fn`` dispatch in
+// ``selectIndex``.
+function isFnItem(item) { return !!(item && item.is_fn); }
+function fnQueueCid(source, row, col) {
+  return `fn:${source}:${row}:${col}`;
+}
+
+// Multi-column intra-row error types whose detections name a
+// violated cross-column relation. We surface the relation kind +
+// the columns it spans next to each detection in the detail pane so
+// the labeller does not need to parse free-form explanation text to
+// know what rule the row is being judged against.
+const MULTI_COL_RELATION_TYPES = new Set([
+  "fd_violation",
+  "row_calculation_inconsistency",
+  "string_calculation_inconsistency",
+]);
+const RELATION_KIND_LABEL = {
+  fd_violation: "Functional dependency",
+  row_calculation_inconsistency: "Arithmetic relation",
+  string_calculation_inconsistency: "String composition rule",
+};
+
+// Column-cluster items are inconsistency clusters surfaced from
+// ``column_clusters.jsonl`` (per-(source, column) value-clusters).
+// They render in the same queue as cell-level clusters, with the
+// same TP/FP/Partial/Unsure/Skip verdict vocabulary; the verdict
+// persists as a Label with target=column_cluster. The synthetic
+// ``cluster_id`` is the server-provided ``target_id`` (built by
+// ``column_cluster_target_id`` server-side) so the queue's
+// selection/navigation keys off it the same way as cell-level
+// clusters.
+function isColClusterItem(item) { return !!(item && item.is_col_cluster); }
 
 // ----------------------------------------------------------- multi-select filter widget
 //
@@ -268,6 +338,20 @@ async function bootstrap() {
   const run = await api(`${API}`);
   state.run = run;
 
+  // Hydrate per-cell note overrides once so the cluster detail pane
+  // can render saved per-cell notes synchronously without a fetch
+  // per cluster. Mutated in place after every POST.
+  try {
+    const r = await api(`${API}/cell-notes`);
+    for (const o of r.overrides || []) {
+      state.cellNoteOverrides.set(
+        `${o.source}\x00${o.row}\x00${o.column}`, o.note || "",
+      );
+    }
+  } catch (e) {
+    console.warn("cell-note overrides hydrate failed:", e);
+  }
+
   document.getElementById("export-link").href = `${API}/export/benchmark`;
   // The per-type bundle anchor is optional - older cached copies of
   // label.html don't have it. Avoid blowing up bootstrap when the JS
@@ -407,6 +491,22 @@ async function bootstrap() {
   if (run.counts?.multi_table_findings && !ets.includes("inter_table_inconsistency")) {
     ets.push("inter_table_inconsistency");
   }
+  // Operator-marked FN cells carry a synthetic ``false_negative``
+  // error_type for the same reason - so the filter dropdown can
+  // narrow the queue to just FN cells when the operator wants to
+  // review their own contributions. Always include this option (FN
+  // cells can be added at any time during labeling) rather than
+  // making it conditional on a count from ``run.counts``.
+  if (!ets.includes("false_negative")) {
+    ets.push("false_negative");
+  }
+  // ``inconsistency`` is the canonical error_type for column-cluster
+  // items merged in from /column-clusters. Always offer the filter
+  // facet so the operator can isolate them even before they've
+  // saved any clusters (the option just yields an empty set then).
+  if (!ets.includes("inconsistency")) {
+    ets.push("inconsistency");
+  }
   ets.sort();
   buildMultiFilter($("#filter-error-type"), [{
     options: ets.map((et) => ({ value: et, label: et })),
@@ -469,6 +569,10 @@ async function bootstrap() {
 
   setupColumnAuditBulkButton();
   setupAuditProgressCancel();
+  setupAddClusterModal();
+  setupBatchCorrectionsModal();
+  setupIdentifyTrivialModal();
+  setupExportConflictGuard();
   // Reconstruct in-flight column-audit job state from the launcher
   // BEFORE kicking off the progress poller so the per-row controls
   // know whether to show the progress bar on first paint.
@@ -766,6 +870,20 @@ async function postExclusion(body) {
       body: JSON.stringify(body),
     });
     await refreshExclusions();
+    // The server auto-flips overlapping tp/partial cluster labels
+    // to ``skip`` (see ``_auto_skip_for_exclusion`` in app.py); pull
+    // the fresh queue so the status dots reflect the new labels
+    // without needing a page reload.
+    await refreshQueue({ keepSelection: true });
+    // CSV grid colouring lives in ``state.cellState`` (a positive
+    // per-cell cache populated by ``/cells``). The auto-skip cascade
+    // changes cell verdicts server-side, so the cache is now stale -
+    // force-refresh it for the affected CSV so the cells repaint
+    // (e.g. green TP -> grey SKIP) without the operator having to
+    // re-open the file.
+    if (body && body.source) {
+      await refreshCellStateForSource(body.source);
+    }
     toast("excluded");
   } catch (e) {
     toast(`exclude failed: ${e.message}`, 3000);
@@ -774,11 +892,51 @@ async function postExclusion(body) {
 
 async function deleteExclusion(id) {
   if (!id) return;
+  // Capture which source the exclusion belongs to BEFORE the delete
+  // wipes it from ``state.exclusions``, so we can refresh that CSV's
+  // cell-state cache afterwards (the server appends UNLABELED
+  // tombstones to undo the auto-skips, but the local cache won't
+  // pick that up until we re-fetch /cells).
+  let affectedSource = null;
+  for (const [src, bucket] of (state.exclusions || new Map())) {
+    if (bucket.csv === id) { affectedSource = src; break; }
+    for (const exId of bucket.rows.values()) {
+      if (exId === id) { affectedSource = src; break; }
+    }
+    if (affectedSource) break;
+    for (const exId of bucket.cols.values()) {
+      if (exId === id) { affectedSource = src; break; }
+    }
+    if (affectedSource) break;
+  }
   try {
     await api(`${API}/exclusions/${encodeURIComponent(id)}`, { method: "DELETE" });
     await refreshExclusions();
+    // Mirrors postExclusion: the server appends UNLABELED
+    // tombstones for any cluster it auto-skipped on POST, so the
+    // queue must be re-fetched to drop those clusters back to
+    // "unlabeled".
+    await refreshQueue({ keepSelection: true });
+    if (affectedSource) {
+      await refreshCellStateForSource(affectedSource);
+    }
   } catch (e) {
     toast(`undo failed: ${e.message}`, 3000);
+  }
+}
+
+// Force-pull ``/cells`` for ``source`` and repaint the CSV grid if it's
+// currently focused. Used after exclude/un-exclude and any other
+// out-of-band write that may have flipped per-cell verdicts server
+// side (e.g. row-cascade skip propagation triggered by the auto-skip
+// hook in ``app.py``).
+async function refreshCellStateForSource(source) {
+  if (!source) return;
+  try {
+    await loadCellState(source, { force: true });
+    if (state.currentSource === source) repaintCellStates(source);
+  } catch (_) {
+    // Soft failure: the next interaction will lazy-reload.
   }
 }
 
@@ -1367,6 +1525,117 @@ function cssEscape(v) {
    * char that isn't [a-zA-Z0-9_-]. Sufficient for our column names
    * (which legitimately contain spaces, dots, slashes etc.). */
   return String(v).replace(/[^A-Za-z0-9_-]/g, (c) => `\\${c}`);
+}
+
+// Scroll a CSV-viewer-scoped target (a <td> or <tr>) to the centre of
+// the viewer WITHOUT bubbling up to the document / body / center grid
+// item.
+//
+// Why not just call ``target.scrollIntoView({ block: "center" })``?
+// Per the CSS Overflow spec, ``overflow: hidden`` containers are still
+// programmatically scrollable - ``scrollIntoView`` walks every
+// scrollable ancestor (html, body, .center) and scrolls each one.
+// Combined with the CSS ``zoom`` applied by viewport-zoom.js on small
+// screens, the bubbled scroll can land non-zero on the documentElement
+// and push the entire labelling UI off-screen, making the CSV pane
+// look like it has disappeared (the user has no scrollbar to scroll it
+// back because the ancestor's ``overflow: hidden`` hides the bar but
+// programmatic scroll already moved it).
+//
+// We compute the target's position relative to the viewer from
+// getBoundingClientRect (both rects are in the same coordinate space,
+// so their difference is consistent under CSS zoom) and set scrollTop
+// / scrollLeft on the viewer directly. No ancestor is touched.
+function scrollCellIntoViewerCentre(viewer, target, opts) {
+  if (!viewer || !target) return;
+  // Default to instant scroll. ``behavior: "smooth"`` animates the
+  // viewer's scrollTop over ~250ms, and during the animation the
+  // sticky ``<thead>`` inside the table can briefly fail to repaint
+  // at top: 0 in some Chromium builds - the operator sees the column-
+  // header row flicker out of view (especially on a hard refresh,
+  // when the smooth-scroll request fires before fonts / table layout
+  // are fully settled). Instant scroll lands the target in one paint,
+  // sidestepping the race entirely. Callers that want the animation
+  // can opt in via ``opts.smooth = true``.
+  const smooth = !!(opts && opts.smooth === true);
+  const vRect = viewer.getBoundingClientRect();
+  const tRect = target.getBoundingClientRect();
+  // Read the resolved CSS zoom on the documentElement (set by
+  // viewport-zoom.js). getBoundingClientRect returns POST-zoom visual
+  // pixels in Chromium / WebKit, but viewer.scrollTop and clientHeight
+  // are in CSS pixels (pre-zoom for the viewer's content), so we
+  // divide the visual delta by the zoom factor to land in CSS pixels.
+  // Firefox returns CSS pixels for getBoundingClientRect under
+  // ``zoom``, in which case zoom=1 effectively (the visual delta
+  // already matches scrollTop's space). To stay robust on both, we
+  // detect zoom from the ``--workbench-zoom`` custom property the
+  // script publishes; if it's missing (zoom=1) the division is a
+  // no-op.
+  const zoomStr =
+    document.documentElement.style.getPropertyValue("--workbench-zoom");
+  const zoom = parseFloat(zoomStr) || 1;
+  // Sticky ``<thead>`` covers the top of the viewer; account for its
+  // height so the target lands in the visible-below-thead area rather
+  // than the dead zone behind the column-name row. Without this, a
+  // cell whose natural position is near the very top of the table
+  // can land directly under the sticky thead and look "missing".
+  const headEl = viewer.querySelector("thead");
+  const headHeight = headEl ? headEl.getBoundingClientRect().height : 0;
+  // Effective viewer centre = vRect.top + headHeight + (vRect.height - headHeight) / 2
+  //                         = vRect.top + (vRect.height + headHeight) / 2
+  // Delta = (target centre) - (effective centre), all in visual px.
+  const deltaY =
+    (tRect.top + tRect.height / 2
+      - (vRect.top + (vRect.height + headHeight) / 2)) / zoom;
+  const deltaX =
+    (tRect.left + tRect.width / 2 - (vRect.left + vRect.width / 2)) / zoom;
+  const maxTop = Math.max(0, viewer.scrollHeight - viewer.clientHeight);
+  const maxLeft = Math.max(0, viewer.scrollWidth - viewer.clientWidth);
+  const top = Math.min(maxTop, Math.max(0, viewer.scrollTop + deltaY));
+  const left = Math.min(maxLeft, Math.max(0, viewer.scrollLeft + deltaX));
+  // ``scrollTo`` with a behavior option degrades to instant if the
+  // browser doesn't recognise it, so this is safe everywhere.
+  viewer.scrollTo({
+    top,
+    left,
+    behavior: smooth ? "smooth" : "auto",
+  });
+  // Defence-in-depth: if anything else (a stray scrollIntoView, an
+  // input.focus(), a popover that lands off-screen) has leaked a
+  // scrollTop onto html / body / .center, snap them back. These
+  // containers MUST stay at scrollTop=0 - they're the grid frame, not
+  // a scroll surface.
+  resetGridScroll();
+}
+
+// Snap the page-level grid containers back to scrollTop=0 / scrollLeft=0.
+// Used as a defensive backstop after any scroll-triggering action so
+// programmatic scroll leaks (browser quirks under CSS ``zoom``,
+// scrollIntoView bubbling past ``overflow: hidden`` containers, etc.)
+// can't push the workbench UI off-screen.
+//
+// Like the scroll-event listener at the bottom of this file, the
+// snap-back is skipped for elements whose computed overflow allows
+// scrolling (tablet stacked layout via ``max-width: 900px``). We
+// only force a snap on containers that are meant to be locked - the
+// rest are legitimate scrollers.
+function resetGridScroll() {
+  const html = document.documentElement;
+  const body = document.body;
+  const lockY = (el) => {
+    if (!el) return;
+    const cs = getComputedStyle(el);
+    if ((cs.overflowY === "hidden" || cs.overflowY === "clip") && el.scrollTop) {
+      el.scrollTop = 0;
+    }
+    if ((cs.overflowX === "hidden" || cs.overflowX === "clip") && el.scrollLeft) {
+      el.scrollLeft = 0;
+    }
+  };
+  lockY(html);
+  lockY(body);
+  lockY(document.getElementById("center"));
+  lockY(document.getElementById("sidebar"));
 }
 
 async function triggerColumnAudit(source, column, btn) {
@@ -2112,18 +2381,6 @@ function shortenUrl(url) {
   return s;
 }
 
-function escapeAttr(s) {
-  /* HTML-attribute escape: same rules as escape() but also kills the
-   * single quote so attribute values quoted with either ' or " stay
-   * safe. */
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
 function jumpToCell(source, row, column) {
   /* Navigate the CSV viewer to (source, row, column). The cell viewer
    * is normally driven by ``renderCsv(cluster)`` (which expects a
@@ -2251,6 +2508,19 @@ async function pollBulkColumnAudit() {
     // freshly-written counts.
     if (fresh.status === "succeeded") {
       await refreshColumnAuditIndex();
+      // Bulk audit may have re-processed columns whose per-column
+      // detail we already cached earlier (e.g. fetched mid-audit
+      // when the on-disk JSONL was empty or partial). Drop ALL
+      // cached details so any post-audit navigation triggers a
+      // fresh fetch, then proactively re-fetch for the source the
+      // operator is currently viewing so the CSV viewer's audit
+      // markers and the cell-popover's "Web audit" section pick
+      // up the freshly-written records WITHOUT waiting for cluster
+      // navigation.
+      state.columnAuditDetail.clear();
+      if (state.currentSource) {
+        ensureAuditDetailsForSource(state.currentSource);
+      }
       toast(`bulk audit done`);
     } else {
       toast(`bulk audit ${fresh.status} \u2014 see launcher log`);
@@ -2547,6 +2817,32 @@ function _debounce(key, fn, ms) {
 }
 function scheduleStatsRefresh() { _debounce("stats", refreshStats, 250); }
 function scheduleSourceMetaRefresh() { _debounce("source-meta", refreshSourceMeta, 350); }
+// Debounce ``/cells`` background reconciliation per source. The
+// optimistic ``bumpCellStateLocal`` mirror has already coloured the
+// affected cells; the GET only matters for cross-cluster propagation
+// + FN shadowing edge cases the mirror can't compute. Coalescing
+// rapid label saves into one fetch per ~400 ms cuts the request rate
+// dramatically on a fast operator (was: one /cells GET per
+// keystroke; now: one per labelling burst).
+function scheduleCellStateReload(source) {
+  if (!source) return;
+  _debounce(`cells:${source}`, () => {
+    loadCellState(source, { force: true })
+      .then(() => { if (state.currentSource === source) repaintCellStates(source); })
+      .catch(() => {});
+  }, 400);
+}
+// ``updateGroupCounts`` scans the entire queue and patches every
+// group-header DOM node. On a 22k-cluster run that's ~22k object
+// reads + two querySelectorAll; running it synchronously inside the
+// keydown handler adds a few millis of latency BEFORE the browser
+// can repaint the new verdict button / queue dot. Deferring to a
+// task (setTimeout(0)) lets the paint happen first, and folding
+// rapid keystrokes into a single trailing call avoids redundant
+// recomputes during a digit-then-Enter burst. The numbers in the
+// group headers are still accurate within ~16 ms - imperceptible
+// to the operator.
+function scheduleGroupCountsUpdate() { _debounce("group-counts", updateGroupCounts, 0); }
 
 // Server-side rank: cells.py's ``rank`` dict.
 const _CELL_STATE_RANK = { tp: 5, partial: 4, fp: 3, fn: 2, unsure: 1 };
@@ -2559,6 +2855,16 @@ function bumpCellStateLocal(source, row, col, status, extras = {}) {
     state.cellState.set(source, map);
   }
   const key = `${row}\x00${col}`;
+  // ``unlabeled`` is the tombstone status the FN-remove path writes.
+  // The cell-state cache is a positive index (only labelled cells
+  // have entries), so the right thing is to delete the entry so the
+  // viewer drops every fn/tp/etc. class on the cell. The server's
+  // ``/cells`` GET arrives at the same conclusion by ignoring
+  // UNLABELED records.
+  if (status === "unlabeled") {
+    map.delete(key);
+    return;
+  }
   const cur = map.get(key);
   const newRank = _CELL_STATE_RANK[status] || 0;
   const curRank = cur ? (_CELL_STATE_RANK[cur.state] || 0) : 0;
@@ -2625,6 +2931,20 @@ async function refreshQueue({ keepSelection }) {
   if (r.total != null && r.total > r.items.length) {
     toast(`queue truncated: ${r.items.length}/${r.total} (apply a filter to see the rest)`, 4000);
   }
+
+  // Inconsistency is owned by the column-cluster path (merged in
+  // below from /column-clusters, with LLM drafts auto-surfaced).
+  // Cell-level clusters tagged ``inconsistency`` were the legacy
+  // single-cell representation; we drop them here so the operator
+  // doesn't see the same finding in both forms. We only drop items
+  // whose *only* error_type is ``inconsistency`` so any mixed-type
+  // cluster that also carries a non-inconsistency aspect (e.g.
+  // simultaneously a typo) survives and the non-inconsistency part
+  // is still labelable.
+  queueItems = queueItems.filter((c) => {
+    const ets = c.error_types || [];
+    return !(ets.length === 1 && ets[0] === "inconsistency");
+  });
 
   // Map source filter into "which CSVs are accepted" + "which workbook
   // tokens are accepted" so the client-side check below is O(1) per
@@ -2714,6 +3034,123 @@ async function refreshQueue({ keepSelection }) {
       // briefly fails (e.g. malformed multi_table_violations.jsonl).
       console.warn("multi-table violations fetch failed:", e);
     }
+  }
+
+  // Merge operator-marked FN cells into the queue so they appear
+  // alongside cluster findings. These are cells the LLM never
+  // flagged but the human did - if we don't surface them here, the
+  // operator has no way to revisit or cancel a prior FN mark
+  // without scrolling the CSV grid to the exact (row, column).
+  // ``shadowed`` FN cells (a TP/PARTIAL cluster already covers the
+  // cell) are dropped because the cluster verdict supersedes the FN
+  // claim anyway; the operator should manage them via the cluster.
+  try {
+    const fnRes = await api(`${API}/fn-cells`);
+    const fnRaw = Array.isArray(fnRes.items) ? fnRes.items : [];
+    for (const fn of fnRaw) {
+      if (fn.shadowed) continue;
+      // Source / workbook filter mirrors the cluster path.
+      if (srcFilter.length > 0) {
+        const wb = filterWbBySource[fn.source || ""] || "";
+        const matches = allowedSources.has(fn.source || "")
+          || (wb && allowedWorkbooks.has(wb));
+        if (!matches) continue;
+      }
+      // Status filter: an FN cell label is always ``fn`` (a real
+      // verdict, never "unlabeled" by virtue of being in this list).
+      if (statusFilter.length > 0 && !allowedStatuses.has(fn.status || "fn")) continue;
+      const et = "false_negative";
+      if (etFilter.length > 0 && !allowedEts.has(et)) continue;
+      queueItems.push({
+        // Cluster-shaped fields the queue/render/select code reads.
+        cluster_id: fnQueueCid(fn.source, fn.row, fn.column),
+        source: fn.source,
+        row: fn.row,
+        columns: [fn.column],
+        error_types: [et],
+        // ``label_status`` is the verdict the operator has attached
+        // to the FN claim (``fn`` by default; ``tp``/``partial``/
+        // ``unsure``/``skip`` once they rate their own claim via
+        // the FN detail panel). The queue dot colour reads this.
+        label_status: fn.status || "fn",
+        // FN-specific fields the kind-aware code paths read.
+        is_fn: true,
+        fn_target_id: fn.target_id,
+        fn_column: fn.column,
+        fn_row: fn.row,
+        fn_source: fn.source,
+        corrected_value: fn.corrected_value,
+        note: fn.note,
+        annotator: fn.annotator,
+        ts: fn.ts,
+      });
+    }
+  } catch (e) {
+    // Non-fatal: queue still works if the fn-cells endpoint fails
+    // (older server build or transient I/O).
+    console.warn("fn-cells fetch failed:", e);
+  }
+
+  // Merge inconsistency column-clusters (one queue item per saved
+  // StdCluster across the run). Verdicts on these flow through the
+  // same POST /labels path used by cell-level clusters, just with
+  // target=column_cluster. Source/status/error-type filters mirror
+  // the cluster path; the synthetic ``inconsistency`` error_type
+  // surfaces the filter facet so the operator can isolate them.
+  try {
+    const ccRes = await api(`${API}/column-clusters?limit=5000`);
+    const ccRaw = Array.isArray(ccRes.items) ? ccRes.items : [];
+    for (const cc of ccRaw) {
+      if (srcFilter.length > 0) {
+        const wb = filterWbBySource[cc.source || ""] || "";
+        const matches = allowedSources.has(cc.source || "")
+          || (wb && allowedWorkbooks.has(wb));
+        if (!matches) continue;
+      }
+      const ccStatus = cc.label_status || "unlabeled";
+      if (statusFilter.length > 0 && !allowedStatuses.has(ccStatus)) continue;
+      const et = "inconsistency";
+      if (etFilter.length > 0 && !allowedEts.has(et)) continue;
+      queueItems.push({
+        // Cluster-shaped fields the queue/select code reads. We
+        // use ``target_id`` as the queue cluster_id so that
+        // ``selectedId`` survives a refreshQueue without an extra
+        // lookup, and submitLabel can POST the verdict directly
+        // by reusing this field.
+        cluster_id: cc.target_id,
+        source: cc.source,
+        row: -1,                              // not a single-row item
+        columns: [cc.column],
+        error_types: [et],
+        label_status: ccStatus,
+        // Column-cluster-specific fields the kind-aware code paths
+        // read. ``values`` and ``canonical_value`` drive the CSV
+        // highlight; ``kind`` / ``llm_*`` populate the right pane.
+        is_col_cluster: true,
+        target_id: cc.target_id,
+        column: cc.column,
+        cluster_local_id: cc.cluster_local_id,
+        kind: cc.kind,
+        canonical_value: cc.canonical_value,
+        values: cc.values || [],
+        n_values: cc.n_values,
+        annotator: cc.annotator,
+        ts: cc.ts,
+        llm_canonical: cc.llm_canonical,
+        llm_agreement: cc.llm_agreement,
+        llm_kind: cc.llm_kind,
+        llm_target_style: cc.llm_target_style,
+        from_draft: !!cc.from_draft,
+        draft_pending: !!cc.draft_pending,
+        label_note: cc.label_note || "",
+        label_confirmed_canonical: cc.label_confirmed_canonical || null,
+        label_value_corrections: cc.label_value_corrections || {},
+      });
+    }
+  } catch (e) {
+    // Non-fatal: queue still works if the column-clusters endpoint
+    // fails (older server build or transient I/O).
+    console.warn("column-clusters fetch failed:", e);
   }
 
   // Column-status filter (multi-select). The labelling-effort artifact
@@ -2866,16 +3303,29 @@ async function refreshQueue({ keepSelection }) {
         const { c, idx } = entry;
         const row = document.createElement("div");
         row.className = "row" + (c.inferred ? " row-inferred" : "")
-          + (isMtItem(c) ? " row-mt" : "");
+          + (isMtItem(c) ? " row-mt" : "")
+          + (isColClusterItem(c) ? " row-cc" : "");
         row.dataset.queueIndex = String(idx);
         const status = c.label_status || "unlabeled";
         const inferredBadge = c.inferred
           ? `<span class="inferred-badge" title="No primary detection on this row \u2014 surfaced via a sibling detection's affected_rows. Labelling it captures the LLM's full claim and prevents FN drift.">inf</span>`
           : "";
         const dupRows = Array.isArray(c.affected_rows) ? c.affected_rows : [];
-        const isDup = (c.error_types || []).includes("row_duplication") && dupRows.length > 1;
-        const dupBadge = isDup
-          ? `<span class="dup-badge" title="row_duplication group spans ${dupRows.length} rows">×${dupRows.length}</span>`
+        const hasMultiRow = dupRows.length > 1;
+        const isDup = (c.error_types || []).includes("row_duplication") && hasMultiRow;
+        // ``dup-badge`` was originally a row_duplication-only marker
+        // but the per-incident aggregation now collapses relation
+        // rules into one cluster per (rule, source) too — so any
+        // cluster that covers more than one row should advertise
+        // ``×N`` in the queue. Title text distinguishes the two
+        // cases so the operator knows whether the badge means
+        // "duplicate group" or "rule fires on N rows".
+        const dupBadge = hasMultiRow
+          ? `<span class="dup-badge" title="${
+              isDup
+                ? `row_duplication group spans ${dupRows.length} rows`
+                : `cluster covers ${dupRows.length} rows \u2014 one TP/FP click labels them all`
+            }">\u00d7${dupRows.length}</span>`
           : "";
         // Multi-table findings span 2+ sheets; show a "cross-sheet"
         // badge plus the linked sheets so the operator can spot the
@@ -2884,16 +3334,28 @@ async function refreshQueue({ keepSelection }) {
         const mtBadge = isMtItem(c)
           ? `<span class="dup-badge" title="cross-sheet finding (${(c.sheets || []).join(' \u2194 ')})">cross-sheet</span>`
           : "";
+        // Column-cluster items get a distinct badge so the operator
+        // can spot inconsistency items in a mixed queue at a glance.
+        // The badge counts the number of distinct values in the
+        // cluster so the operator knows roughly how much CSV they
+        // need to scan.
+        const ccBadge = isColClusterItem(c)
+          ? `<span class="cc-badge" title="inconsistency cluster (${c.n_values || (c.values || []).length} distinct values)">col \u00d7${c.n_values || (c.values || []).length}</span>`
+          : "";
         // Inside a dup-bucket the row line shows just THIS cluster's
         // canonical row (the sibling rows are already named in the
-        // sub-header above).
+        // sub-header above). Column-clusters span every row holding
+        // a matching value, so we show the cluster's local id (c1)
+        // instead of a row number.
         const rowLine = isMtItem(c)
           ? escape((c.sheets || []).join(" \u2194 "))
-          : `row ${escape(String(c.row ?? "?"))}`;
+          : (isColClusterItem(c)
+            ? `cluster ${escape(c.cluster_local_id || "?")}`
+            : `row ${escape(String(c.row ?? "?"))}`);
         row.innerHTML = `
           <div class="dot ${status}"></div>
           <div class="main">
-            <div class="src">${rowLine} ${dupBadge}${mtBadge}${inferredBadge}</div>
+            <div class="src">${rowLine} ${dupBadge}${mtBadge}${ccBadge}${inferredBadge}</div>
             <div class="cols">${escape((c.columns || []).join(", "))}</div>
             <div class="types">${escape((c.error_types || []).join(" \u00B7 "))}</div>
           </div>
@@ -3054,6 +3516,10 @@ function selectIndex(i) {
   }
   if (isMtItem(c)) {
     loadMtViolation(c);
+  } else if (isFnItem(c)) {
+    loadFnCell(c);
+  } else if (isColClusterItem(c)) {
+    loadColCluster(c);
   } else {
     loadCluster(c.cluster_id);
   }
@@ -3212,6 +3678,958 @@ async function loadMtViolation(item) {
   renderMtDetail(detail, item);
 }
 
+// Load an operator-marked FN cell into the same panes a cluster
+// would occupy: the CSV grid scrolls to the cell and highlights
+// it, and the detail panel shows the FN's note + corrected value
+// alongside a "Remove FN" button that tombstones the cell label so
+// it disappears from the queue. ``item`` is the synthesized queue
+// row (``is_fn``) produced by ``refreshQueue``.
+async function loadFnCell(item) {
+  showCsvPane();
+  // Re-use the CSV-render path: it accepts a cluster-shaped object
+  // with ``source`` / ``row`` / ``columns`` and scrolls the slice
+  // into view + highlights the flagged columns.
+  const pseudoCluster = {
+    source: item.fn_source || item.source,
+    row: item.fn_row != null ? item.fn_row : item.row,
+    columns: [item.fn_column || (item.columns || [])[0] || ""],
+    error_types: ["false_negative"],
+    detections: [],
+  };
+  state.cluster = { _fn: true, fn: item, cluster: pseudoCluster };
+  await renderCsv(pseudoCluster);
+  renderFnDetail(item);
+}
+
+// Render the right-hand detail panel for an FN queue item. Looks
+// like a normal labelled-cell detail (Original / Fix, editable
+// Corrected + Note, full verdict button row) so the operator can
+// rate the confidence of their own FN claim (tp / partial / unsure
+// / skip). The FP button is replaced by a ``Remove FN`` button that
+// tombstones the cell label outright -- ``fp`` on one's own claim
+// doesn't make semantic sense and was the cause of the historical
+// "two entries, one only for remove" UX. Cluster-specific blocks
+// (synthesis / detections / web verification) are omitted because
+// the LLM never produced anything for this cell.
+function renderFnDetail(item) {
+  const el = $("#detail");
+  const source = item.fn_source || item.source;
+  const row = item.fn_row != null ? item.fn_row : item.row;
+  const col = item.fn_column || (item.columns || [])[0] || "";
+  let original = "";
+  try {
+    if (state.csvCache && typeof state.csvCache.entries === "function") {
+      for (const [key, data] of state.csvCache.entries()) {
+        if (!key.startsWith(`${source}:`)) continue;
+        const r = (data.rows || []).find((x) => x.row === row && x.values);
+        if (r && Object.prototype.hasOwnProperty.call(r.values, col)) {
+          original = String(r.values[col] ?? "");
+          break;
+        }
+      }
+    }
+  } catch (_) { /* best-effort - leave original empty */ }
+  const correctedInitial = item.corrected_value == null ? "" : String(item.corrected_value);
+  const noteInitial = item.note || "";
+  const annotator = item.annotator || "";
+  const ts = item.ts || "";
+  // Current cell-label status -- ``fn`` when freshly claimed, or
+  // whatever verdict the operator last attached. The button row
+  // highlights this so the operator can see their previous pick.
+  const currentStatus = (item.label_status || item.status || "fn").toString();
+  const btn = (s, key) => `<button data-status="${s}" class="${s}${currentStatus === s ? " active" : ""}" title="key ${key}">${s} <kbd>${key}</kbd></button>`;
+
+  el.innerHTML = `
+    <div class="block">
+      <h2>FN cell <span class="muted">${escape(source)} \u00B7 row ${escape(String(row))} \u00B7 ${escape(col)}</span></h2>
+      <div style="margin-top:6px;">
+        <span class="sev-chip">false_negative</span>
+        <span class="sev-chip" title="LLM never flagged this cell; the operator added it (or same-value propagation did).">operator-claimed</span>
+      </div>
+    </div>
+
+    <div class="block before-after">
+      <h2>Original / Fix</h2>
+      <div class="ba-row">
+        <div class="ba-line">
+          <span class="ba-tag">Original</span>
+          <span class="ba-val${original ? "" : " ba-empty"}">${
+            original ? escape(original) : '<span class="muted">(empty)</span>'
+          }</span>
+        </div>
+        <div class="ba-line">
+          <span class="ba-tag ba-tag-fix">Fix</span>
+          <span class="ba-val ba-val-fix${correctedInitial ? "" : " ba-empty"}">${
+            correctedInitial ? escape(correctedInitial) : '<span class="muted">(none)</span>'
+          }</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="block">
+      <h2>Verdict</h2>
+      <div class="buttons" id="verdict-buttons">
+        ${btn("tp","1")}${btn("partial","3")}${btn("unsure","4")}${btn("skip","5")}
+        <button class="fp" data-fn-action="remove" title="tombstones the cell label so the row disappears from the queue">Remove FN</button>
+      </div>
+      <label class="field">
+        <span>Corrected value (for tp / partial)</span>
+        <input id="corrected-value" type="text" value="${escape(correctedInitial)}" placeholder="(leave blank if unknown)" />
+      </label>
+      <label class="field">
+        <span>Note</span>
+        <textarea id="note">${escape(noteInitial)}</textarea>
+      </label>
+      ${annotator || ts ? `<div class="muted" style="margin-top:6px; font-size:11px;">last: ${escape(currentStatus)}${annotator ? ` by ${escape(annotator)}` : ""}${ts ? ` @ ${escape(ts)}` : ""}</div>` : ""}
+    </div>`;
+
+  el.querySelectorAll("#verdict-buttons button[data-status]").forEach((b) => {
+    b.addEventListener("click", () => submitFnCellLabel(b.dataset.status, source, row, col));
+  });
+  const rmBtn = el.querySelector('[data-fn-action="remove"]');
+  if (rmBtn) rmBtn.addEventListener("click", () => removeFnCell(source, row, col));
+}
+
+// POST a cell label with the chosen verdict status (tp / partial /
+// unsure / skip). Mirrors the cluster ``submitLabel`` path but
+// scoped to the single cell -- no same-value propagation, no
+// skip-row cascade, since both are row/cluster concepts. The cell
+// still counts as an operator-flagged FN for export; the status
+// carries the operator's confidence on that claim.
+async function submitFnCellLabel(status, source, row, col) {
+  const corrected = ($("#corrected-value")?.value ?? "").trim();
+  const note = ($("#note")?.value ?? "");
+  const i = state.index;
+  const queueItem = state.queue[i];
+  if (queueItem) queueItem.label_status = status;
+  const rowEl = document.querySelector(`#queue .row[data-queue-index="${i}"]`);
+  if (rowEl) {
+    const dot = rowEl.querySelector(".dot");
+    if (dot) dot.className = "dot " + status;
+  }
+  document.querySelectorAll("#verdict-buttons button[data-status]").forEach((b) => {
+    b.classList.toggle("active", b.dataset.status === status);
+  });
+  try {
+    bumpCellStateLocal(source, row, col, status, {
+      label_source: "cell",
+      corrected_value: corrected || null,
+    });
+    if (state.currentSource === source) repaintCellStates(source);
+  } catch (_) { /* best-effort */ }
+
+  try {
+    await api(`${API}/labels`, {
+      method: "POST",
+      body: JSON.stringify({
+        target: "cell",
+        target_id: `cell:${source}:${row}:${col}`,
+        source,
+        row,
+        column: col,
+        status,
+        corrected_value: corrected || null,
+        note,
+      }),
+    });
+    toast(`saved: ${status}`);
+    await refreshQueue({ keepSelection: true });
+    scheduleStatsRefresh();
+    scheduleSourceMetaRefresh();
+  } catch (e) {
+    toast(`save failed: ${e.message}`, 3000);
+  }
+}
+
+// Tombstone an FN cell label: POST a cell label with status=unlabeled
+// for the same (source, row, column). The server-side store treats
+// UNLABELED records as "no effective label", so the cell disappears
+// from /fn-cells and from the queue on the next refresh.
+async function removeFnCell(source, row, col) {
+  try {
+    await api(`${API}/labels`, {
+      method: "POST",
+      body: JSON.stringify({
+        target: "cell",
+        target_id: `cell:${source}:${row}:${col}`,
+        source,
+        row,
+        column: col,
+        status: "unlabeled",
+        note: "",
+      }),
+    });
+    toast("FN removed");
+    // Local mirror so the CSV viewer drops the FN tint without a
+    // full /cells round-trip; the queue refresh below will pull the
+    // authoritative view in the background.
+    if (typeof bumpCellStateLocal === "function") {
+      bumpCellStateLocal(source, row, col, "unlabeled", { label_source: "cell" });
+      if (state.currentSource === source) repaintCellStates(source);
+    }
+    // Drop the row from the queue and re-select the next item so
+    // the operator's cursor doesn't land on a now-removed entry.
+    await refreshQueue({ keepSelection: false });
+    scheduleStatsRefresh();
+    scheduleSourceMetaRefresh();
+  } catch (e) {
+    toast(`remove FN failed: ${e.message}`, 3000);
+  }
+}
+
+// ----------------------------------------------------------- column-cluster items
+//
+// Inconsistency column-clusters surfaced from
+// ``column_clusters.jsonl``. Each queue item carries the cluster's
+// full value list + canonical, plus optional LLM-proposed canonical
+// (when the cluster also appears in column_cluster_drafts.jsonl).
+// Verdicts (TP/FP/Partial/Unsure/Skip) flow through the same POST
+// /labels path as cell-level clusters, with target=column_cluster.
+
+// Load a column-cluster: pulls the CSV slice for the cluster's
+// (source, column), then paints every matching row + canonical row.
+// ``state.cluster`` holds the merged queue item plus a ``_cc``
+// marker so submitLabel branches to the column_cluster code path.
+async function loadColCluster(item) {
+  showCsvPane();
+  state.cluster = { _cc: true, cc: item };
+  $("#csv-source").textContent =
+    `${item.source} · ${item.column} (inconsistency)`;
+  $("#csv-pos").textContent = `${state.index + 1} / ${state.queue.length}`;
+  // Use a row-less pseudo-cluster: renderCsv will scroll to row 0
+  // and paint the column with our cluster-specific highlight via
+  // the _cc branch below.
+  const pseudoCluster = {
+    source: item.source,
+    row: 0,
+    columns: [item.column],
+    error_types: ["inconsistency"],
+    detections: [],
+  };
+  await renderCsv(pseudoCluster);
+  paintColClusterCsv(item);
+  renderColClusterDetail(item);
+  // Async-hydrate the corrections block with any cached LLM
+  // suggestions (populated by a prior per-cluster or batch job).
+  // Fire-and-forget so the detail pane paints immediately; the
+  // hydration triggers a localized re-render once cached results
+  // arrive. Guard with ``_cc_hydrated`` so navigating away and back
+  // doesn't re-fetch in a tight loop.
+  hydrateClusterCorrections(item).catch((e) => {
+    console.warn("corrections hydrate failed:", e);
+  });
+}
+
+// Pulse a cell with the `.cc-flash` highlight, then remove the class
+// cleanly. Listens for ``animationend`` so the class drops the
+// instant the CSS animation finishes (whatever its tuned duration);
+// a safety timeout covers browsers that miss the event (animation
+// cancelled mid-flight, tab backgrounded, etc.). Removing the class
+// listener once it fires keeps the dataset of event subscribers
+// bounded as the user navigates between clusters.
+function flashCell(cell) {
+  if (!cell) return;
+  cell.classList.add("cc-flash");
+  let cleared = false;
+  const clear = () => {
+    if (cleared) return;
+    cleared = true;
+    cell.removeEventListener("animationend", onEnd);
+    cell.classList.remove("cc-flash");
+  };
+  const onEnd = (ev) => {
+    if (ev.animationName !== "cc-flash") return;
+    clear();
+  };
+  cell.addEventListener("animationend", onEnd);
+  // Fallback: CSS keyframe is ``cc-flash 0.8s``; give it a comfortable
+  // margin so a frame stutter or a paused-tab resume still cleans up.
+  setTimeout(clear, 1500);
+}
+
+// Walk every loaded CSV row and paint cells in the cluster's column
+// whose value is in the cluster's value-set. Canonical value gets a
+// distinct color so the operator can spot it at a glance.
+function paintColClusterCsv(item) {
+  const viewer = $("#csv-viewer");
+  if (!viewer) return;
+  // First wipe ANY existing cluster highlight in the viewer, not
+  // just cells in the current column. Without this, switching
+  // between columns (or between clusters of different columns)
+  // leaves orphaned highlights from the previous selection.
+  for (const td of viewer.querySelectorAll(
+    "td.clickable.col-cluster-match, td.clickable.col-cluster-canonical",
+  )) {
+    td.classList.remove("col-cluster-match", "col-cluster-canonical");
+  }
+  const valueSet = new Set((item.values || []).map((v) => v.value));
+  const canonical = item.canonical_value || "";
+  // ``data-col`` and ``data-row`` are stamped on every <td.clickable>
+  // by renderCsv; use them to find cells in the target column.
+  const cells = viewer.querySelectorAll(
+    `td.clickable[data-col="${cssEscape(item.column)}"]`,
+  );
+  // Prefer scrolling to the first CANONICAL cell so the operator
+  // lands on "the right value" instead of an arbitrary variant.
+  // Fall back to the first non-canonical match if the canonical
+  // value is absent from the loaded slice.
+  let firstCanonicalCell = null;
+  let firstMatchCell = null;
+  for (const td of cells) {
+    // The rendered cell may include error chips / FN tints in extra
+    // children; the raw value lives on data-raw (stamped by
+    // renderCsv) when present, else read textContent.
+    const raw = td.getAttribute("data-raw");
+    const val = raw != null ? raw : td.textContent || "";
+    if (!valueSet.has(val)) continue;
+    if (canonical && val === canonical) {
+      td.classList.add("col-cluster-canonical");
+      if (firstCanonicalCell == null) firstCanonicalCell = td;
+    } else {
+      td.classList.add("col-cluster-match");
+      if (firstMatchCell == null) firstMatchCell = td;
+    }
+  }
+  const focusCell = firstCanonicalCell || firstMatchCell;
+  if (focusCell) {
+    // ``renderCsv`` schedules its own ``requestAnimationFrame`` that
+    // scrolls the pseudo-cluster's row (always row 0 for a column-
+    // cluster item) into view. Scrolling synchronously here would be
+    // immediately undone by that rAF. Queue our scroll in a SECOND
+    // rAF so it runs after renderCsv's, landing on the canonical
+    // cell. Same idea for the flash ring.
+    requestAnimationFrame(() => {
+      // ``scrollCellIntoViewerCentre`` is enough -- the row is its
+      // ancestor and centring the cell horizontally + vertically in the
+      // viewer brings the whole row with it. A separate
+      // ``tr.scrollIntoView`` here would queue a second smooth-scroll
+      // animation racing this one (and leak past the viewer's bounds).
+      const viewer_ = $("#csv-viewer");
+      scrollCellIntoViewerCentre(viewer_, focusCell);
+      flashCell(focusCell);
+    });
+  }
+}
+
+// Right-hand detail pane for a column-cluster item. Layout mirrors
+// the cluster pane:
+//   * Header (column, cluster id, kind chip).
+//   * LLM suggestion block (only when from draft).
+//   * Values list (canonical highlighted).
+//   * Verdict buttons (TP/FP/Partial/Unsure/Skip) + note.
+function renderColClusterDetail(item) {
+  const el = $("#detail");
+  const currentStatus = item.label_status || "unlabeled";
+  const note = item.label_note || "";
+  const btn = (s, key) =>
+    `<button data-status="${s}" class="${s}${currentStatus === s ? " active" : ""}" title="key ${key}">${s} <kbd>${key}</kbd></button>`;
+  const llmBlock = (item.from_draft && (item.llm_canonical || item.llm_agreement != null || item.llm_target_style))
+    ? `
+      <div class="block">
+        <h2>LLM suggestion</h2>
+        ${item.llm_canonical ? `<div><b>Proposed canonical:</b> <code>${escape(item.llm_canonical)}</code></div>` : ""}
+        ${item.llm_target_style ? `<div style="margin-top:4px;"><b>Target style:</b> <span class="muted" style="font-style: italic;">${escape(item.llm_target_style)}</span></div>` : ""}
+        ${item.llm_kind && item.llm_kind !== item.kind ? `<div style="margin-top:4px;"><b>Proposed kind:</b> <span class="sev-chip">${escape(item.llm_kind)}</span></div>` : ""}
+        ${item.llm_agreement != null ? `<div style="margin-top:4px;"><b>Agreement:</b> ${escape((item.llm_agreement || 0).toFixed(2))}</div>` : ""}
+      </div>
+    ` : "";
+  const valuesHtml = (item.values || []).map((v) => {
+    const isCanon = item.canonical_value && v.value === item.canonical_value;
+    return `
+      <div class="cc-value${isCanon ? " canonical" : ""}"
+           data-cc-value="${escape(v.value)}"
+           role="button" tabindex="0"
+           title="${isCanon ? "canonical · " : ""}click to scroll CSV to a matching row">
+        ${isCanon ? '<span class="cc-canon-badge" title="canonical">★</span>' : ""}
+        <span class="cc-value-text">${escape(v.value)}</span>
+        <span class="cc-value-count muted">${escape(String(v.count))}</span>
+      </div>
+    `;
+  }).join("");
+  // Canonical-confirm radio. Operator endorses ONE of the cluster's
+  // values as the ground-truth target (one-directional fix in the
+  // exported benchmark) or leaves the cluster bi-directional. The
+  // LLM's proposed canonical is highlighted as a hint but never
+  // auto-selected -- the policy is "verified by the human reviewer".
+  const savedCanon = item.label_confirmed_canonical || "";
+  const llmCanon = item.llm_canonical || item.canonical_value || "";
+  const canonOpt = (val, label, extra) => {
+    const id = `cc-canon-${Math.random().toString(36).slice(2, 9)}`;
+    const checked = (val === savedCanon) ? " checked" : "";
+    return `
+      <label class="cc-canon-opt" for="${id}">
+        <input type="radio" id="${id}" name="cc-canonical-pick"
+               value="${escape(val)}"${checked} />
+        <span>${label}${extra ? ` <span class="muted" style="font-size:11px;">${extra}</span>` : ""}</span>
+      </label>
+    `;
+  };
+  const canonRadios = [
+    canonOpt("", "Leave bi-directional <span class=\"muted\" style=\"font-size:11px;\">(any value acceptable)</span>", ""),
+    ...(item.values || []).map((v) =>
+      canonOpt(
+        v.value,
+        `<code>${escape(v.value)}</code>`,
+        v.value === llmCanon ? "★ LLM proposed" : "",
+      )
+    ),
+  ].join("");
+  const canonBlock = `
+    <div class="block">
+      <h2>Confirm canonical</h2>
+      <div class="muted" style="font-size:11px; margin-bottom:6px;">
+        Endorses one value as the single ground-truth target for this cluster
+        (one-directional fix). Leave bi-directional to keep all values acceptable.
+      </div>
+      <div class="cc-canon-list" id="cc-canonical-pick-list">${canonRadios}</div>
+    </div>
+  `;
+  // Per-value corrections block. Renders only when verdict is tp/unsure
+  // (the only verdicts that carry a value_corrections mapping in the
+  // exporter's contract). Initial state is "idle" - operator clicks
+  // Generate to invoke the LLM. See renderCorrectionsBlock for the
+  // running / results state machine. The block stays present even
+  // when collapsed so it can be re-rendered in place after each
+  // server round-trip without rebuilding the rest of the detail pane.
+  const savedCorr = item.label_value_corrections || {};
+  const hasSavedCorr = Object.keys(savedCorr).length > 0;
+  const correctionsBlock = `<div class="block cc-corrections" id="cc-corrections-block"></div>`;
+  const kindLabel = item.kind || "untagged";
+  const cb = `./column_board.html?run=${encodeURIComponent(RUN_ID)}&source=${encodeURIComponent(item.source)}&column=${encodeURI(item.column)}`;
+  el.innerHTML = `
+    <div class="block">
+      <h2>${escape(item.column)} <span class="muted">· inconsistency cluster ${escape(item.cluster_local_id)}</span></h2>
+      <div class="cols">${escape(item.source)} · ${item.n_values || (item.values || []).length} values</div>
+      <div style="margin-top:6px;">
+        <span class="sev-chip">${escape(kindLabel)}</span>
+        ${item.draft_pending
+          ? `<span class="sev-chip" style="border-color: var(--accent); color: var(--accent);" title="LLM-proposed cluster; first verdict will persist it as a saved record">unsaved LLM draft</span>`
+          : (item.from_draft ? `<span class="sev-chip" style="border-color: var(--accent); color: var(--accent);">from LLM draft</span>` : "")}
+        <a href="${cb}" target="_blank" rel="noopener" style="margin-left:8px; font-size:11px;">Edit cluster structure →</a>
+      </div>
+    </div>
+
+    ${llmBlock}
+
+    <div class="block">
+      <h2>Values in this cluster</h2>
+      <div class="cc-value-list">${valuesHtml || '<div class="placeholder">(empty)</div>'}</div>
+    </div>
+
+    ${hasSavedCorr ? "" : canonBlock}
+
+    ${correctionsBlock}
+
+    <div class="block">
+      <h2>Verdict</h2>
+      <div class="buttons" id="verdict-buttons">
+        ${btn("tp","1")}${btn("fp","2")}${btn("partial","3")}${btn("unsure","4")}${btn("skip","5")}
+      </div>
+      <label class="field">
+        <span>Note</span>
+        <textarea id="note">${escape(note)}</textarea>
+      </label>
+      ${item.ts ? `<div class="muted" style="margin-top:6px; font-size:11px;">cluster saved by ${escape(item.annotator || "?")} @ ${escape(item.ts)}</div>` : ""}
+    </div>
+  `;
+  el.querySelectorAll("#verdict-buttons button").forEach((b) => {
+    b.addEventListener("click", async () => {
+      const prior = item.label_status || "unlabeled";
+      const next = b.dataset.status;
+      await submitLabel(next, { advance: false });
+      // Verdict change can flip whether the corrections block should
+      // render content (only tp/unsure carry value_corrections).
+      // Re-render in place so the operator sees the new state without
+      // navigating away.
+      renderCorrectionsBlock(item);
+      // If we just transitioned INTO tp/unsure from something else,
+      // hydrate cached LLM suggestions in case a batch job already
+      // populated the cache for this cluster. We reset _cc_hydrated
+      // so the GET fires; hydrateClusterCorrections itself short-
+      // circuits when status isn't eligible.
+      const eligible = (next === "tp" || next === "unsure");
+      const wasEligible = (prior === "tp" || prior === "unsure");
+      if (eligible && !wasEligible) {
+        item._cc_hydrated = false;
+        hydrateClusterCorrections(item).catch((e) => {
+          console.warn("corrections re-hydrate failed:", e);
+        });
+      }
+    });
+  });
+  // Clicking a value scrolls the CSV to a row whose cell holds it.
+  el.querySelectorAll(".cc-value").forEach((node) => {
+    node.addEventListener("click", () => {
+      const v = node.getAttribute("data-cc-value") || "";
+      scrollCsvToValue(item.source, item.column, v);
+    });
+    // Keyboard activation: chips are role="button" tabindex="0" so
+    // Enter / Space must behave like a click for screen-reader and
+    // keyboard-only users.
+    node.addEventListener("keydown", (ev) => {
+      if (ev.key !== "Enter" && ev.key !== " ") return;
+      ev.preventDefault();
+      const v = node.getAttribute("data-cc-value") || "";
+      scrollCsvToValue(item.source, item.column, v);
+    });
+  });
+  // Move keyboard focus onto the first canonical chip (or the first
+  // chip overall) so keyboard-only users can tab straight into the
+  // values list. Defer to the next frame so the chips are laid out
+  // before .focus() scrolls them into view; ``preventScroll`` keeps
+  // the CSV viewer's auto-scroll from being clobbered.
+  requestAnimationFrame(() => {
+    const firstChip = el.querySelector(".cc-value.canonical")
+      || el.querySelector(".cc-value");
+    if (firstChip && typeof firstChip.focus === "function") {
+      try { firstChip.focus({ preventScroll: true }); }
+      catch (_) { firstChip.focus(); }
+    }
+  });
+  // Populate the corrections-block container based on the current
+  // verdict + persisted state. Idempotent: re-rendering after each
+  // verdict / save round-trip keeps the UI in sync without rebuilding
+  // the whole detail pane.
+  renderCorrectionsBlock(item);
+}
+
+// ---------------------------------------------------------------------
+// Per-cluster value_corrections UI (idle / running / results states).
+// ---------------------------------------------------------------------
+//
+// State is held entirely on ``item.cc_corrections`` so closing and
+// re-opening the cluster (or re-rendering the detail pane after a
+// verdict change) preserves whatever the operator already generated.
+// Three states:
+//   idle      - default. Render the "Generate corrections" button.
+//   running   - LLM call in flight. Render a spinner + cancel disabled.
+//   results   - server returned suggestions. Render an editable table:
+//                 each row = one (value, rows) tuple in the cluster.
+//                 Each row offers Accept / Drop / Manual + a free-text
+//                 input (comma-separated for multi-direction). The
+//                 "Save corrections" button POSTs the assembled mapping.
+//
+// After save the detail pane is re-rendered so the canonical-radio
+// block hides (per design decision #3: "Hide canonical when corrections
+// saved"), and the saved mapping is shown in a read-only summary so the
+// operator can re-edit if needed.
+function renderCorrectionsBlock(item) {
+  const container = document.getElementById("cc-corrections-block");
+  if (!container) return;
+  const status = item.label_status || "unlabeled";
+  const eligible = (status === "tp" || status === "unsure");
+  if (!eligible) {
+    // Verdict not in {tp, unsure} -> corrections aren't valid here.
+    // Render a small advisory so the operator knows why it's empty.
+    container.innerHTML = `
+      <h2>Per-value corrections</h2>
+      <div class="muted" style="font-size:11px;">
+        Corrections are only available for verdicts <code>tp</code> or
+        <code>unsure</code>. Set a verdict above to enable them.
+      </div>
+    `;
+    return;
+  }
+  const ccState = item.cc_corrections || { phase: "idle" };
+  item.cc_corrections = ccState;
+  const savedCorr = item.label_value_corrections || {};
+  const hasSavedCorr = Object.keys(savedCorr).length > 0;
+
+  if (ccState.phase === "running") {
+    const dn = ccState.done || 0, tot = ccState.total || 0;
+    const phaseLabel = ccState.subPhase ? ` (${escape(ccState.subPhase)})` : "";
+    container.innerHTML = `
+      <h2>Per-value corrections</h2>
+      <div class="cc-corrections-running">
+        <span class="cc-corrections-spinner" aria-hidden="true"></span>
+        <span>Generating suggestions${phaseLabel}…
+          ${tot > 0 ? `<span class="muted">${dn} / ${tot} LLM call(s)</span>` : ""}
+        </span>
+      </div>
+    `;
+    return;
+  }
+
+  if (ccState.phase === "error") {
+    container.innerHTML = `
+      <h2>Per-value corrections</h2>
+      <div class="cc-corrections-error">${escape(ccState.error || "request failed")}</div>
+      <div class="cc-corrections-actions">
+        <button class="cc-corrections-generate" type="button">Try again</button>
+      </div>
+    `;
+    container.querySelector(".cc-corrections-generate")
+      ?.addEventListener("click", () => triggerSuggestCorrections(item));
+    return;
+  }
+
+  // results / idle share the same layout, with results extending
+  // the table with editable rows. We always render a Generate button
+  // so the operator can re-roll if they want fresh samples.
+  const suggestions = Array.isArray(ccState.suggestions) ? ccState.suggestions : [];
+  // When the panel first opens we may have neither idle-state cache nor
+  // saved corrections; show only the Generate CTA.
+  if (suggestions.length === 0 && !hasSavedCorr) {
+    container.innerHTML = `
+      <h2>Per-value corrections</h2>
+      <div class="muted" style="font-size:11px; margin-bottom:6px;">
+        Ask the LLM to propose a correction for each value in this
+        cluster. Suggestions are editable before you save.
+      </div>
+      <div class="cc-corrections-actions">
+        <button class="cc-corrections-generate" type="button">
+          Generate corrections (LLM, K=3)
+        </button>
+      </div>
+    `;
+    container.querySelector(".cc-corrections-generate")
+      ?.addEventListener("click", () => triggerSuggestCorrections(item));
+    return;
+  }
+
+  // Build a unified per-value table. We seed each row with the saved
+  // value first (operator's prior choice wins), falling back to the
+  // LLM consensus when nothing is saved yet. ``action`` defaults to
+  // ``accept`` when the row has any data, ``drop`` when the LLM said
+  // would_drop_per_export_rule (the export rule "consensus equals
+  // original value -> drop").
+  const draftMap = ccState.draft || {};
+  const valueIdx = new Map();
+  for (const s of suggestions) {
+    valueIdx.set(s.value, s);
+  }
+  // Also include any saved-only values (cluster might have been edited
+  // since corrections were saved, leaving stale keys).
+  const allValues = new Set([
+    ...suggestions.map((s) => s.value),
+    ...Object.keys(savedCorr),
+  ]);
+  const rowsHtml = Array.from(allValues).sort().map((v) => {
+    const s = valueIdx.get(v);
+    const saved = savedCorr[v];
+    const draft = draftMap[v];
+    let action, text;
+    if (draft) {
+      action = draft.action;
+      text = draft.text;
+    } else if (saved !== undefined) {
+      action = "accept";
+      text = Array.isArray(saved) ? saved.join(", ") : String(saved);
+    } else if (s) {
+      const consensusList = Array.isArray(s.suggestion) ? s.suggestion : [];
+      const lone = consensusList.length === 1 && consensusList[0] === v;
+      action = lone ? "drop" : (consensusList.length ? "accept" : "drop");
+      text = consensusList.join(", ");
+    } else {
+      action = "drop";
+      text = "";
+    }
+    const agree = s ? `${(s.agreement || 0).toFixed(2)} (${s.n_valid_samples}/${s.n_total_samples})` : "";
+    const rowCount = s ? s.rows.length : 0;
+    return `
+      <tr class="cc-correction-row" data-value="${escape(v)}">
+        <td><code>${escape(v)}</code>
+          <div class="muted" style="font-size:10px;">
+            ${rowCount > 0 ? `${rowCount} row(s)` : "no rows in CSV"}
+          </div>
+        </td>
+        <td>
+          <select class="cc-correction-action">
+            <option value="accept"${action === "accept" ? " selected" : ""}>Accept</option>
+            <option value="drop"${action === "drop" ? " selected" : ""}>Drop</option>
+          </select>
+        </td>
+        <td>
+          <input type="text" class="cc-correction-text"
+                 value="${escape(text)}"
+                 placeholder="canonical value (comma-separate for multi-direction)"
+                 ${action === "drop" ? "disabled" : ""}/>
+        </td>
+        <td class="muted" style="font-size:10.5px;">${escape(agree)}</td>
+      </tr>
+    `;
+  }).join("");
+
+  container.innerHTML = `
+    <h2>Per-value corrections</h2>
+    <div class="muted" style="font-size:11px; margin-bottom:6px;">
+      Edit the suggested correction for each value. Use a comma-separated
+      list for bi-directional / multi-canonical cases (e.g.
+      <code>NY, New York</code>). Choose <b>Drop</b> to exclude the value
+      from the exported benchmark.
+    </div>
+    <table class="cc-corrections-table">
+      <thead>
+        <tr>
+          <th>Original value</th>
+          <th style="width:90px;">Action</th>
+          <th>Correction</th>
+          <th style="width:90px;" title="LLM agreement (valid_samples / total_samples)">Agree</th>
+        </tr>
+      </thead>
+      <tbody>${rowsHtml}</tbody>
+    </table>
+    <div class="cc-corrections-actions">
+      <button class="cc-corrections-save" type="button">Save corrections</button>
+      <button class="cc-corrections-generate" type="button">Re-generate (LLM)</button>
+      ${hasSavedCorr ? `<button class="cc-corrections-clear" type="button">Clear saved</button>` : ""}
+    </div>
+  `;
+  // Wire up per-row interactivity: keep ccState.draft in sync so we
+  // don't lose the operator's edits when a sibling row changes (and
+  // so re-renders preserve whatever they typed).
+  const persistDraft = () => {
+    const draft = {};
+    container.querySelectorAll(".cc-correction-row").forEach((tr) => {
+      const v = tr.getAttribute("data-value") || "";
+      const action = tr.querySelector(".cc-correction-action")?.value || "drop";
+      const text = tr.querySelector(".cc-correction-text")?.value || "";
+      draft[v] = { action, text };
+    });
+    ccState.draft = draft;
+  };
+  container.querySelectorAll(".cc-correction-action").forEach((sel) => {
+    sel.addEventListener("change", () => {
+      const tr = sel.closest(".cc-correction-row");
+      const input = tr?.querySelector(".cc-correction-text");
+      if (input) input.disabled = (sel.value === "drop");
+      persistDraft();
+    });
+  });
+  container.querySelectorAll(".cc-correction-text").forEach((inp) => {
+    inp.addEventListener("input", persistDraft);
+  });
+  container.querySelector(".cc-corrections-generate")
+    ?.addEventListener("click", () => triggerSuggestCorrections(item));
+  container.querySelector(".cc-corrections-save")
+    ?.addEventListener("click", () => saveCorrectionsFromUI(item));
+  container.querySelector(".cc-corrections-clear")
+    ?.addEventListener("click", () => clearSavedCorrections(item));
+}
+
+// Hit the per-cluster suggest-corrections endpoint (sync). Walks the
+// idle -> running -> results state machine on ``item.cc_corrections``.
+async function triggerSuggestCorrections(item) {
+  const ccState = item.cc_corrections || { phase: "idle" };
+  item.cc_corrections = ccState;
+  ccState.phase = "running";
+  ccState.subPhase = "phase A";
+  ccState.done = 0;
+  ccState.total = 0;
+  renderCorrectionsBlock(item);
+  try {
+    const res = await api(
+      `${API}/clusters/${encodeURIComponent(item.target_id)}/suggest-corrections`,
+      { method: "POST", body: JSON.stringify({}) },
+    );
+    ccState.phase = "results";
+    ccState.suggestions = Array.isArray(res.suggestions) ? res.suggestions : [];
+    // Reset the per-row draft so the new suggestions seed the inputs.
+    ccState.draft = null;
+    // The endpoint also returns saved corrections; refresh the local
+    // copy so subsequent re-renders show the right state without an
+    // extra GET round-trip.
+    if (res.saved_value_corrections) {
+      item.label_value_corrections = res.saved_value_corrections;
+    }
+  } catch (e) {
+    ccState.phase = "error";
+    ccState.error = e.message || String(e);
+  }
+  renderCorrectionsBlock(item);
+}
+
+// Read the per-row UI state, build the value_corrections mapping, and
+// POST it to the server. Drop-action rows are omitted (per design
+// decision #5: absent key = dropped from export).
+async function saveCorrectionsFromUI(item) {
+  const container = document.getElementById("cc-corrections-block");
+  if (!container) return;
+  const value_corrections = {};
+  let invalid = false;
+  container.querySelectorAll(".cc-correction-row").forEach((tr) => {
+    const v = tr.getAttribute("data-value") || "";
+    const action = tr.querySelector(".cc-correction-action")?.value || "drop";
+    const text = (tr.querySelector(".cc-correction-text")?.value || "").trim();
+    if (action === "drop") return;
+    if (!text) {
+      invalid = true;
+      tr.querySelector(".cc-correction-text")?.classList.add("cc-correction-invalid");
+      return;
+    }
+    // Parse comma-separated lists; single-value -> scalar, multi -> list.
+    const parts = text.split(",").map((s) => s.trim()).filter(Boolean);
+    if (parts.length === 0) {
+      invalid = true;
+      return;
+    }
+    value_corrections[v] = parts.length === 1 ? parts[0] : parts;
+  });
+  if (invalid) {
+    toast("fill in or drop every accepted row before saving", 3000);
+    return;
+  }
+  // Tag-prefix the note so the audit log distinguishes manually-typed
+  // corrections from accepted-LLM-output ones. Heuristic: if any row's
+  // text differs from the LLM's consensus for that value, treat the
+  // submission as edited; otherwise treat it as a verbatim accept.
+  const ccState = item.cc_corrections || {};
+  const llmIdx = new Map(
+    (ccState.suggestions || []).map((s) => [s.value, (s.suggestion || []).join(",")]),
+  );
+  let edited = false;
+  for (const [v, val] of Object.entries(value_corrections)) {
+    const arr = Array.isArray(val) ? val : [val];
+    const llmVal = llmIdx.get(v);
+    if (llmVal === undefined || llmVal !== arr.join(",")) {
+      edited = true;
+      break;
+    }
+  }
+  const note_tag = ccState.suggestions && ccState.suggestions.length
+    ? (edited ? "[llm-edited]" : "[llm-suggested]")
+    : "[manual]";
+  document.body.classList.add("saving");
+  try {
+    const res = await api(
+      `${API}/clusters/${encodeURIComponent(item.target_id)}/corrections`,
+      {
+        method: "POST",
+        body: JSON.stringify({ value_corrections, note_tag }),
+      },
+    );
+    item.label_value_corrections = res.saved_value_corrections || {};
+    item.label_note = res.note || item.label_note;
+    toast(`corrections saved (${Object.keys(value_corrections).length} value(s))`);
+    // Re-render the whole detail pane so the canonical-radio block
+    // hides (per design decision #3) now that corrections are saved.
+    renderColClusterDetail(item);
+  } catch (e) {
+    toast(`save failed: ${e.message}`, 3000);
+  } finally {
+    document.body.classList.remove("saving");
+  }
+}
+
+// Wipe the saved value_corrections by POSTing an empty mapping. This
+// re-shows the canonical radio block so the operator can fall back to
+// the bi-directional / endorsed-canonical workflow.
+async function clearSavedCorrections(item) {
+  if (!confirm("Clear all saved corrections for this cluster?")) return;
+  try {
+    const res = await api(
+      `${API}/clusters/${encodeURIComponent(item.target_id)}/corrections`,
+      {
+        method: "POST",
+        body: JSON.stringify({ value_corrections: {}, note_tag: "[manual]" }),
+      },
+    );
+    item.label_value_corrections = res.saved_value_corrections || {};
+    item.label_note = res.note || item.label_note;
+    if (item.cc_corrections) item.cc_corrections.draft = null;
+    renderColClusterDetail(item);
+  } catch (e) {
+    toast(`clear failed: ${e.message}`, 3000);
+  }
+}
+
+// GET cached LLM suggestions + saved value_corrections for a cluster.
+// Called on cluster open (from loadColCluster) so the corrections
+// block surfaces results that a prior per-cluster or batch job
+// already wrote to the LLM cache - without re-spending budget.
+//
+// The endpoint internally calls suggest_corrections_for_clusters
+// with dry_run=True, which replays inconsistency_llm_cache.jsonl and
+// re-aggregates the cached samples into ValueSuggestions. If the
+// cache has no entry for this cluster (no batch / per-cluster job
+// has run yet), the returned cached_suggestions list is empty and
+// the block stays in its idle "Generate" state.
+async function hydrateClusterCorrections(item) {
+  if (!item || !item.target_id) return;
+  // Only hydrate for TP / unsure; other verdicts can't carry
+  // value_corrections so the endpoint would do unnecessary work.
+  const status = item.label_status || "unlabeled";
+  if (status !== "tp" && status !== "unsure") return;
+  // Guard against repeat fetches when the operator navigates back to
+  // a cluster they already opened in this session. ``_cc_hydrated``
+  // sticks to the queue item so it survives renderColClusterDetail
+  // re-renders, but a Generate / Save click resets the state machine
+  // and the user-initiated path overrides whatever we hydrated.
+  if (item._cc_hydrated) return;
+  item._cc_hydrated = true;
+  let res;
+  try {
+    res = await api(
+      `${API}/clusters/${encodeURIComponent(item.target_id)}/corrections`,
+    );
+  } catch (e) {
+    // Surface in the console only; a failed hydration shouldn't
+    // block the operator's review workflow.
+    console.warn("hydrateClusterCorrections fetch failed:", e);
+    return;
+  }
+  // Update saved corrections so the canonical-radio block hides
+  // correctly even if a sibling tab saved while we were elsewhere.
+  if (res.saved_value_corrections) {
+    item.label_value_corrections = res.saved_value_corrections;
+  }
+  const cached = Array.isArray(res.cached_suggestions)
+    ? res.cached_suggestions
+    : [];
+  // Filter out groups whose cache hasn't been populated yet (every
+  // sample is null). If NONE of the groups have any valid samples
+  // we treat the cache as empty so the block stays in idle state -
+  // showing zero suggestions would make every row default to "Drop"
+  // with an empty text input, which would mislead the operator.
+  const hasAnyValidSample = cached.some(
+    (s) => (s && (s.n_valid_samples || 0) > 0),
+  );
+  if (cached.length > 0 && hasAnyValidSample) {
+    const cc = item.cc_corrections || {};
+    item.cc_corrections = cc;
+    // Don't clobber a Generate-in-flight or freshly-saved state.
+    if (cc.phase !== "running" && cc.phase !== "error") {
+      cc.phase = "results";
+      cc.suggestions = cached;
+      // Preserve any existing draft (operator edits in another tab).
+      if (!cc.draft) cc.draft = null;
+    }
+  }
+  // Only re-render the corrections block if this item is still the
+  // selected one - the user may have navigated away while the GET
+  // was in flight.
+  if (state.cluster && state.cluster._cc && state.cluster.cc === item) {
+    renderColClusterDetail(item);
+  }
+}
+
+// Scroll the CSV viewer to the first row whose ``(source, column)``
+// cell equals ``value``. Used by the column-cluster detail pane so
+// clicking a value in the right list navigates the center.
+function scrollCsvToValue(source, column, value) {
+  const viewer = $("#csv-viewer");
+  if (!viewer) return;
+  const cells = viewer.querySelectorAll(
+    `td.clickable[data-col="${cssEscape(column)}"]`,
+  );
+  for (const td of cells) {
+    const raw = td.getAttribute("data-raw");
+    const val = raw != null ? raw : td.textContent || "";
+    if (val !== value) continue;
+    const tr = td.closest("tr");
+    if (tr) {
+      // Scroll inside the viewer only (see scrollCellIntoViewerCentre's
+      // header comment) so this jump can't push the page UI off-screen
+      // under CSS ``zoom``.
+      scrollCellIntoViewerCentre(viewer, tr);
+      // Briefly flash so the operator sees where we landed.
+      flashCell(td);
+    }
+    return;
+  }
+  toast(`value not visible in current slice: "${value.slice(0, 40)}"`);
+}
+
 // Build the per-column Original / Fix surface for a cluster. Returns
 // a list of ``{column, before, after, changed}`` entries (one per
 // column the cluster touches).
@@ -3225,10 +4643,14 @@ async function loadMtViolation(item) {
 // ``before`` empty; renderCsv populates the cache before renderDetail
 // on the standard navigation path, so the empty state is rare.
 //
-// ``after`` prefers the per-detection ``suggested_fix``, then the
-// cluster's synthesis ``canonical_fix`` (only used for single-column
-// clusters where it's unambiguous). The fix may be a literal value or
-// a free-form instruction; we render it verbatim.
+// ``after`` prefers a LITERAL canonical replacement:
+//   1. ``synthesis.canonical_record[col]`` (Phase-B literal).
+//   2. ``detection.corrected_value[col]`` (Phase-A literal).
+//   3. ``synthesis.canonical_fix`` text (single-column clusters only).
+//   4. ``detection.suggested_fix`` text (column-specific).
+//   5. ``synthesis.canonical_fix`` text (multi-column fallback).
+// Literals are the value the operator can paste directly into the
+// cell; the text fallbacks may be instructions ("Capitalize ...").
 function computeBeforeAfter(cluster) {
   const cols = (cluster.columns || []).filter(Boolean);
   if (!cols.length) return [];
@@ -3260,16 +4682,53 @@ function computeBeforeAfter(cluster) {
     return "";
   };
   const synFix = (cluster.synthesis?.canonical_fix || "").toString().trim();
+  const validSynFix = synFix && synFix !== "null";
+  const synRecord = (cluster.synthesis && cluster.synthesis.canonical_record)
+    || null;
+  const synLiteral = (col) => {
+    if (!synRecord || typeof synRecord !== "object") return "";
+    const v = synRecord[col];
+    if (v == null || v === "" || v === "null") return "";
+    return String(v).trim();
+  };
+  const detLiteral = (det, col) => {
+    if (!det) return "";
+    const cv = det.corrected_value;
+    if (!cv || typeof cv !== "object") return "";
+    const v = cv[col];
+    if (v == null || v === "" || v === "null") return "";
+    return String(v).trim();
+  };
   const out = [];
   for (const col of cols) {
     const det = detsByCol.get(col);
     const before = liveValue(col);
     let after = "";
-    if (det && det.suggested_fix != null && det.suggested_fix !== "") {
+    // Prefer LITERAL canonical replacements over free-form text so
+    // the operator sees a single replacement value rather than an
+    // instruction sentence. Order: synthesis.canonical_record[col]
+    // -> detection.corrected_value[col] -> synthesis.canonical_fix
+    // (single-column clusters) -> detection.suggested_fix ->
+    // synthesis.canonical_fix (multi-column fallback).
+    const syl = synLiteral(col);
+    const detl = detLiteral(det, col);
+    if (syl) {
+      after = syl;
+    } else if (detl) {
+      after = detl;
+    } else if (validSynFix && cols.length === 1) {
+      // Single-column cluster: the synthesis fix is unambiguous and
+      // benefits from full row + taxonomy context, so prefer it over
+      // the per-detection suggestion.
+      after = synFix;
+    } else if (det && det.suggested_fix != null && det.suggested_fix !== "") {
       after = String(det.suggested_fix);
-    } else if (synFix && synFix !== "null" && cols.length === 1) {
-      // Synthesis-level fix only applies unambiguously when the cluster
-      // touches a single column.
+    } else if (validSynFix) {
+      // Multi-column fallback: only use synthesis fix when the
+      // per-detection fix is missing. Note this currently ignores the
+      // single-column ambiguity guard for multi-column clusters by
+      // applying the same global synthesis fix to each column - the
+      // reviewer should treat it as guidance rather than literal.
       after = synFix;
     }
     // Skip entries where we have neither value nor suggestion to show.
@@ -3301,12 +4760,50 @@ function renderDetail(bundle) {
     // line breaks so the operator can read them; for non-relation
     // detections this is a no-op (single-line explanations).
     const explanationHtml = escape(d.explanation || "").replaceAll("\n", "<br>");
+    // For multi-column intra-row types, name the violated relation
+    // (kind + columns it spans) inline so the labeller can spot the
+    // rule without parsing free-form explanation text. The columns
+    // list comes verbatim from the detection record; the kind is
+    // mapped from ``error_type`` via ``RELATION_KIND_LABEL``. For
+    // ``fd_violation`` we follow the prompt convention
+    // ``columns = [determinant, dependent, ...]`` and render an
+    // arrow; the calculation types just list the involved columns
+    // (component + derived order is not strictly guaranteed by the
+    // prompt, so we keep the raw order).
+    let relationHintHtml = "";
+    if (MULTI_COL_RELATION_TYPES.has(d.error_type)) {
+      const cols = Array.isArray(d.columns) ? d.columns.filter(Boolean) : [];
+      const kind = RELATION_KIND_LABEL[d.error_type] || "Relation";
+      let columnsHtml;
+      if (d.error_type === "fd_violation" && cols.length >= 2) {
+        const determinant = `<code>${escape(String(cols[0]))}</code>`;
+        const dependents = cols.slice(1)
+          .map((cc) => `<code>${escape(String(cc))}</code>`).join(", ");
+        columnsHtml = `${determinant} &rarr; ${dependents}`;
+      } else if (cols.length) {
+        columnsHtml = cols
+          .map((cc) => `<code>${escape(String(cc))}</code>`).join(", ");
+      } else {
+        columnsHtml = `<i>(no columns specified)</i>`;
+      }
+      relationHintHtml = `<div class="rel-violated"><b>Violated relation:</b> ${kind} on ${columnsHtml}</div>`;
+    }
     return `
     <div class="det-row">
       <div class="et">${escape(d.error_type_name || d.error_type)}</div>
+      ${relationHintHtml}
       <div class="obs"><b>Observed:</b> ${escape(d.observed || "")}</div>
       <div class="fix"><b>Explanation:</b> ${explanationHtml}</div>
       ${d.suggested_fix ? `<div class="fix"><b>Fix:</b> ${escape(d.suggested_fix)}</div>` : ""}
+      ${(() => {
+        const cv = d.corrected_value;
+        if (!cv || typeof cv !== "object") return "";
+        const parts = Object.entries(cv)
+          .filter(([, v]) => v != null && v !== "" && v !== "null")
+          .map(([k, v]) => `<code>${escape(String(k))}</code> &rarr; <code>${escape(String(v))}</code>`);
+        if (!parts.length) return "";
+        return `<div class="fix"><b>Corrected value:</b> ${parts.join(", ")}</div>`;
+      })()}
     </div>
     `;
   }).join("");
@@ -3330,20 +4827,52 @@ function renderDetail(bundle) {
       const lines = String(d.explanation || "").split("\n");
       const predicate = (lines.find((ln) => ln.startsWith("Discovered relation:"))
         || "").replace(/^Discovered relation:\s*/, "").trim();
+      // The flat-issue compiler embeds the machine-evaluable formula on a
+      // ``Formula: <expr>`` line (see RelationViolation.to_flat_issue).
+      // It is only present when the LLM emitted an ``executable`` at
+      // discovery time; rules described only in natural language have
+      // no formula line.
+      const formula = (lines.find((ln) => ln.startsWith("Formula:"))
+        || "").replace(/^Formula:\s*/, "").trim();
       const rationale = (lines.find((ln) => ln.startsWith("Rationale:"))
         || "").replace(/^Rationale:\s*/, "").trim();
       const reviewer = (lines.find((ln) => ln.startsWith("Reviewer reason:"))
         || "").replace(/^Reviewer reason:\s*/, "").trim();
       const detection = (lines.find((ln) => ln.startsWith("Detection:"))
         || "").replace(/^Detection:\s*/, "").trim();
-      const key = `${predicate}::${rationale}`;
+      const key = `${predicate}::${formula}::${rationale}`;
       if (seen.has(key)) continue;
       seen.add(key);
+      // Per-rule affected-rows breakdown. After the affected-rows
+      // fingerprint refinement in the aggregator, two rules in the
+      // same cluster share the same row signature - but the breakdown
+      // is still useful when more than one rule is present, because
+      // it lets the operator confirm that every rule fires on the
+      // same rows (high-confidence stacking) before pressing TP/FP.
+      const affRows = Array.isArray(d.affected_rows)
+        ? [...new Set(d.affected_rows.filter((r) => Number.isFinite(Number(r))))]
+            .map(Number).sort((a, b) => a - b)
+        : [];
+      let affHtml = "";
+      if (affRows.length) {
+        const CHIP_CAP = 24;
+        const visible = affRows.slice(0, CHIP_CAP);
+        const overflow = affRows.length - visible.length;
+        const chips = visible
+          .map((r) => `<span class="sev-chip">${escape(String(r))}</span>`)
+          .join(" ");
+        const tail = overflow > 0
+          ? ` <span class="sev-chip" title="${overflow} more not shown">+${overflow} more</span>`
+          : "";
+        affHtml = `<div style="margin-top:2px; font-size:11.5px;"><b>Affects rows (${affRows.length}):</b> ${chips}${tail}</div>`;
+      }
       items.push(`
         <div style="margin-top:6px;">
           <div><b>Predicate:</b> ${escape(predicate || "(unknown)")}</div>
+          ${formula ? `<div style="margin-top:2px;"><b>Formula:</b> <code>${escape(formula)}</code></div>` : ""}
           ${rationale ? `<div style="margin-top:2px;"><b>Rationale:</b> ${escape(rationale)}</div>` : ""}
           ${reviewer ? `<div style="margin-top:2px;"><b>Reviewer reason:</b> ${escape(reviewer)}</div>` : ""}
+          ${affHtml}
           ${detection ? `<div style="margin-top:2px; color: var(--muted); font-size: 11.5px;">${escape(detection)}</div>` : ""}
         </div>
       `);
@@ -3356,37 +4885,119 @@ function renderDetail(bundle) {
     `;
   }
 
-  // Duplicate-group summary: only meaningful for row_duplication
-  // clusters. We collect the union of every detection's
-  // ``affected_rows`` (plus the primary row) and surface the count +
-  // row-list so the operator can verify the group at a glance and
-  // jump into the context table (where these rows are already
-  // amber-highlighted via the .dup-group class).
+  // Multi-row summary: meaningful for any cluster whose detections
+  // collectively span more than one row. For ``row_duplication`` it
+  // is the duplicate-group row list; for relation rules
+  // (``string_calculation_inconsistency``, FD, etc.) it is the set
+  // of rows that failed the rule and are now covered by ONE
+  // cluster after per-incident aggregation in
+  // ``compile_code_violations``. The TP/FP click on this cluster
+  // auto-applies to every cell in this set on export, so surfacing
+  // the list lets the operator verify the scope before deciding.
   let dupBlockHtml = "";
   const isDupCluster = (c.error_types || []).includes("row_duplication");
-  if (isDupCluster) {
-    const rows = new Set([Number(c.row)]);
+  {
+    const rows = new Set();
+    if (Number.isFinite(Number(c.row))) rows.add(Number(c.row));
     for (const d of c.detections || []) {
       for (const r of d.affected_rows || []) {
         const n = Number(r);
         if (Number.isFinite(n)) rows.add(n);
       }
     }
-    const sorted = [...rows].sort((a, b) => a - b);
-    const keyCols = (c.columns || []).join(", ");
-    dupBlockHtml = `
-      <div class="block">
-        <h2>Duplicate group (${sorted.length} rows)</h2>
-        <div class="cols">key: [${escape(keyCols)}]</div>
-        <div style="margin-top:6px; font-size:12px;">
-          rows: ${sorted.map((r) => `<span class="sev-chip">${escape(String(r))}</span>`).join(" ")}
+    if (rows.size > 1) {
+      const sorted = [...rows].sort((a, b) => a - b);
+      const keyCols = (c.columns || []).join(", ");
+      const heading = isDupCluster
+        ? `Duplicate group (${sorted.length} rows)`
+        : `Affected rows (${sorted.length})`;
+      const subhead = isDupCluster
+        ? `key: [${escape(keyCols)}]`
+        : `columns: [${escape(keyCols)}] \u00b7 one TP/FP click auto-applies to every (row, col) cell below`;
+      // Big row groups are hostile to render — cap the displayed
+      // chip list and show a "+N more" tail so very long lists
+      // don't blow the cluster panel layout.
+      const CHIP_CAP = 80;
+      const visible = sorted.slice(0, CHIP_CAP);
+      const overflow = sorted.length - visible.length;
+      const chips = visible
+        .map((r) => `<span class="sev-chip">${escape(String(r))}</span>`)
+        .join(" ");
+      const tail = overflow > 0
+        ? ` <span class="sev-chip" title="${overflow} more not shown">+${overflow} more</span>`
+        : "";
+      dupBlockHtml = `
+        <div class="block">
+          <h2>${heading}</h2>
+          <div class="cols">${subhead}</div>
+          <div style="margin-top:6px; font-size:12px;">
+            rows: ${chips}${tail}
+          </div>
         </div>
-      </div>
-    `;
+      `;
+    }
   }
 
   const currentStatus = label?.status || "";
   const btn = (s, key) => `<button data-status="${s}" class="${s}${currentStatus === s ? " active" : ""}" title="key ${key}">${s} <kbd>${key}</kbd></button>`;
+
+  // Per-cell note overrides: enumerate every (row, column) the
+  // cluster covers, so the operator can give one cell a different
+  // note from its siblings without losing the shared cluster note.
+  // The primary row + each detection's affected_rows define the row
+  // set; ``c.columns`` defines the column set. ``""`` is dropped
+  // because row-level findings have no column anchor and per-cell
+  // notes aren't meaningful in that case.
+  const cellNoteRows = (() => {
+    const rows = new Set();
+    if (Number.isFinite(Number(c.row))) rows.add(Number(c.row));
+    for (const d of c.detections || []) {
+      for (const r of d.affected_rows || []) {
+        const n = Number(r);
+        if (Number.isFinite(n)) rows.add(n);
+      }
+    }
+    return [...rows].sort((a, b) => a - b);
+  })();
+  const cellNoteCols = (c.columns || []).filter((col) => !!col);
+  const cellNoteCells = [];
+  for (const r of cellNoteRows) {
+    for (const col of cellNoteCols) {
+      cellNoteCells.push({ row: r, column: col });
+    }
+  }
+  const cellNoteRowsHtml = cellNoteCells.length
+    ? cellNoteCells.map(({ row, column }) => {
+        const key = `${c.source}\x00${row}\x00${column}`;
+        const existing = state.cellNoteOverrides.get(key) || "";
+        const safeRow = String(row);
+        return `
+          <div class="cell-note-row" style="display:flex; gap:6px; align-items:flex-start; margin-top:6px;">
+            <div style="flex:0 0 auto; min-width:140px; font-size:11.5px; color: var(--muted);">
+              row ${escape(safeRow)} · ${escape(column)}
+            </div>
+            <textarea class="cell-note-input" rows="1"
+                      data-source="${escape(c.source)}"
+                      data-row="${escape(safeRow)}"
+                      data-column="${escape(column)}"
+                      style="flex:1 1 auto; min-height:24px;"
+                      placeholder="(falls back to cluster note)">${escape(existing)}</textarea>
+            <span class="cell-note-status muted" style="flex:0 0 60px; font-size:11px;"></span>
+          </div>
+        `;
+      }).join("")
+    : `<div class="placeholder">(no per-cell anchor; row-level finding)</div>`;
+  const cellNoteBlockHtml = `
+    <div class="block">
+      <h2>Per-cell note overrides</h2>
+      <div class="muted" style="font-size:11px;">
+        Per-cell note that supersedes the cluster note above for a
+        single (row, column) cell at export time. Empty = use the
+        cluster note. Saved on blur.
+      </div>
+      ${cellNoteRowsHtml}
+    </div>
+  `;
 
   // LLM-proposed corrected value. We prefer the cluster's reconciled
   // ``synthesis.canonical_fix`` (Phase B for multi-type clusters,
@@ -3503,7 +5114,7 @@ function renderDetail(bundle) {
         <input id="propagate-same-value" type="checkbox" checked />
         <span style="color: var(--muted); font-size: 11.5px;">
           Apply this verdict to other rows with the same value
-          (TP/partial → FN siblings; FP → FP sibling clusters)
+          (TP/partial → FN siblings; FP/unsure/skip → FP/unsure/skip sibling clusters)
         </span>
       </label>
       <label class="field">
@@ -3512,6 +5123,8 @@ function renderDetail(bundle) {
       </label>
       ${label ? `<div class="muted" style="margin-top:6px; font-size:11px;">last: ${escape(label.status)} by ${escape(label.annotator)} @ ${escape(label.ts)}</div>` : ""}
     </div>
+
+    ${cellNoteBlockHtml}
 
     ${dupBlockHtml}
 
@@ -3523,6 +5136,46 @@ function renderDetail(bundle) {
 
   el.querySelectorAll("#verdict-buttons button").forEach((b) => {
     b.addEventListener("click", () => submitLabel(b.dataset.status, { advance: false }));
+  });
+
+  // Per-cell note override: save on blur. POST to /cell-notes with
+  // the cell triple + free-text note. The server treats an empty
+  // note as a tombstone (= "no override"), so simply clearing the
+  // textarea and tabbing out reverts to the cluster's note for that
+  // cell. The local cache is mutated in place so re-rendering the
+  // same cluster (or another cluster sharing a cell) sees the new
+  // value without a round-trip.
+  el.querySelectorAll(".cell-note-input").forEach((ta) => {
+    ta.addEventListener("blur", async () => {
+      const source = ta.dataset.source || "";
+      const row = Number(ta.dataset.row);
+      const column = ta.dataset.column || "";
+      if (!source || !Number.isFinite(row) || !column) return;
+      const key = `${source}\x00${row}\x00${column}`;
+      const prior = state.cellNoteOverrides.get(key) || "";
+      const next = ta.value || "";
+      if (prior === next) return;
+      const statusEl = ta.parentElement?.querySelector(".cell-note-status");
+      if (statusEl) statusEl.textContent = "saving…";
+      try {
+        await api(`${API}/cell-notes`, {
+          method: "POST",
+          body: JSON.stringify({ source, row, column, note: next }),
+        });
+        if (next && next.trim()) {
+          state.cellNoteOverrides.set(key, next);
+        } else {
+          state.cellNoteOverrides.delete(key);
+        }
+        if (statusEl) {
+          statusEl.textContent = "saved";
+          setTimeout(() => { statusEl.textContent = ""; }, 1500);
+        }
+      } catch (exc) {
+        console.warn("cell-note save failed:", exc);
+        if (statusEl) statusEl.textContent = "failed";
+      }
+    });
   });
 
   // LLM prefill UX: the "from-llm" flag dims the input until the
@@ -3915,6 +5568,10 @@ async function renderCsv(cluster) {
   // Update the exclusion bar's chip strip / button enable-state
   // whenever the focused CSV changes.
   if (sourceChanged) updateExclusionUi();
+  // The +Add inconsistency cluster button lives in the CSV head and
+  // should be visible whenever a CSV is loaded in the center pane.
+  const addBtn = document.getElementById("add-cluster-btn");
+  if (addBtn) addBtn.hidden = !source;
 
   const start = Math.max(0, targetRow - CSV_WINDOW);
   const limit = CSV_WINDOW * 2 + 1;
@@ -3941,10 +5598,15 @@ async function renderCsv(cluster) {
 
   const cacheKey = `${source}:${start}:${limit}`;
   let data = state.csvCache.get(cacheKey);
-  if (!data) {
+  if (data) {
+    // LRU bump - rewriting the entry moves it to the most-recent slot
+    // so it survives the next ``_trimMap`` pass.
+    _touchKey(state.csvCache, cacheKey);
+  } else {
     try {
       data = await api(`${API}/sources/${encodeURIComponent(source)}?start=${start}&limit=${limit}`);
       state.csvCache.set(cacheKey, data);
+      _trimMap(state.csvCache, CSV_CACHE_MAX);
     } catch (e) {
       viewer.innerHTML = `<div class="placeholder">Failed to load ${escape(source)}: ${escape(e.message)}</div>`;
       return;
@@ -4074,7 +5736,7 @@ async function renderCsv(cluster) {
           }
         }
       }
-      html += `<td class="${classes}" data-row="${escape(String(r.row))}" data-col="${escape(col)}" ${titleAttr}>${renderCsvCellHtml(value)}${chipsHtml}</td>`;
+      html += `<td class="${classes}" data-row="${escape(String(r.row))}" data-col="${escape(col)}" data-raw="${escape(valueStr)}" ${titleAttr}>${renderCsvCellHtml(value)}${chipsHtml}</td>`;
     }
     html += "</tr>";
   }
@@ -4114,13 +5776,19 @@ async function renderCsv(cluster) {
   // view in BOTH axes. Tables wider/taller than the viewport would
   // otherwise leave the highlighted cell off-screen, forcing the
   // operator to scroll manually to see what was flagged.
+  //
+  // ``scrollCellIntoViewerCentre`` scrolls ONLY the viewer (see its
+  // header comment) -- a plain ``cell.scrollIntoView({ block: "center"
+  // })`` would bubble up past ``overflow: hidden`` ancestors (html,
+  // body, .center) and could push the workbench UI off-screen,
+  // especially on zoomed-down viewports.
   requestAnimationFrame(() => {
     const tr = viewer.querySelector(`tr[data-row="${targetRow}"]`);
     if (!tr) return;
     // Pick the first .flagged cell on the target row; if none (e.g.
     // FN browsing mode), fall back to the row itself.
     const cell = tr.querySelector("td.flagged") || tr;
-    cell.scrollIntoView({ block: "center", inline: "center", behavior: "smooth" });
+    scrollCellIntoViewerCentre(viewer, cell);
   });
 
   // Stamp the slice we just rendered so a follow-up renderCsv can
@@ -4193,14 +5861,20 @@ function applyCsvHighlights(cluster) {
     const tr = viewer.querySelector(`tr[data-row="${targetRow}"]`);
     if (!tr) return;
     const cell = tr.querySelector("td.flagged") || tr;
-    cell.scrollIntoView({ block: "center", inline: "center", behavior: "smooth" });
+    // Same rationale as the renderCsv path: viewer-scoped scroll so
+    // soft-repaint advances don't leak scroll onto html / body /
+    // .center.
+    scrollCellIntoViewerCentre(viewer, cell);
   });
 }
 
 // ----------------------------------------------------------- cell state
 
 async function loadCellState(source, { force = false } = {}) {
-  if (!force && state.cellState.has(source)) return state.cellState.get(source);
+  if (!force && state.cellState.has(source)) {
+    _touchKey(state.cellState, source);
+    return state.cellState.get(source);
+  }
   let map = new Map();
   try {
     const r = await api(`${API}/sources/${encodeURIComponent(source)}/cells`);
@@ -4211,6 +5885,7 @@ async function loadCellState(source, { force = false } = {}) {
     // Soft failure: cells just won't be coloured.
   }
   state.cellState.set(source, map);
+  _trimMap(state.cellState, CELL_STATE_MAX);
   return map;
 }
 
@@ -4231,6 +5906,40 @@ function repaintCellStates(source) {
       if (ce.superseded_fn_by) td.classList.add("cell-shadowed");
     }
   });
+}
+
+// Cheap targeted version of ``repaintCellStates`` that only touches
+// the ONE <td> at (row, col). The full-grid repaint above does a
+// querySelectorAll + className split/filter/join per cell; with a
+// 200-row × 10-col CSV that's 2000 string allocations on every
+// keystroke, which is what made the 1/2/3/4 verdict keys feel
+// "sticky". Here we just find the single TD, drop any cell-* class
+// via classList, and add the new one. Used in submitLabel's Phase 1
+// where we know exactly which cells changed; the full repaint is
+// still used for propagation cascades and on initial load.
+function paintSingleCellState(source, row, col) {
+  if (state.currentSource !== source) return;
+  const map = state.cellState.get(source);
+  const viewer = $("#csv-viewer");
+  if (!viewer) return;
+  // CSS.escape handles columns with quotes / spaces / brackets in
+  // their names; rows are numeric and don't need escaping.
+  const td = viewer.querySelector(
+    `td.clickable[data-row="${row}"][data-col="${CSS.escape(col)}"]`,
+  );
+  if (!td) return;
+  // Collect cell-* classes in one classList pass (no string ops on
+  // the whole className).
+  const toRemove = [];
+  for (const cls of td.classList) {
+    if (cls.startsWith("cell-")) toRemove.push(cls);
+  }
+  if (toRemove.length) td.classList.remove(...toRemove);
+  const ce = map && map.get(`${row}\x00${col}`);
+  if (ce) {
+    td.classList.add(`cell-${ce.state}`);
+    if (ce.superseded_fn_by) td.classList.add("cell-shadowed");
+  }
 }
 
 // ----------------------------------------------------------- popover
@@ -4357,9 +6066,11 @@ function openCellPopover(anchorEl, source, row, col) {
     // Same-value propagation toggle for popover-driven cluster
     // re-labels. The TP/Partial branch needs a correction to FN-spread
     // siblings; the popover doesn't collect one, so propagation only
-    // fires for FP here. We keep the checkbox visible (and checked)
-    // for all four verdicts, but submitClusterStatusForCell skips
-    // propagation when status != fp.
+    // fires for FP / Unsure / Skip here (each spreads its own verdict
+    // to other clusters on (source, column) with the same anchor
+    // value). We keep the checkbox visible (and checked) for all
+    // verdicts; submitClusterStatusForCell skips propagation for
+    // TP/Partial.
     body += propagateCheckboxHtml(cellValueRaw, "");
     body += `<div class="actions">
       <button class="tp"      data-cluster-status="tp"     >TP</button>
@@ -4382,7 +6093,7 @@ function openCellPopover(anchorEl, source, row, col) {
       ${propagateCheckboxHtml(cellValueRaw, ce.corrected_value)}
       <div class="actions">
         <button class="fn"     data-cell-status="fn"  data-update="1">Update</button>
-        <button class="fp"     data-cell-status="fp">Clear FN</button>
+        <button class="fp"     data-cell-status="unlabeled">Remove FN</button>
         <button class="close"  data-action="close">Close</button>
       </div>`;
     pop.innerHTML = body;
@@ -4425,9 +6136,9 @@ function openCellPopover(anchorEl, source, row, col) {
     b.addEventListener("click", async () => {
       const cid = pop.dataset.clusterId;
       const status = b.getAttribute("data-cluster-status");
-      // Propagate flag is honoured only when status === 'fp' (the
+      // Propagate flag is honoured for fp / unsure / skip (the
       // cluster-status propagation endpoint requires no corrected
-      // value); other verdicts ignore it because the popover doesn't
+      // value); tp/partial ignore it because the popover doesn't
       // collect a corrected value to FN-spread to siblings.
       const propagate = !!pop.querySelector("[data-field='propagate-same-value']")?.checked;
       await submitClusterStatusForCell(cid, status, {
@@ -4538,12 +6249,9 @@ async function submitCellLabel(source, row, col, status, { note, corrected, prop
     if (state.currentSource === source) repaintCellStates(source);
     scheduleStatsRefresh();
     scheduleSourceMetaRefresh();
-    // Background reconciliation: catch any shadow/precedence edge
-    // cases the local mirror missed. Not awaited - the UI is
-    // already in a good state.
-    loadCellState(source, { force: true })
-      .then(() => { if (state.currentSource === source) repaintCellStates(source); })
-      .catch(() => {});
+    // Background reconciliation - debounced so back-to-back FN /
+    // popover saves don't fire a /cells GET storm.
+    scheduleCellStateReload(source);
   } catch (e) {
     toast(`error: ${e.message}`, 3000);
   }
@@ -4572,16 +6280,19 @@ async function submitClusterStatusForCell(clusterId, status, opts = {}) {
         note: "",
       }),
     });
-    // Same-value propagation: only fp from the popover (the popover
-    // doesn't collect a corrected value, so we can't FN-spread on
-    // tp/partial). Skip when the seed cell was empty - the column
-    // would match every blank sibling and FP-spam other clusters.
+    // Same-value propagation: fp / unsure / skip from the popover (the
+    // popover doesn't collect a corrected value, so we can't FN-spread
+    // on tp/partial). Skip when the seed cell was empty - the column
+    // would match every blank sibling and spam other clusters.
     let propagated = 0;
     let propagateResult = null;
     const anchorTrimmed = (anchorValue || "").trim();
+    const isClusterPropagateStatus = (
+      status === "fp" || status === "unsure" || status === "skip"
+    );
     if (
       propagate
-      && status === "fp"
+      && isClusterPropagateStatus
       && c.source && Number.isInteger(c.row) && (cols[0] || null)
       && anchorTrimmed
     ) {
@@ -4592,20 +6303,20 @@ async function submitClusterStatusForCell(clusterId, status, opts = {}) {
             source: c.source,
             row: c.row,
             column: cols[0],
-            status: "fp",
+            status,
             note: `(auto: same-value as ${clusterId})`,
           }),
         });
         propagated = r.propagated || 0;
         propagateResult = r;
         // Repaint queue dots for siblings cascaded by the backend.
-        applyPropagatedClustersToQueue(r.clusters || [], "fp");
+        applyPropagatedClustersToQueue(r.clusters || [], status);
       } catch (e) {
         toast(`propagation failed: ${e.message}`, 3000);
       }
     }
     const parts = [`cluster saved: ${status}`];
-    if (propagated) parts.push(`+${propagated} fp auto-applied`);
+    if (propagated) parts.push(`+${propagated} ${status} auto-applied`);
     toast(parts.join(" \u00B7 "));
     // If the cluster being edited is also the active queue selection,
     // reflect the new verdict in the queue dot + verdict buttons.
@@ -4647,10 +6358,8 @@ async function submitClusterStatusForCell(clusterId, status, opts = {}) {
     if (state.currentSource === c.source) repaintCellStates(c.source);
     scheduleStatsRefresh();
     scheduleSourceMetaRefresh();
-    // Background reconciliation - non-blocking.
-    loadCellState(c.source, { force: true })
-      .then(() => { if (state.currentSource === c.source) repaintCellStates(c.source); })
-      .catch(() => {});
+    // Background reconciliation - debounced (see comment in submitLabel).
+    scheduleCellStateReload(c.source);
   } catch (e) {
     toast(`error: ${e.message}`, 3000);
   }
@@ -4914,10 +6623,32 @@ async function submitMtLabel(displayStatus, { advance }) {
     toast(`'${displayStatus}' is not a valid cross-sheet verdict (use tp/fp/partial/unsure)`);
     return;
   }
-  if (submitLabel._inFlight) return;
-  submitLabel._inFlight = true;
-  document.body.classList.add("saving");
   const note = ($("#note")?.value || "").trim();
+
+  // ----- Phase 1: synchronous local updates --------------------
+  const submittedIndex = state.index;
+  const submittedQueueItem = state.queue[submittedIndex];
+  const priorLabel = submittedQueueItem?.label_status || null;
+  if (submittedQueueItem) submittedQueueItem.label_status = displayStatus;
+  const submittedRowEl = document.querySelector(
+    `#queue .row[data-queue-index="${submittedIndex}"]`,
+  );
+  if (submittedRowEl) {
+    const dot = submittedRowEl.querySelector(".dot");
+    if (dot) dot.className = "dot " + displayStatus;
+  }
+  scheduleGroupCountsUpdate();
+  document.querySelectorAll("#verdict-buttons button").forEach((b) => {
+    b.classList.toggle("active", b.dataset.status === displayStatus);
+  });
+  if (advance) selectIndex(nextUnlabeledIndex(submittedIndex + 1));
+
+  // ----- Phase 2: network (background) -------------------------
+  if (!submitLabel._inFlightFor) submitLabel._inFlightFor = new Set();
+  const lockKey = `mt:${d.violation_id}\x00${displayStatus}`;
+  if (submitLabel._inFlightFor.has(lockKey)) return;
+  submitLabel._inFlightFor.add(lockKey);
+  document.body.classList.add("saving");
   try {
     const res = await api(`${API}/multi-table-labels`, {
       method: "POST",
@@ -4932,33 +6663,107 @@ async function submitMtLabel(displayStatus, { advance }) {
     });
     d.label = res.label;
     d.history = res.history;
-    const q = state.queue[state.index];
-    if (q) {
-      q.label_status = displayStatus;
-    }
-    const row = document.querySelector(`#queue .row[data-queue-index="${state.index}"]`);
-    if (row) {
-      const dot = row.querySelector(".dot");
-      if (dot) dot.className = "dot " + displayStatus;
-    }
-    updateGroupCounts();
-    document.querySelectorAll("#verdict-buttons button").forEach((b) => {
-      b.classList.toggle("active", b.dataset.status === displayStatus);
-    });
     toast(`saved: ${displayStatus} (${mtStatus.replace(/_/g, " ")})`);
-    if (advance) selectIndex(nextUnlabeledIndex(state.index + 1));
   } catch (e) {
     toast(`save failed: ${e.message}`, 3000);
+    if (submittedQueueItem) submittedQueueItem.label_status = priorLabel;
+    if (submittedRowEl) {
+      const dot = submittedRowEl.querySelector(".dot");
+      if (dot) dot.className = "dot " + (priorLabel || "unlabeled");
+    }
+    scheduleGroupCountsUpdate();
   } finally {
-    submitLabel._inFlight = false;
-    document.body.classList.remove("saving");
-    // If the operator pressed Enter while the digit's POST was
-    // still in flight, honour that queued advance now that the
-    // save has settled. Skip when this call already advanced -
-    // otherwise mashing Enter would skip two clusters per save.
-    if (submitLabel._pendingAdvance) {
-      submitLabel._pendingAdvance = false;
-      if (!advance) selectIndex(nextUnlabeledIndex(state.index + 1));
+    submitLabel._inFlightFor.delete(lockKey);
+    if (submitLabel._inFlightFor.size === 0) {
+      document.body.classList.remove("saving");
+    }
+  }
+}
+
+// Submit a TP/FP/Partial/Unsure/Skip verdict for a column-cluster.
+// Persists as a Label with target=column_cluster. No corrected-value
+// flow (canonical is fixed by the cluster definition) and no
+// same-value propagation (that's a per-cell concept).
+async function submitColClusterLabel(displayStatus, { advance }) {
+  const wrapper = state.cluster;
+  if (!wrapper || !wrapper._cc) return;
+  const item = wrapper.cc;
+  const note = ($("#note")?.value ?? "").trim();
+  // Read the canonical-pick radio. Empty value => "Leave bi-directional"
+  // => null on the wire (server treats null and missing identically).
+  // Only TP / Partial verdicts should carry a canonical; FP / Unsure /
+  // Skip verdicts forcibly null it (the operator rejected the cluster
+  // or didn't decide, so endorsing a canonical is meaningless).
+  const canonRadio = document.querySelector(
+    '#cc-canonical-pick-list input[name="cc-canonical-pick"]:checked',
+  );
+  const pickedCanon = canonRadio ? canonRadio.value : "";
+  const confirmedCanonical = (
+    (displayStatus === "tp" || displayStatus === "partial")
+    && pickedCanon
+  ) ? pickedCanon : null;
+
+  // Phase 1: synchronous local updates.
+  const submittedIndex = state.index;
+  const submittedQueueItem = state.queue[submittedIndex];
+  const priorLabel = submittedQueueItem?.label_status || null;
+  if (submittedQueueItem) submittedQueueItem.label_status = displayStatus;
+  const submittedRowEl = document.querySelector(
+    `#queue .row[data-queue-index="${submittedIndex}"]`,
+  );
+  if (submittedRowEl) {
+    const dot = submittedRowEl.querySelector(".dot");
+    if (dot) dot.className = "dot " + displayStatus;
+  }
+  scheduleGroupCountsUpdate();
+  document.querySelectorAll("#verdict-buttons button").forEach((b) => {
+    b.classList.toggle("active", b.dataset.status === displayStatus);
+  });
+  if (advance) selectIndex(nextUnlabeledIndex(submittedIndex + 1));
+
+  // Phase 2: network.
+  if (!submitLabel._inFlightFor) submitLabel._inFlightFor = new Set();
+  const lockKey = `cc:${item.target_id}\x00${displayStatus}`;
+  if (submitLabel._inFlightFor.has(lockKey)) return;
+  submitLabel._inFlightFor.add(lockKey);
+  document.body.classList.add("saving");
+  try {
+    await api(`${API}/labels`, {
+      method: "POST",
+      body: JSON.stringify({
+        target: "column_cluster",
+        target_id: item.target_id,
+        source: item.source,
+        column: item.column,
+        columns: [item.column],
+        status: displayStatus,
+        confirmed_canonical: confirmedCanonical,
+        note,
+      }),
+    });
+    item.label_status = displayStatus;
+    item.label_note = note;
+    item.label_confirmed_canonical = confirmedCanonical;
+    toast(`saved: ${displayStatus}`);
+    // Keep the global status pills (labelled / tp / fp / unsure / …)
+    // and per-source "checked" counts in sync with the verdict we
+    // just saved. The cell-cluster submitLabel path does the same;
+    // omitting it here was the reason column-cluster verdicts
+    // appeared to "not update" the stats bar.
+    scheduleStatsRefresh();
+    scheduleSourceMetaRefresh();
+  } catch (e) {
+    toast(`save failed: ${e.message}`, 3000);
+    if (submittedQueueItem) submittedQueueItem.label_status = priorLabel;
+    if (submittedRowEl) {
+      const dot = submittedRowEl.querySelector(".dot");
+      if (dot) dot.className = "dot " + (priorLabel || "unlabeled");
+    }
+    scheduleGroupCountsUpdate();
+  } finally {
+    submitLabel._inFlightFor.delete(lockKey);
+    if (submitLabel._inFlightFor.size === 0) {
+      document.body.classList.remove("saving");
     }
   }
 }
@@ -4976,23 +6781,76 @@ async function submitLabel(status, { advance = true } = {}) {
     }
     return submitMtLabel(status, { advance });
   }
-  // Re-entrancy guard: a fast operator can press Enter (or 1-5) again
-  // while the previous POST is still in flight, which would race two
-  // /api/labels writes on the same cluster and double-fire the
-  // same-value propagation. We drop the second click silently - the
-  // verdict for the same cluster is idempotent and `advance` will
-  // happen at the end of the first call anyway.
-  if (submitLabel._inFlight) return;
-  submitLabel._inFlight = true;
-  document.body.classList.add("saving");
+  // Column-cluster verdicts post to /labels with target=column_cluster.
+  // No corrected-value flow (canonical is fixed by the cluster
+  // definition), no cell-state mirroring, no same-value propagation
+  // (that's a row-level concept).
+  if (state.cluster._cc) {
+    return submitColClusterLabel(status, { advance });
+  }
   const c = state.cluster.cluster;
+
+  // ----- Phase 1: synchronous local updates ---------------------
+  // Apply the verdict locally first - queue dot, group counts,
+  // verdict-button highlight, CSV cell colour - so the operator sees
+  // the change at zero latency. The network round-trip continues in
+  // a background IIFE below; advancing to the next cluster also
+  // happens here (before any await), which is what removes the
+  // perceived ~200 ms wait between pressing a verdict key and seeing
+  // the next item.
   const corrected = ($("#corrected-value")?.value ?? "").trim();
   const note = ($("#note")?.value ?? "");
+  const cols = Array.isArray(c.columns) ? c.columns.filter(Boolean) : [];
+  const submittedIndex = state.index;
+  const submittedQueueItem = state.queue[submittedIndex];
+  const priorLabel = submittedQueueItem?.label_status || null;
+  if (submittedQueueItem) submittedQueueItem.label_status = status;
+  const submittedRowEl = document.querySelector(
+    `#queue .row[data-queue-index="${submittedIndex}"]`,
+  );
+  if (submittedRowEl) {
+    const dot = submittedRowEl.querySelector(".dot");
+    if (dot) dot.className = "dot " + status;
+  }
+  // Defer the full queue-counts recompute to a separate task so the
+  // browser can paint the new verdict button + queue dot first.
+  scheduleGroupCountsUpdate();
+  document.querySelectorAll("#verdict-buttons button").forEach((b) => {
+    b.classList.toggle("active", b.dataset.status === status);
+  });
+  if (c.source && Number.isInteger(c.row)) {
+    for (const col of cols) {
+      bumpCellStateLocal(c.source, c.row, col, status, {
+        cluster_ids: [c.cluster_id],
+        error_types: c.error_types || [],
+        note,
+        corrected_value: corrected || null,
+        label_source: "cluster",
+      });
+      // Targeted single-cell paint (much cheaper than a full
+      // ``repaintCellStates`` scan of every td.clickable).
+      paintSingleCellState(c.source, c.row, col);
+    }
+  }
+  // Advance NOW (synchronously) so the keyboard feel is instant.
+  // ``loadCluster`` inside ``selectIndex`` is still async, but the
+  // queue's active row + scroll position update right away.
+  if (advance) selectIndex(nextUnlabeledIndex(submittedIndex + 1));
+
+  // ----- Phase 2: network (background) --------------------------
+  // Dedup identical (cluster, status) writes already in flight - the
+  // typical "press 1 then Enter" pattern fires two submitLabel calls
+  // but should only POST once; the server's append-only store is
+  // happy with duplicates but we save bandwidth and noise in the
+  // audit log. Different status on the same cluster (mind-change)
+  // still POSTs - latest-wins.
+  if (!submitLabel._inFlightFor) submitLabel._inFlightFor = new Set();
+  const lockKey = `${c.cluster_id}\x00${status}`;
+  if (submitLabel._inFlightFor.has(lockKey)) return;
+  submitLabel._inFlightFor.add(lockKey);
+  document.body.classList.add("saving");
+
   try {
-    const cols = Array.isArray(c.columns) ? c.columns.filter(Boolean) : [];
-    // Mirror the scalar correction across every column the cluster
-    // covers so the per-column map stays the source of truth even
-    // when the UI only collects one input.
     const correctedMap = (corrected && cols.length)
       ? Object.fromEntries(cols.map((col) => [col, corrected]))
       : {};
@@ -5012,18 +6870,6 @@ async function submitLabel(status, { advance = true } = {}) {
       }),
     });
     state.latest[c.cluster_id] = record;
-    // Update the queue dot without a round-trip.
-    const q = state.queue[state.index];
-    if (q) q.label_status = status;
-    const row = document.querySelector(`#queue .row[data-queue-index="${state.index}"]`);
-    if (row) {
-      const dot = row.querySelector(".dot");
-      dot.className = "dot " + status;
-    }
-    updateGroupCounts();
-    document.querySelectorAll("#verdict-buttons button").forEach((b) => {
-      b.classList.toggle("active", b.dataset.status === status);
-    });
     // Skip cascades to the whole row: when the operator marks one
     // cluster as ``skip``, every other cluster on the same (source, row)
     // that is still unlabeled also gets skipped, so we can move past
@@ -5033,22 +6879,25 @@ async function submitLabel(status, { advance = true } = {}) {
       cascaded = await skipRowSiblings(c);
     }
     // Same-value propagation: branch on verdict.
-    //   TP / Partial: walk the column and FN-label other rows holding
-    //                 the identical erroneous value (the LLM missed
-    //                 those siblings). Requires a corrected_value.
-    //   FP:          walk the column and FP every OTHER cluster on
-    //                 (source, column) whose anchor cell value matches
-    //                 - if "AcmeCo" is correct here, it's correct
-    //                 wherever else the LLM flagged it. No corrected
-    //                 value needed.
-    //   Unsure / Skip: never propagate (uncertainty shouldn't spread;
-    //                  skip has its own row-cascade above).
+    //   TP / Partial:   walk the column and FN-label other rows holding
+    //                   the identical erroneous value (the LLM missed
+    //                   those siblings). Requires a corrected_value.
+    //   FP / Unsure /   walk the column and apply the SAME verdict to
+    //   Skip:           every OTHER cluster on (source, column) whose
+    //                   anchor cell value matches - if the verdict
+    //                   holds here, it likely holds wherever else the
+    //                   LLM flagged the same value. No corrected
+    //                   value needed. Skip continues to row-cascade
+    //                   independently above.
     let propagated = 0;
     let propagateFnResult = null;
     let propagateClusterResult = null;
     const propagateChk = document.getElementById("propagate-same-value");
     const wantPropagate = !!(propagateChk && propagateChk.checked);
     const firstCol = (c.columns || [])[0];
+    const isClusterPropagateStatus = (
+      status === "fp" || status === "unsure" || status === "skip"
+    );
     if (
       wantPropagate
       && (status === "tp" || status === "partial")
@@ -5074,7 +6923,7 @@ async function submitLabel(status, { advance = true } = {}) {
       }
     } else if (
       wantPropagate
-      && status === "fp"
+      && isClusterPropagateStatus
       && c.source && Number.isInteger(c.row) && firstCol
     ) {
       try {
@@ -5084,15 +6933,15 @@ async function submitLabel(status, { advance = true } = {}) {
             source: c.source,
             row: c.row,
             column: firstCol,
-            status: "fp",
+            status,
             note: `(auto: same-value as ${c.cluster_id})`,
           }),
         });
         propagated = r.propagated || 0;
         propagateClusterResult = r;
         // Repaint queue dots for siblings cascaded by the backend so
-        // the sidebar reflects their new fp verdict without a reload.
-        applyPropagatedClustersToQueue(r.clusters || [], "fp");
+        // the sidebar reflects the new verdict without a reload.
+        applyPropagatedClustersToQueue(r.clusters || [], status);
       } catch (e) {
         toast(`propagation failed: ${e.message}`, 3000);
       }
@@ -5100,25 +6949,17 @@ async function submitLabel(status, { advance = true } = {}) {
     const parts = [`saved: ${status}`];
     if (cascaded) parts.push(`+${cascaded} skipped on row`);
     if (propagated) {
-      const verb = status === "fp" ? "fp auto-applied" : "fn auto-applied";
+      const verb = isClusterPropagateStatus
+        ? `${status} auto-applied`
+        : "fn auto-applied";
       parts.push(`+${propagated} ${verb}`);
     }
     toast(parts.join(" · "));
     scheduleStatsRefresh();
     scheduleSourceMetaRefresh();
-    // Local cell-state mirror so the CSV grid repaints synchronously
-    // (the awaited /cells GET is now dispatched in the background).
+    // Mirror propagation results into ``state.cellState`` (the seed
+    // cell was already bumped synchronously in Phase 1).
     if (c.source && Number.isInteger(c.row)) {
-      const cols = Array.isArray(c.columns) ? c.columns.filter(Boolean) : [];
-      for (const col of cols) {
-        bumpCellStateLocal(c.source, c.row, col, status, {
-          cluster_ids: [c.cluster_id],
-          error_types: c.error_types || [],
-          note,
-          corrected_value: corrected || null,
-          label_source: "cluster",
-        });
-      }
       if (propagateFnResult && Array.isArray(propagateFnResult.cells)) {
         for (const pc of propagateFnResult.cells) {
           bumpCellStateLocal(c.source, pc.row, pc.column, "fn", {
@@ -5131,7 +6972,7 @@ async function submitLabel(status, { advance = true } = {}) {
         for (const pc of propagateClusterResult.clusters) {
           if (!pc || !Number.isInteger(pc.row)) continue;
           for (const pcol of (pc.columns || [])) {
-            bumpCellStateLocal(c.source, pc.row, pcol, "fp", {
+            bumpCellStateLocal(c.source, pc.row, pcol, status, {
               cluster_ids: [pc.cluster_id],
               label_source: "cluster",
             });
@@ -5139,25 +6980,37 @@ async function submitLabel(status, { advance = true } = {}) {
         }
       }
       if (state.currentSource === c.source) repaintCellStates(c.source);
-      // Background reconciliation - non-blocking.
-      loadCellState(c.source, { force: true })
-        .then(() => { if (state.currentSource === c.source) repaintCellStates(c.source); })
-        .catch(() => {});
+      // Background reconciliation - debounced so a burst of label
+      // saves on the same source doesn't fire a /cells GET storm
+      // (one fetch per keystroke would thrash the uvicorn worker
+      // and stall the browser on 22k-cluster runs).
+      scheduleCellStateReload(c.source);
     }
-    if (advance) selectIndex(nextUnlabeledIndex(state.index + 1));
   } catch (e) {
-    toast(`error: ${e.message}`, 3000);
+    toast(`save failed: ${e.message}`, 3000);
+    // Revert the optimistic queue dot + cell-state mirror so the
+    // operator can retry. Bumping back to ``priorLabel`` is the right
+    // thing when there WAS a prior verdict; for an unlabeled cluster
+    // we re-apply ``unlabeled`` which ``bumpCellStateLocal`` treats
+    // as a tombstone and deletes the cell entry.
+    if (submittedQueueItem) submittedQueueItem.label_status = priorLabel;
+    if (submittedRowEl) {
+      const dot = submittedRowEl.querySelector(".dot");
+      if (dot) dot.className = "dot " + (priorLabel || "unlabeled");
+    }
+    scheduleGroupCountsUpdate();
+    if (c.source && Number.isInteger(c.row)) {
+      for (const col of cols) {
+        bumpCellStateLocal(
+          c.source, c.row, col, priorLabel || "unlabeled", {},
+        );
+      }
+      if (state.currentSource === c.source) repaintCellStates(c.source);
+    }
   } finally {
-    submitLabel._inFlight = false;
-    document.body.classList.remove("saving");
-    // Honour an Enter press that arrived during this in-flight
-    // save (the keydown handler set ``_pendingAdvance`` instead
-    // of firing a second POST that would race ours). Skip when
-    // this call already advanced - otherwise mashing Enter would
-    // skip two clusters per save.
-    if (submitLabel._pendingAdvance) {
-      submitLabel._pendingAdvance = false;
-      if (!advance) selectIndex(nextUnlabeledIndex(state.index + 1));
+    submitLabel._inFlightFor.delete(lockKey);
+    if (submitLabel._inFlightFor.size === 0) {
+      document.body.classList.remove("saving");
     }
   }
 }
@@ -5166,12 +7019,9 @@ async function submitLabel(status, { advance = true } = {}) {
 
 // Helper: paint the verdict-button .active state synchronously so
 // the next Enter press (which reads .active) sees the user's most
-// recent choice without waiting for the POST that ``submitLabel``
-// fires off to round-trip and complete. Without this, pressing 1
-// then Enter quickly would race: Enter fires before submitLabel's
-// post-await ``classList.toggle`` runs, so it sees no .active and
-// silently does nothing - the operator then has to press Enter a
-// second time after the save settles.
+// recent choice. ``submitLabel`` now also paints synchronously, so
+// this is mostly belt-and-braces for the digit-press path that
+// happens BEFORE submitLabel is called.
 function setActiveVerdictButton(status) {
   const buttons = document.querySelectorAll("#verdict-buttons button");
   if (!buttons.length) return;
@@ -5191,36 +7041,26 @@ function onKeydown(e) {
 
   const map = { "1": "tp", "2": "fp", "3": "partial", "4": "unsure", "5": "skip" };
   if (map[e.key]) {
-    // Paint .active synchronously so a fast follow-up Enter sees
-    // the right verdict (the post-await paint inside submitLabel
-    // doesn't run until the POST resolves).
+    // ``submitLabel`` paints .active synchronously too, but we set
+    // it here as well so the visual feedback fires on the same
+    // frame as the keypress (submitLabel branches through MT/cluster
+    // dispatch before doing the paint).
     setActiveVerdictButton(map[e.key]);
     submitLabel(map[e.key], { advance: false });
     e.preventDefault();
     return;
   }
   if (e.key === "Enter") {
-    // Enter saves with the currently-selected verdict (or tp default
-    // when nothing is active yet) and advances. Three cases:
-    //   (a) A previous submitLabel from a digit press is still in
-    //       flight: don't fire a second POST that would race the
-    //       first - just queue the advance, ``submitLabel``'s finally
-    //       block will pick it up.
-    //   (b) An ``.active`` button exists (operator pressed a digit
-    //       OR the cluster already has a saved verdict): submit it
-    //       with advance.
-    //   (c) Nothing active and nothing in flight: default to tp so
-    //       Enter is never a silent no-op (matches the keyboard hint
-    //       in the footer).
-    if (submitLabel._inFlight) {
-      submitLabel._pendingAdvance = true;
-      e.preventDefault();
-      return;
-    }
+    // Enter saves with the currently-selected verdict (or fp default
+    // when nothing is active yet) and advances. ``submitLabel`` now
+    // applies the verdict + advances synchronously (network goes to
+    // background) and dedups identical (cluster, status) writes
+    // already in flight, so the digit-then-Enter pattern just
+    // results in one POST + one instant advance.
     let status = document
       .querySelector("#verdict-buttons button.active")?.dataset.status;
     if (!status) {
-      status = "tp";
+      status = "fp";
       setActiveVerdictButton(status);
     }
     submitLabel(status, { advance: true });
@@ -5234,15 +7074,6 @@ function onKeydown(e) {
 }
 
 // ----------------------------------------------------------- util
-
-function escape(s) {
-  return String(s ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
 
 // Render a CSV cell value as HTML, surfacing whitespace anomalies so
 // the operator can spot them at a glance.
@@ -5360,6 +7191,1457 @@ function renderCsvCellHtml(raw) {
     i++;
   }
   return out;
+}
+
+// ----------------------------------------------------------- add-cluster modal
+//
+// "+ Add inconsistency cluster" button in the CSV head opens a modal
+// where the operator picks a column from the active CSV + 2 or more
+// distinct values + a canonical value + an optional kind. Submitting
+// POSTs to the existing /columns/{src}/clusters/{col} endpoint
+// (appending to the column's record, or creating one) and refreshes
+// the queue so the new cluster surfaces as a queue item with verdict
+// ``unlabeled``.
+
+const _addClusterState = {
+  source: null,
+  column: null,
+  columns: [],         // list of columns from the active CSV's frame
+  values: [],          // [{value, count}]
+  selected: new Set(), // selected raw value strings
+  canonical: null,     // chosen canonical value
+  kind: "text",
+};
+
+function openAddClusterModal() {
+  const source = state.currentSource;
+  if (!source) {
+    toast("load a CSV first");
+    return;
+  }
+  _addClusterState.source = source;
+  _addClusterState.column = null;
+  _addClusterState.values = [];
+  _addClusterState.selected.clear();
+  _addClusterState.canonical = null;
+  _addClusterState.kind = "text";
+  const modal = document.getElementById("add-cluster-modal");
+  if (!modal) return;
+  document.getElementById("add-cluster-source").textContent = source;
+  document.getElementById("add-cluster-kind").value = "text";
+  document.getElementById("add-cluster-search").value = "";
+  document.getElementById("add-cluster-values").innerHTML =
+    `<div class="muted" style="padding:8px;">(select a column)</div>`;
+  document.getElementById("add-cluster-summary").textContent = "0 values selected";
+  document.getElementById("add-cluster-submit").disabled = true;
+  // Populate the column dropdown from the run's source list (the
+  // server's /columns/.../values endpoint will 404 on a column the
+  // CSV doesn't have, so we trust the run summary).
+  const colSel = document.getElementById("add-cluster-column");
+  colSel.innerHTML = "";
+  // We don't have the CSV's column list cached on state. Fetch it
+  // via a /columns/{src}/{col}/values probe? Cheaper: pull the
+  // viewer's column headers from the rendered CSV.
+  const cols = [];
+  const head = document.querySelector("#csv-viewer thead tr");
+  if (head) {
+    for (const th of head.querySelectorAll("th[data-col]")) {
+      const c = th.getAttribute("data-col");
+      if (c) cols.push(c);
+    }
+  }
+  _addClusterState.columns = cols;
+  if (!cols.length) {
+    colSel.innerHTML = `<option value="">(no columns visible)</option>`;
+  } else {
+    colSel.innerHTML = cols.map((c) =>
+      `<option value="${escape(c)}">${escape(c)}</option>`
+    ).join("");
+    _addClusterState.column = cols[0];
+  }
+  modal.hidden = false;
+  // Auto-load values for the first column.
+  if (_addClusterState.column) loadAddClusterValues(_addClusterState.column);
+  // Focus the column select so keyboard navigation is immediate.
+  setTimeout(() => colSel.focus(), 50);
+}
+
+function closeAddClusterModal() {
+  const modal = document.getElementById("add-cluster-modal");
+  if (modal) modal.hidden = true;
+}
+
+async function loadAddClusterValues(column) {
+  const source = _addClusterState.source;
+  if (!source || !column) return;
+  _addClusterState.column = column;
+  _addClusterState.values = [];
+  _addClusterState.selected.clear();
+  _addClusterState.canonical = null;
+  const listEl = document.getElementById("add-cluster-values");
+  listEl.innerHTML = `<div class="muted" style="padding:8px;">loading…</div>`;
+  try {
+    const url =
+      `${API}/columns/${encodeURIComponent(source)}/values/${encodeURI(column)}?limit=5000`;
+    const data = await api(url);
+    _addClusterState.values = data.values || [];
+    rerenderAddClusterValues();
+  } catch (e) {
+    listEl.innerHTML = `<div style="padding:8px;color:var(--sev-high);">failed: ${escape(e.message)}</div>`;
+  }
+}
+
+function rerenderAddClusterValues() {
+  const listEl = document.getElementById("add-cluster-values");
+  const filter = (document.getElementById("add-cluster-search")?.value || "").toLowerCase();
+  const items = (_addClusterState.values || []).filter((v) =>
+    !filter || String(v.value).toLowerCase().includes(filter),
+  );
+  if (!items.length) {
+    listEl.innerHTML = `<div class="muted" style="padding:8px;">${
+      filter ? "(no matching values)" : "(no distinct values in this column)"
+    }</div>`;
+    return;
+  }
+  const sel = _addClusterState.selected;
+  const canon = _addClusterState.canonical;
+  listEl.innerHTML = items.map((v) => {
+    const isSel = sel.has(v.value);
+    const isCanon = canon === v.value;
+    const cls = "cc-modal-value"
+      + (isSel ? " selected" : "")
+      + (isCanon ? " canonical" : "");
+    return `
+      <div class="${cls}" data-value="${escape(v.value)}">
+        <input type="checkbox" class="cc-modal-sel" ${isSel ? "checked" : ""} title="include in cluster" />
+        <input type="radio" name="cc-modal-canon" class="cc-modal-canon"
+               ${isCanon ? "checked" : ""}
+               ${isSel ? "" : "disabled"}
+               title="set as canonical" />
+        <span class="cc-modal-value-text">${escape(v.value)}</span>
+        <span class="cc-modal-value-count">${escape(String(v.count))}</span>
+      </div>
+    `;
+  }).join("");
+  // Wire row-level toggles.
+  for (const row of listEl.querySelectorAll(".cc-modal-value")) {
+    const v = row.getAttribute("data-value");
+    const cb = row.querySelector(".cc-modal-sel");
+    const radio = row.querySelector(".cc-modal-canon");
+    cb.addEventListener("change", () => {
+      if (cb.checked) {
+        _addClusterState.selected.add(v);
+      } else {
+        _addClusterState.selected.delete(v);
+        if (_addClusterState.canonical === v) _addClusterState.canonical = null;
+      }
+      refreshAddClusterSummary();
+      rerenderAddClusterValues();
+    });
+    radio.addEventListener("change", () => {
+      if (!_addClusterState.selected.has(v)) return;
+      _addClusterState.canonical = v;
+      refreshAddClusterSummary();
+      rerenderAddClusterValues();
+    });
+  }
+}
+
+function refreshAddClusterSummary() {
+  const n = _addClusterState.selected.size;
+  const canon = _addClusterState.canonical;
+  const elS = document.getElementById("add-cluster-summary");
+  if (elS) {
+    elS.textContent = `${n} value${n === 1 ? "" : "s"} selected`
+      + (canon ? ` · canonical: ${canon}` : ` · no canonical (will default to first)`);
+  }
+  const btn = document.getElementById("add-cluster-submit");
+  if (btn) btn.disabled = n < 2 || !_addClusterState.column;
+}
+
+async function submitAddCluster() {
+  const source = _addClusterState.source;
+  const column = _addClusterState.column;
+  const kind = _addClusterState.kind || "text";
+  const selected = [..._addClusterState.selected];
+  if (!source || !column || selected.length < 2) {
+    toast("pick a column and at least 2 values");
+    return;
+  }
+  // Default canonical to the first selected value if the operator
+  // didn't pick one explicitly.
+  const canonical = _addClusterState.canonical || selected[0];
+  // Fetch the current record so we can append (the server expects
+  // the full set of clusters, not a delta).
+  const btn = document.getElementById("add-cluster-submit");
+  btn.disabled = true;
+  btn.textContent = "Creating…";
+  try {
+    const recsUrl =
+      `${API}/columns/${encodeURIComponent(source)}/clusters/${encodeURI(column)}`;
+    const recs = await api(recsUrl);
+    const existing = (recs.record && recs.record.clusters) || [];
+    // Detect value overlap with existing clusters - the server
+    // rejects this (disjoint invariant), so we surface it up-front
+    // and bail rather than fail mid-flight.
+    const claimed = new Set();
+    for (const cl of existing) {
+      for (const v of cl.values || []) claimed.add(v.value);
+    }
+    const overlap = selected.filter((v) => claimed.has(v));
+    if (overlap.length) {
+      toast(
+        `${overlap.length} value(s) already in another cluster for this column: `
+        + `${overlap.slice(0, 3).join(", ")}${overlap.length > 3 ? "…" : ""}`,
+        4000,
+      );
+      btn.disabled = false;
+      btn.textContent = "Create cluster";
+      return;
+    }
+    // Pull counts so the new StdCluster carries valid ClusterValue
+    // entries (count >= 1).
+    const counts = new Map();
+    for (const v of _addClusterState.values) counts.set(v.value, v.count);
+    const nextId = existing.length + 1;
+    const cluster = {
+      cluster_id: `c${nextId}`,
+      kind,
+      canonical_value: canonical,
+      values: selected.map((v) => ({ value: v, count: counts.get(v) || 1 })),
+    };
+    const payload = {
+      source,
+      column,
+      status: "labeled",
+      drop_reason: "",
+      clusters: [
+        ...existing.map((c) => ({
+          cluster_id: c.cluster_id,
+          kind: c.kind || "untagged",
+          canonical_value: c.canonical_value,
+          values: (c.values || []).map((cv) => ({ value: cv.value, count: cv.count })),
+        })),
+        cluster,
+      ],
+      note: "",
+    };
+    await api(recsUrl, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    toast(`cluster ${cluster.cluster_id} created`);
+    closeAddClusterModal();
+    // Refresh the queue so the new cluster surfaces; auto-select
+    // it so the operator can immediately verdict.
+    await refreshQueue({ keepSelection: false });
+    // Try to land selection on the new cluster.
+    const newTargetId = `colclust\x00${source}\x00${column}\x00${cluster.cluster_id}`;
+    const idx = state.queue.findIndex((q) => q.cluster_id === newTargetId);
+    if (idx >= 0) selectIndex(idx);
+  } catch (e) {
+    toast(`create failed: ${e.message}`, 4000);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Create cluster";
+  }
+}
+
+function setupAddClusterModal() {
+  const openBtn = document.getElementById("add-cluster-btn");
+  if (openBtn) openBtn.addEventListener("click", openAddClusterModal);
+  const modal = document.getElementById("add-cluster-modal");
+  if (!modal) return;
+  for (const el of modal.querySelectorAll("[data-modal-close]")) {
+    el.addEventListener("click", closeAddClusterModal);
+  }
+  const colSel = document.getElementById("add-cluster-column");
+  if (colSel) {
+    colSel.addEventListener("change", () => {
+      loadAddClusterValues(colSel.value);
+    });
+  }
+  const kindSel = document.getElementById("add-cluster-kind");
+  if (kindSel) {
+    kindSel.addEventListener("change", () => {
+      _addClusterState.kind = kindSel.value || "text";
+    });
+  }
+  const searchEl = document.getElementById("add-cluster-search");
+  if (searchEl) {
+    searchEl.addEventListener("input", rerenderAddClusterValues);
+  }
+  const submitBtn = document.getElementById("add-cluster-submit");
+  if (submitBtn) submitBtn.addEventListener("click", submitAddCluster);
+  // Esc closes the modal when it's open.
+  window.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    const m = document.getElementById("add-cluster-modal");
+    if (m && !m.hidden) closeAddClusterModal();
+  });
+}
+
+// ---------------------------------------------------------------------
+// Batch correction-generation modal.
+// ---------------------------------------------------------------------
+//
+// Single-instance modal driven entirely from a small in-memory state
+// object. The header button POSTs to /correction-jobs to kick off an
+// async job, then we poll /correction-jobs/{job_id} every 2 seconds
+// for progress. When the server reports ``status: "done"`` we render
+// the per-cluster result table and stop polling.
+//
+// Per design decision #1 / #7, the modal explicitly has its own
+// "Generate" button - the operator opens it, picks an optional source
+// filter, then explicitly kicks off the job. We do not auto-trigger
+// on modal open.
+const _batchCorr = {
+  jobId: null,
+  pollHandle: null,
+  source: "",         // optional source filter
+  status: "idle",     // idle | running | done | error
+  done: 0,
+  total: 0,
+  total_targets: 0,
+  results: {},        // {`${src}\x00${col}\x00${lid}`: [ValueSuggestionDict]}
+  error: null,
+};
+
+function setupBatchCorrectionsModal() {
+  const openBtn = document.getElementById("batch-corrections-btn");
+  if (openBtn) openBtn.addEventListener("click", openBatchCorrectionsModal);
+  const modal = document.getElementById("batch-corrections-modal");
+  if (!modal) return;
+  for (const el of modal.querySelectorAll("[data-modal-close]")) {
+    el.addEventListener("click", closeBatchCorrectionsModal);
+  }
+  // Esc closes the modal (matches the add-cluster modal pattern).
+  window.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    if (modal.hidden) return;
+    closeBatchCorrectionsModal();
+  });
+}
+
+function openBatchCorrectionsModal() {
+  const modal = document.getElementById("batch-corrections-modal");
+  if (!modal) return;
+  modal.hidden = false;
+  renderBatchCorrectionsModal();
+}
+
+function closeBatchCorrectionsModal() {
+  const modal = document.getElementById("batch-corrections-modal");
+  if (!modal) return;
+  modal.hidden = true;
+  // Keep the polling alive in the background so the operator can
+  // re-open the modal and see live progress; only stop when the job
+  // finishes (the poller clears the handle on done/error).
+}
+
+function renderBatchCorrectionsModal() {
+  const body = document.getElementById("batch-corrections-body");
+  if (!body) return;
+  if (_batchCorr.status === "idle") {
+    body.innerHTML = `
+      <div class="muted" style="font-size:12px;">
+        Generates per-value corrections for every column-cluster whose
+        verdict is <code>tp</code> or <code>unsure</code>. Cache hits
+        from previous runs make this finish in seconds; cold runs may
+        take several minutes per cluster (LLM, K=3 self-consistency).
+      </div>
+      <div class="cc-modal-row">
+        <label for="batch-corrections-source" class="cc-modal-label">Source</label>
+        <input id="batch-corrections-source" type="text"
+               placeholder="(all sources - leave blank)"
+               value="${escape(_batchCorr.source || "")}" />
+      </div>
+      <div class="cc-corrections-actions">
+        <button class="cc-corrections-save" id="batch-corrections-start" type="button">
+          Start batch
+        </button>
+      </div>
+    `;
+    body.querySelector("#batch-corrections-start")
+      ?.addEventListener("click", () => {
+        _batchCorr.source = (document.getElementById("batch-corrections-source")?.value || "").trim();
+        startBatchCorrections();
+      });
+    return;
+  }
+  if (_batchCorr.status === "error") {
+    body.innerHTML = `
+      <div class="cc-corrections-error">${escape(_batchCorr.error || "request failed")}</div>
+      <div class="cc-corrections-actions">
+        <button class="cc-corrections-save" id="batch-corrections-retry" type="button">
+          Try again
+        </button>
+      </div>
+    `;
+    body.querySelector("#batch-corrections-retry")?.addEventListener("click", () => {
+      _batchCorr.status = "idle";
+      _batchCorr.error = null;
+      renderBatchCorrectionsModal();
+    });
+    return;
+  }
+  // running / done share the progress header.
+  const dn = _batchCorr.done || 0;
+  const tot = _batchCorr.total || 0;
+  const pct = tot > 0 ? Math.min(100, Math.round((dn / tot) * 100)) : 0;
+  const headerLabel = _batchCorr.status === "done"
+    ? `Done · ${_batchCorr.total_targets || 0} cluster(s) · ${tot} LLM call(s)`
+    : `Running · ${dn} / ${tot} LLM call(s) (${pct}%)`;
+  const resultsHtml = renderBatchResultsTable();
+  body.innerHTML = `
+    <div class="batch-progress">
+      <div class="batch-progress-text">${escape(headerLabel)}</div>
+      <div class="batch-progress-bar">
+        <div class="batch-progress-fill" style="width:${pct}%;"></div>
+      </div>
+    </div>
+    ${resultsHtml}
+    ${_batchCorr.status === "done" ? `
+      <div class="cc-corrections-actions">
+        <button class="cc-corrections-save" id="batch-corrections-reset" type="button">
+          Run another batch
+        </button>
+      </div>
+    ` : ""}
+  `;
+  body.querySelector("#batch-corrections-reset")?.addEventListener("click", () => {
+    _batchCorr.status = "idle";
+    _batchCorr.results = {};
+    _batchCorr.jobId = null;
+    _batchCorr.done = 0;
+    _batchCorr.total = 0;
+    _batchCorr.total_targets = 0;
+    renderBatchCorrectionsModal();
+  });
+}
+
+function renderBatchResultsTable() {
+  const keys = Object.keys(_batchCorr.results || {}).sort();
+  if (keys.length === 0) {
+    return `<div class="muted" style="font-size:11.5px;">No suggestions yet.</div>`;
+  }
+  // The server keys results by ``source\x00column\x00cluster_local_id``.
+  // We render a collapsible block per cluster so the modal stays
+  // skim-able even for runs with hundreds of clusters.
+  const blocks = keys.map((k) => {
+    const [src, col, lid] = k.split("\x00");
+    const rows = _batchCorr.results[k] || [];
+    const rowHtml = rows.map((s) => {
+      const sug = Array.isArray(s.suggestion) ? s.suggestion.join(", ") : "";
+      return `
+        <tr>
+          <td><code>${escape(s.value || "")}</code></td>
+          <td><code>${escape(sug)}</code></td>
+          <td class="muted" style="font-size:10.5px;">
+            ${(s.agreement || 0).toFixed(2)}
+            (${s.n_valid_samples}/${s.n_total_samples})
+          </td>
+          <td class="muted" style="font-size:10.5px;">
+            ${s.would_drop_per_export_rule ? "drop" : ""}
+          </td>
+        </tr>
+      `;
+    }).join("");
+    return `
+      <details class="batch-result-block">
+        <summary>
+          <code>${escape(src)}</code> · <code>${escape(col)}</code>
+          <span class="muted" style="font-size:10px;">${escape(lid)} · ${rows.length} value(s)</span>
+        </summary>
+        <table class="cc-corrections-table">
+          <thead>
+            <tr>
+              <th>Original</th><th>Suggestion</th>
+              <th style="width:90px;">Agree</th>
+              <th style="width:60px;">Note</th>
+            </tr>
+          </thead>
+          <tbody>${rowHtml}</tbody>
+        </table>
+      </details>
+    `;
+  }).join("");
+  return `<div class="batch-results">${blocks}</div>`;
+}
+
+async function startBatchCorrections() {
+  _batchCorr.status = "running";
+  _batchCorr.done = 0;
+  _batchCorr.total = 0;
+  _batchCorr.total_targets = 0;
+  _batchCorr.results = {};
+  _batchCorr.error = null;
+  renderBatchCorrectionsModal();
+  try {
+    const body = {};
+    if (_batchCorr.source) body.source = _batchCorr.source;
+    const res = await api(`${API}/correction-jobs`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    _batchCorr.jobId = res.job_id;
+    _batchCorr.total_targets = res.total_targets || 0;
+    if ((res.total_targets || 0) === 0) {
+      // Nothing to do. Fast-path to "done" with an empty result set.
+      _batchCorr.status = "done";
+      renderBatchCorrectionsModal();
+      return;
+    }
+    schedulePollBatchCorrections();
+  } catch (e) {
+    _batchCorr.status = "error";
+    _batchCorr.error = e.message || String(e);
+    renderBatchCorrectionsModal();
+  }
+}
+
+function schedulePollBatchCorrections() {
+  if (_batchCorr.pollHandle) clearTimeout(_batchCorr.pollHandle);
+  _batchCorr.pollHandle = setTimeout(pollBatchCorrections, 2000);
+}
+
+async function pollBatchCorrections() {
+  if (!_batchCorr.jobId) return;
+  try {
+    const res = await api(
+      `${API}/correction-jobs/${encodeURIComponent(_batchCorr.jobId)}`,
+    );
+    _batchCorr.done = res.done || 0;
+    _batchCorr.total = res.total || 0;
+    _batchCorr.total_targets = res.total_targets || _batchCorr.total_targets;
+    _batchCorr.results = res.results || {};
+    if (res.status === "done") {
+      _batchCorr.status = "done";
+      _batchCorr.pollHandle = null;
+      renderBatchCorrectionsModal();
+      return;
+    }
+    if (res.status === "error") {
+      _batchCorr.status = "error";
+      _batchCorr.error = res.error || "job failed";
+      _batchCorr.pollHandle = null;
+      renderBatchCorrectionsModal();
+      return;
+    }
+    renderBatchCorrectionsModal();
+    schedulePollBatchCorrections();
+  } catch (e) {
+    // Transient network error - keep polling. Surface the message
+    // in the modal but don't kill the loop, so e.g. a brief 502 from
+    // a server restart doesn't lose the job-id.
+    console.warn("batch-corrections poll failed:", e);
+    schedulePollBatchCorrections();
+  }
+}
+
+// ---------------------------------------------------------- Trivial-typo tagger
+//
+// Adds the literal token TRIVIAL to the note of every TP / PARTIAL /
+// FN label whose underlying cell value matches the labelling-UI's
+// red-underline whitespace-anomaly rule. The heavy lifting happens
+// server-side (POST /api/runs/<id>/labels/tag-trivial-whitespace);
+// the modal here exists for UX:
+//   1. preview the candidate set BEFORE writing anything (dry-run);
+//   2. surface a per-row table with whitespace markers visible so
+//      the operator can sanity-check what's being tagged;
+//   3. confirm with a single button click that does the actual write.
+// Idempotent: rows whose latest note already contains TRIVIAL are
+// reported under skipped_already_tagged and not re-written.
+const _trivialTagger = {
+  status: "idle",        // idle | loading | preview | applying | done | error
+  preview: null,         // last dry-run response
+  applyResult: null,     // last apply response
+  error: null,
+};
+
+// Mirror EXACTLY what /labels/tag-trivial-whitespace considers a
+// trivial-cosmetic anomaly (see ``_WHITESPACE_ANOMALY_RE`` in
+// ``src/labeling/app.py``). Used to highlight the offending
+// characters in the preview table.
+//
+// NOTE: the CSV viewer's red-dotted ``.has-ws`` underline still uses
+// the narrower edge/internal-space + non-printable rule (see
+// ``hasWs`` further up in this file); only the trivial-tagger
+// preview uses this wider rule.
+const _WS_MARKER_RE =
+  /(^[ ]+|[ ]+$|[ ]{2,}|[\t\u00A0\n\r\u2028\u2029\u200B\u200C\u200D\u00AD\uFEFF]+|,[A-Za-z]| [)\]}]|'S(?=\W|$)|\s=\S|\S=\s)/g;
+
+// Render a value with each whitespace-anomaly run wrapped in a
+// .ws-marker span so the operator can see the offending characters
+// at a glance. Non-printable chars are replaced with visible glyphs
+// (\u2192 for tab, \u00B7 for spaces, etc.) inside the marker spans.
+function renderTrivialWsValue(value) {
+  if (value == null) return "";
+  const s = String(value);
+  let html = "";
+  let lastIndex = 0;
+  // Reset the regex's stateful lastIndex (//g regex, called repeatedly).
+  _WS_MARKER_RE.lastIndex = 0;
+  let m;
+  while ((m = _WS_MARKER_RE.exec(s)) !== null) {
+    if (m.index > lastIndex) {
+      html += escape(s.slice(lastIndex, m.index));
+    }
+    // Visualise the captured fragment. Whitespace chars become
+    // visible glyphs; non-whitespace chars (e.g. the ``O`` in a
+    // ``,O`` capture, the ``S`` in ``'S``, ``)`` in `` )``) render
+    // as themselves so the operator can see which character pair
+    // triggered the rule.
+    let visual = "";
+    for (const ch of m[0]) {
+      if (ch === " ") visual += "\u00B7";
+      else if (ch === "\t") visual += "\u2192";
+      else if (ch === "\n") visual += "\u21B5";
+      else if (ch === "\r") visual += "\u00B6";
+      else if (ch === "\u00A0") visual += "\u2423"; // open box (NBSP)
+      else if (ch === "\u200B" || ch === "\u200C" || ch === "\u200D"
+               || ch === "\uFEFF") visual += "\u25E6"; // small ring
+      else if (ch === "\u00AD") visual += "\u00AC"; // soft hyphen
+      else visual += ch;
+    }
+    html += `<span class="ws-marker" title="${escape(JSON.stringify(m[0]))}">${escape(visual)}</span>`;
+    lastIndex = m.index + m[0].length;
+  }
+  if (lastIndex < s.length) html += escape(s.slice(lastIndex));
+  return html;
+}
+
+function setupIdentifyTrivialModal() {
+  const openBtn = document.getElementById("identify-trivial-btn");
+  if (openBtn) openBtn.addEventListener("click", openIdentifyTrivialModal);
+  const modal = document.getElementById("identify-trivial-modal");
+  if (!modal) return;
+  for (const el of modal.querySelectorAll("[data-modal-close]")) {
+    el.addEventListener("click", closeIdentifyTrivialModal);
+  }
+  // Tab strip: clicking a tab toggles the body's data-active-tab and
+  // re-renders so the right pane shows. If the new tab's preview
+  // hasn't been fetched yet we trigger its load here.
+  for (const tab of modal.querySelectorAll(".trivial-tab")) {
+    tab.addEventListener("click", () => {
+      const which = tab.dataset.trivialTab || "whitespace";
+      activateTrivialTab(which);
+    });
+  }
+  // Esc closes the modal (matches the batch-corrections modal pattern).
+  window.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    if (modal.hidden) return;
+    closeIdentifyTrivialModal();
+  });
+}
+
+function openIdentifyTrivialModal() {
+  const modal = document.getElementById("identify-trivial-modal");
+  if (!modal) return;
+  modal.hidden = false;
+  // Always re-fetch the preview on open: labels may have changed
+  // since the last time the modal was open (other operators, manual
+  // edits) so a stale preview would be misleading. Both panes load
+  // in parallel so switching tabs is instant.
+  loadTrivialPreview();
+  loadPhonePreview();
+  // Default to the whitespace tab unless the body remembers a prior
+  // selection (e.g. operator switched, closed, reopened).
+  const body = document.getElementById("identify-trivial-body");
+  const which = (body && body.dataset.activeTab) || "whitespace";
+  activateTrivialTab(which);
+}
+
+function closeIdentifyTrivialModal() {
+  const modal = document.getElementById("identify-trivial-modal");
+  if (!modal) return;
+  modal.hidden = true;
+}
+
+async function loadTrivialPreview() {
+  _trivialTagger.status = "loading";
+  _trivialTagger.error = null;
+  _trivialTagger.preview = null;
+  _trivialTagger.applyResult = null;
+  renderIdentifyTrivialModal();
+  try {
+    const r = await api(`${API}/labels/tag-trivial-whitespace`, {
+      method: "POST",
+      body: JSON.stringify({ dry_run: true }),
+    });
+    _trivialTagger.preview = r;
+    _trivialTagger.status = "preview";
+  } catch (e) {
+    _trivialTagger.status = "error";
+    _trivialTagger.error = e.message || String(e);
+  }
+  renderIdentifyTrivialModal();
+}
+
+async function applyTrivialTagger() {
+  _trivialTagger.status = "applying";
+  renderIdentifyTrivialModal();
+  try {
+    const r = await api(`${API}/labels/tag-trivial-whitespace`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    _trivialTagger.applyResult = r;
+    _trivialTagger.status = "done";
+    // Refresh the in-memory ``state.latest`` so the next export /
+    // benchmark download picks up the new TRIVIAL notes without a
+    // page reload. Cluster-state colours don't change (status is
+    // unchanged), so no /cells reload needed.
+    try { await refreshLatest(); } catch (_) { /* non-fatal */ }
+    if (typeof scheduleStatsRefresh === "function") {
+      try { scheduleStatsRefresh(); } catch (_) { /* non-fatal */ }
+    }
+    if (r.tagged > 0) {
+      toast(`Tagged ${r.tagged} cell(s) TRIVIAL`, 2500);
+    } else {
+      toast("No new cells tagged TRIVIAL", 2000);
+    }
+  } catch (e) {
+    _trivialTagger.status = "error";
+    _trivialTagger.error = e.message || String(e);
+  }
+  renderIdentifyTrivialModal();
+}
+
+function renderIdentifyTrivialModal() {
+  const body = document.getElementById("identify-trivial-body");
+  if (!body) return;
+  const active = body.dataset.activeTab || "whitespace";
+  if (active === "phone") {
+    renderTrivialPhonePane(body);
+  } else {
+    renderTrivialWhitespacePane(body);
+  }
+}
+
+// Toggle the visible pane. Stamps ``[data-active-tab]`` on the body
+// (CSS keys off this to hide/show panes), flips ``.is-active`` on the
+// tab strip's buttons, and re-renders.
+function activateTrivialTab(which) {
+  const modal = document.getElementById("identify-trivial-modal");
+  const body = document.getElementById("identify-trivial-body");
+  if (!modal || !body) return;
+  const target = (which === "phone") ? "phone" : "whitespace";
+  body.dataset.activeTab = target;
+  for (const tab of modal.querySelectorAll(".trivial-tab")) {
+    const isActive = (tab.dataset.trivialTab === target);
+    tab.classList.toggle("is-active", isActive);
+    tab.setAttribute("aria-selected", isActive ? "true" : "false");
+  }
+  // Lazily load this tab's preview if it hasn't been fetched yet.
+  if (target === "phone" && _phoneTagger.status === "idle") {
+    loadPhonePreview();
+  } else if (target === "whitespace" && _trivialTagger.status === "idle") {
+    loadTrivialPreview();
+  }
+  renderIdentifyTrivialModal();
+}
+
+function renderTrivialWhitespacePane(body) {
+  if (_trivialTagger.status === "loading") {
+    body.innerHTML = `
+      <div class="muted" style="font-size:12px;padding:18px;text-align:center;">
+        <span class="trivial-spinner"></span>
+        Scanning labels for whitespace anomalies\u2026
+      </div>
+    `;
+    return;
+  }
+
+  if (_trivialTagger.status === "error") {
+    body.innerHTML = `
+      <div class="trivial-error">${escape(_trivialTagger.error || "request failed")}</div>
+      <div class="trivial-actions">
+        <button type="button" data-modal-close="1">Close</button>
+        <button type="button" class="primary" id="trivial-retry">Retry</button>
+      </div>
+    `;
+    body.querySelector("#trivial-retry")?.addEventListener("click", loadTrivialPreview);
+    body.querySelector("[data-modal-close]")?.addEventListener("click", closeIdentifyTrivialModal);
+    return;
+  }
+
+  if (_trivialTagger.status === "applying") {
+    const toTag = _trivialTagger.preview?.to_tag || 0;
+    body.innerHTML = `
+      <div class="muted" style="font-size:12px;padding:18px;text-align:center;">
+        <span class="trivial-spinner"></span>
+        Appending TRIVIAL to ${toTag} note(s)\u2026
+      </div>
+    `;
+    return;
+  }
+
+  if (_trivialTagger.status === "done") {
+    const r = _trivialTagger.applyResult || {};
+    body.innerHTML = `
+      <div class="trivial-summary">
+        <div class="trivial-stat to-tag">
+          <strong>${r.tagged || 0}</strong>
+          <span class="trivial-stat-label">tagged this run</span>
+        </div>
+        <div class="trivial-stat skip">
+          <strong>${r.skipped_already_tagged || 0}</strong>
+          <span class="trivial-stat-label">already tagged</span>
+        </div>
+        <div class="trivial-stat skip">
+          <strong>${r.scanned || 0}</strong>
+          <span class="trivial-stat-label">labels scanned</span>
+        </div>
+      </div>
+      <div class="muted" style="font-size:12px;">
+        ${r.tagged > 0
+          ? "The next benchmark export will include the TRIVIAL note marker for these cells."
+          : "No labels matched the whitespace rule. Re-open the modal after labelling to re-scan."}
+      </div>
+      <div class="trivial-actions">
+        <button type="button" data-modal-close="1">Done</button>
+        <button type="button" class="primary" id="trivial-rescan">Re-scan</button>
+      </div>
+    `;
+    body.querySelector("#trivial-rescan")?.addEventListener("click", loadTrivialPreview);
+    body.querySelector("[data-modal-close]")?.addEventListener("click", closeIdentifyTrivialModal);
+    return;
+  }
+
+  // Default: status === "preview"
+  const p = _trivialTagger.preview || {};
+  const candidates = p.candidates || [];
+  const toTagCount = p.to_tag || 0;
+  const skippedAlready = p.skipped_already_tagged || 0;
+  const scanned = p.scanned || 0;
+  const skippedNoVal = p.skipped_no_value || 0;
+  // Render to-tag rows first (the action targets), then the
+  // already-tagged rows so the operator can confirm coverage.
+  const sortedCandidates = candidates.slice().sort((a, b) => {
+    if (a.already_tagged !== b.already_tagged) {
+      return a.already_tagged ? 1 : -1;
+    }
+    return 0;
+  });
+
+  let tableHtml;
+  if (sortedCandidates.length === 0) {
+    tableHtml = `<div class="trivial-empty">
+      No TP / PARTIAL / FN labels match the whitespace-anomaly rule.<br/>
+      Label some cells whose values contain tabs, NBSP, or double spaces and re-open this dialog.
+    </div>`;
+  } else {
+    const rows = sortedCandidates.map((c) => {
+      const wsHits = (c.ws_hits || []);
+      // A single label may cover multiple columns; we render one row
+      // per ws-hit column so the operator sees the actual offending
+      // value (rare, but possible for multi-column cluster labels).
+      return wsHits.map((hit) => {
+        const cls = c.already_tagged ? "is-already-tagged" : "";
+        const statusCls = (c.status || "").toLowerCase();
+        return `
+          <tr class="${cls}">
+            <td><code>${escape(c.source)}</code></td>
+            <td>${c.row}</td>
+            <td><code>${escape(hit.column)}</code></td>
+            <td><span class="status-pill ${statusCls}">${escape(c.status)}</span></td>
+            <td><span class="target-pill">${escape(c.target)}</span></td>
+            <td class="ws-value">${renderTrivialWsValue(hit.value)}</td>
+            <td>${c.already_tagged
+              ? '<span title="latest note already contains TRIVIAL">already tagged</span>'
+              : '<span style="color:rgb(34,197,94);">+ TRIVIAL</span>'}</td>
+          </tr>
+        `;
+      }).join("");
+    }).join("");
+    tableHtml = `
+      <div class="trivial-preview">
+        <table class="trivial-preview-table">
+          <thead>
+            <tr>
+              <th>Source</th>
+              <th style="width:50px;">Row</th>
+              <th>Column</th>
+              <th style="width:60px;">Status</th>
+              <th style="width:65px;">Target</th>
+              <th>Value (whitespace highlighted)</th>
+              <th style="width:110px;">Action</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  const noValHtml = skippedNoVal > 0
+    ? `<div class="muted" style="font-size:11px;margin-top:6px;">
+         ${skippedNoVal} label(s) skipped: target cell could not be read
+         (deleted source / row out of range).
+       </div>`
+    : "";
+
+  body.innerHTML = `
+    <div class="muted" style="font-size:12px;margin-bottom:8px;">
+      Appends the literal token <code>TRIVIAL</code> to the
+      <code>note</code> of every <strong>TP / PARTIAL / FN</strong> label
+      whose underlying cell value triggers the labelling-UI's
+      red-underline whitespace-anomaly rule (edge / double internal
+      spaces, tab, NBSP, line breaks, zero-width chars, soft hyphen,
+      BOM). Idempotent: rows already containing TRIVIAL are skipped.
+    </div>
+    <div class="trivial-summary">
+      <div class="trivial-stat to-tag">
+        <strong>${toTagCount}</strong>
+        <span class="trivial-stat-label">to tag</span>
+      </div>
+      <div class="trivial-stat skip">
+        <strong>${skippedAlready}</strong>
+        <span class="trivial-stat-label">already tagged</span>
+      </div>
+      <div class="trivial-stat skip">
+        <strong>${scanned}</strong>
+        <span class="trivial-stat-label">labels scanned</span>
+      </div>
+    </div>
+    ${tableHtml}
+    ${noValHtml}
+    <div class="trivial-actions">
+      <span class="left">${toTagCount > 0
+        ? `Will append <code>TRIVIAL</code> to ${toTagCount} note(s).`
+        : "Nothing to write."}</span>
+      <button type="button" data-modal-close="1">Cancel</button>
+      <button type="button" id="trivial-rescan-btn">Re-scan</button>
+      <button type="button" class="primary" id="trivial-apply-btn"
+              ${toTagCount === 0 ? "disabled" : ""}>
+        Tag ${toTagCount} cell(s) TRIVIAL
+      </button>
+    </div>
+  `;
+  body.querySelector("#trivial-apply-btn")
+    ?.addEventListener("click", () => {
+      if (toTagCount === 0) return;
+      applyTrivialTagger();
+    });
+  body.querySelector("#trivial-rescan-btn")
+    ?.addEventListener("click", loadTrivialPreview);
+  for (const el of body.querySelectorAll("[data-modal-close]")) {
+    el.addEventListener("click", closeIdentifyTrivialModal);
+  }
+}
+
+// ---------------------------------------------------------- Phone-format pane
+//
+// Mirrors the whitespace flow above, but targets the
+// /api/runs/<id>/labels/tag-trivial-phone-format endpoint which
+// auto-detects phone-shaped columns, votes a majority surface
+// template, then proposes:
+//   - one SKIP cluster verdict per existing cluster touching the
+//     detected column (the cluster is a format-variant aggregate,
+//     not a semantic error);
+//   - one cell-level FN label per row whose surface form differs
+//     from the majority but whose digit count matches, carrying the
+//     canonical surface form in corrected_value.
+// The note carries the literal token "TRIVIAL phone_format" so the
+// flow is individually re-runnable and distinguishable from the
+// whitespace tagger.
+const _phoneTagger = {
+  status: "idle",        // idle | loading | preview | applying | done | error
+  preview: null,         // last dry-run response
+  applyResult: null,     // last apply response
+  error: null,
+};
+
+async function loadPhonePreview() {
+  _phoneTagger.status = "loading";
+  _phoneTagger.error = null;
+  _phoneTagger.preview = null;
+  _phoneTagger.applyResult = null;
+  renderIdentifyTrivialModal();
+  try {
+    const r = await api(`${API}/labels/tag-trivial-phone-format`, {
+      method: "POST",
+      body: JSON.stringify({ dry_run: true }),
+    });
+    _phoneTagger.preview = r;
+    _phoneTagger.status = "preview";
+  } catch (e) {
+    _phoneTagger.status = "error";
+    _phoneTagger.error = e.message || String(e);
+  }
+  renderIdentifyTrivialModal();
+}
+
+async function applyPhoneTagger() {
+  _phoneTagger.status = "applying";
+  renderIdentifyTrivialModal();
+  try {
+    const r = await api(`${API}/labels/tag-trivial-phone-format`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    _phoneTagger.applyResult = r;
+    _phoneTagger.status = "done";
+    // Pick up new FN/SKIP labels into the in-memory cache so the
+    // benchmark export reflects them without a page reload.
+    try { await refreshLatest(); } catch (_) { /* non-fatal */ }
+    if (typeof scheduleStatsRefresh === "function") {
+      try { scheduleStatsRefresh(); } catch (_) { /* non-fatal */ }
+    }
+    const written = (r.cells_written || 0) + (r.clusters_written || 0);
+    if (written > 0) {
+      toast(
+        `Wrote ${r.cells_written || 0} cell + ${r.clusters_written || 0} cluster label(s)`,
+        2500,
+      );
+    } else {
+      toast("No phone-format labels written", 2000);
+    }
+  } catch (e) {
+    _phoneTagger.status = "error";
+    _phoneTagger.error = e.message || String(e);
+  }
+  renderIdentifyTrivialModal();
+}
+
+function renderTrivialPhonePane(body) {
+  if (_phoneTagger.status === "loading") {
+    body.innerHTML = `
+      <div class="muted" style="font-size:12px;padding:18px;text-align:center;">
+        <span class="trivial-spinner"></span>
+        Detecting phone-format columns\u2026
+      </div>
+    `;
+    return;
+  }
+
+  if (_phoneTagger.status === "error") {
+    body.innerHTML = `
+      <div class="trivial-error">${escape(_phoneTagger.error || "request failed")}</div>
+      <div class="trivial-actions">
+        <button type="button" data-modal-close="1">Close</button>
+        <button type="button" class="primary" id="phone-retry">Retry</button>
+      </div>
+    `;
+    body.querySelector("#phone-retry")?.addEventListener("click", loadPhonePreview);
+    body.querySelector("[data-modal-close]")?.addEventListener("click", closeIdentifyTrivialModal);
+    return;
+  }
+
+  if (_phoneTagger.status === "applying") {
+    const cells = _phoneTagger.preview?.cell_candidates?.filter(c => !c.already_tagged).length || 0;
+    const clusters = _phoneTagger.preview?.cluster_candidates?.filter(c => !c.already_tagged).length || 0;
+    body.innerHTML = `
+      <div class="muted" style="font-size:12px;padding:18px;text-align:center;">
+        <span class="trivial-spinner"></span>
+        Writing ${cells} cell label(s) + ${clusters} cluster SKIP(s)\u2026
+      </div>
+    `;
+    return;
+  }
+
+  if (_phoneTagger.status === "done") {
+    const r = _phoneTagger.applyResult || {};
+    body.innerHTML = `
+      <div class="trivial-summary">
+        <div class="trivial-stat to-tag">
+          <strong>${r.cells_written || 0}</strong>
+          <span class="trivial-stat-label">cells corrected</span>
+        </div>
+        <div class="trivial-stat to-tag">
+          <strong>${r.clusters_written || 0}</strong>
+          <span class="trivial-stat-label">clusters skipped</span>
+        </div>
+        <div class="trivial-stat skip">
+          <strong>${r.skipped_already_tagged || 0}</strong>
+          <span class="trivial-stat-label">already tagged</span>
+        </div>
+        <div class="trivial-stat skip">
+          <strong>${r.columns_scanned || 0}</strong>
+          <span class="trivial-stat-label">columns scanned</span>
+        </div>
+      </div>
+      <div class="muted" style="font-size:12px;">
+        ${(r.cells_written || 0) + (r.clusters_written || 0) > 0
+          ? "Each corrected cell now carries an FN label with the canonical surface form, and the matching clusters are SKIP'd."
+          : "No phone-format changes written. Re-open the modal after labelling / clustering to re-scan."}
+      </div>
+      <div class="trivial-actions">
+        <button type="button" data-modal-close="1">Done</button>
+        <button type="button" class="primary" id="phone-rescan">Re-scan</button>
+      </div>
+    `;
+    body.querySelector("#phone-rescan")?.addEventListener("click", loadPhonePreview);
+    body.querySelector("[data-modal-close]")?.addEventListener("click", closeIdentifyTrivialModal);
+    return;
+  }
+
+  // Default: status === "preview"
+  const p = _phoneTagger.preview || {};
+  const columns = p.columns || [];
+  const cellCands = p.cell_candidates || [];
+  const clusterCands = p.cluster_candidates || [];
+  const cellsToWrite = cellCands.filter(c => !c.already_tagged).length;
+  const clustersToWrite = clusterCands.filter(c => !c.already_tagged).length;
+  const cellsAlready = cellCands.filter(c => c.already_tagged).length;
+  const clustersAlready = clusterCands.filter(c => c.already_tagged).length;
+  const columnsScanned = p.columns_scanned || 0;
+
+  // Group candidates by (source, column) so each detected column gets
+  // its own card with the majority template + per-row correction list.
+  const cellsByCol = new Map();
+  for (const c of cellCands) {
+    const key = `${c.source}\u0001${c.column}`;
+    if (!cellsByCol.has(key)) cellsByCol.set(key, []);
+    cellsByCol.get(key).push(c);
+  }
+  const clustersByCol = new Map();
+  for (const c of clusterCands) {
+    for (const col of (c.columns || [])) {
+      const key = `${c.source}\u0001${col}`;
+      if (!clustersByCol.has(key)) clustersByCol.set(key, []);
+      clustersByCol.get(key).push(c);
+    }
+  }
+
+  let cardsHtml;
+  if (columns.length === 0) {
+    cardsHtml = `<div class="trivial-empty">
+      No column passes the phone-format detector
+      (\u226580% phone-shaped rows, \u22655 phone-shaped values).<br/>
+      If you know a specific column is phone-shaped just below
+      threshold, the API accepts a custom <code>threshold</code> /
+      <code>min_phone_rows</code> override.
+    </div>`;
+  } else {
+    cardsHtml = columns.map((col) => {
+      const key = `${col.source}\u0001${col.column}`;
+      const cells = (cellsByCol.get(key) || []).slice().sort((a, b) => {
+        if (a.already_tagged !== b.already_tagged) return a.already_tagged ? 1 : -1;
+        return (a.row || 0) - (b.row || 0);
+      });
+      const clusters = clustersByCol.get(key) || [];
+      const writeCount = (col.cells_to_correct || 0) + (col.clusters_to_skip || 0);
+      const pillHtml = writeCount > 0
+        ? `<span class="pill">${col.cells_to_correct || 0} cell + ${col.clusters_to_skip || 0} cluster</span>`
+        : `<span class="muted">nothing to do</span>`;
+      const rowsHtml = cells.length === 0
+        ? `<div class="muted" style="font-size:11.5px;padding:6px 0;">Every row already matches the majority template.</div>`
+        : `<table class="phone-corr-table">
+            <thead><tr>
+              <th style="width:50px;">Row</th>
+              <th>Original</th>
+              <th style="width:24px;"></th>
+              <th>Canonical</th>
+              <th style="width:80px;">Digits</th>
+              <th style="width:110px;">Action</th>
+            </tr></thead>
+            <tbody>${cells.map((c) => `
+              <tr class="${c.already_tagged ? 'is-already-tagged' : ''}">
+                <td>${c.row}</td>
+                <td>${escape(c.original_value || "")}</td>
+                <td class="arrow">\u2192</td>
+                <td>${escape(c.canonical || "")}</td>
+                <td>${c.digits || ""}</td>
+                <td>${c.already_tagged
+                  ? '<span title="latest label already carries this correction">already tagged</span>'
+                  : '<span style="color:rgb(99,102,241);">+ FN label</span>'}</td>
+              </tr>
+            `).join("")}</tbody>
+          </table>`;
+      const clusterLine = clusters.length === 0
+        ? ""
+        : `<div class="muted" style="font-size:11.5px;margin-top:4px;">
+             ${clusters.length} cluster(s) on this column will receive a SKIP verdict.
+           </div>`;
+      return `<div class="phone-col-card">
+        <div class="phone-col-head">
+          <code>${escape(col.source)}</code>
+          <strong>${escape(col.column)}</strong>
+          <span class="muted">template:</span>
+          <code>${escape(col.template || "")}</code>
+          <span class="muted">${col.digit_count || ""} digit(s)</span>
+          ${pillHtml}
+        </div>
+        ${rowsHtml}
+        ${clusterLine}
+      </div>`;
+    }).join("");
+  }
+
+  const noValHtml = (p.skipped_no_value || 0) > 0
+    ? `<div class="muted" style="font-size:11px;margin-top:6px;">
+         ${p.skipped_no_value} cell(s) skipped: target cell could not be read.
+       </div>`
+    : "";
+
+  body.innerHTML = `
+    <div class="muted" style="font-size:12px;margin-bottom:8px;">
+      Auto-detects phone-shaped columns (\u226580% phone-shaped rows,
+      punctuation set <code>() + - . /</code> + space), votes a
+      column-majority surface template, then proposes one FN
+      cell-label per row whose digits match but format differs, plus
+      one <strong>SKIP</strong> verdict per cluster touching the
+      column. Idempotent on the <code>TRIVIAL phone_format</code> tag.
+    </div>
+    <div class="trivial-summary">
+      <div class="trivial-stat to-tag">
+        <strong>${cellsToWrite}</strong>
+        <span class="trivial-stat-label">cells to correct</span>
+      </div>
+      <div class="trivial-stat to-tag">
+        <strong>${clustersToWrite}</strong>
+        <span class="trivial-stat-label">clusters to skip</span>
+      </div>
+      <div class="trivial-stat skip">
+        <strong>${cellsAlready + clustersAlready}</strong>
+        <span class="trivial-stat-label">already tagged</span>
+      </div>
+      <div class="trivial-stat skip">
+        <strong>${columns.length} / ${columnsScanned}</strong>
+        <span class="trivial-stat-label">columns detected</span>
+      </div>
+    </div>
+    ${cardsHtml}
+    ${noValHtml}
+    <div class="trivial-actions">
+      <span class="left">${(cellsToWrite + clustersToWrite) > 0
+        ? `Will write ${cellsToWrite} cell + ${clustersToWrite} cluster label(s).`
+        : "Nothing to write."}</span>
+      <button type="button" data-modal-close="1">Cancel</button>
+      <button type="button" id="phone-rescan-btn">Re-scan</button>
+      <button type="button" class="primary" id="phone-apply-btn"
+              ${(cellsToWrite + clustersToWrite) === 0 ? "disabled" : ""}>
+        Apply ${cellsToWrite + clustersToWrite} label(s)
+      </button>
+    </div>
+  `;
+  body.querySelector("#phone-apply-btn")
+    ?.addEventListener("click", () => {
+      if ((cellsToWrite + clustersToWrite) === 0) return;
+      applyPhoneTagger();
+    });
+  body.querySelector("#phone-rescan-btn")
+    ?.addEventListener("click", loadPhonePreview);
+  for (const el of body.querySelectorAll("[data-modal-close]")) {
+    el.addEventListener("click", closeIdentifyTrivialModal);
+  }
+}
+
+// Final defensive backstop: any code path that programmatically
+// scrolls ``html`` / ``body`` (browser quirks under CSS ``zoom``,
+// stray scrollIntoView leaks, off-screen ``input.focus()``) would push
+// the entire workbench grid off-screen. ``overflow: hidden`` on those
+// containers hides the scrollbar but does NOT block programmatic
+// scrolling per the CSS Overflow spec, so the user has no way to
+// recover. Snap back to (0, 0) on every scroll event - these
+// containers are the grid frame, not scroll surfaces.
+//
+// ``.center`` and ``.sidebar`` are the grid panes (also overflow:
+// hidden); they contain their own inner scrollers (``.csv-viewer`` /
+// ``.queue``) which legitimately scroll. The pane wrappers themselves
+// must stay pinned so the CSV header and queue filters never get
+// scrolled out of view.
+//
+// IMPORTANT: on viewports below the ``max-width: 900px`` breakpoint
+// the stylesheet legitimately switches html/body to ``overflow:
+// auto`` so the stacked tablet layout can scroll. Snapping scrollTop
+// back to 0 in that mode would trap the operator at the top of the
+// page. We check the computed overflow before resetting; if the
+// element is in scrolling mode (overflow != hidden) we leave its
+// scroll position alone.
+for (const el of [
+  document.documentElement,
+  document.body,
+  document.getElementById("center"),
+  document.getElementById("sidebar"),
+]) {
+  if (!el) continue;
+  el.addEventListener(
+    "scroll",
+    () => {
+      // Skip the snap-back when the element is meant to scroll
+      // (tablet stacked layout, custom user CSS). overflowY === ""
+      // is treated as the spec default ``visible`` -> propagates to
+      // ``overflow`` shorthand, also non-hidden.
+      const cs = getComputedStyle(el);
+      const oy = cs.overflowY;
+      const ox = cs.overflowX;
+      const blockedY = oy === "hidden" || oy === "clip";
+      const blockedX = ox === "hidden" || ox === "clip";
+      if (blockedY && el.scrollTop) el.scrollTop = 0;
+      if (blockedX && el.scrollLeft) el.scrollLeft = 0;
+    },
+    { passive: true },
+  );
+}
+
+// ---------------------------------------------- export conflict guard
+//
+// When the operator clicks any "Export benchmark" link the front-end
+// first hits ``GET /api/runs/<run>/export/conflicts`` to surface
+// (source, column, value) triples whose label verdicts disagree
+// row-to-row (e.g. one row marked ``error`` and another ``clean`` for
+// the literal same value in the same column). If the run is clean the
+// download proceeds immediately; otherwise we show the
+// ``#export-conflicts-modal`` with one ``Jump`` button per offending
+// cell so the operator can revise inline. The modal is non-blocking -
+// an ``Export anyway`` button proceeds with the original download in
+// case the divergence is intentional.
+
+let _pendingExport = null;
+
+function setupExportConflictGuard() {
+  const wires = ["#export-link", "#export-by-type-link", "#export-single-link"];
+  for (const sel of wires) {
+    const a = document.querySelector(sel);
+    if (!a) continue;
+    // ``capture: true`` so we run before any default navigation
+    // bookkeeping the browser would otherwise kick off.
+    a.addEventListener("click", (ev) => onExportClick(ev, a), { capture: true });
+  }
+  const modal = document.getElementById("export-conflicts-modal");
+  if (!modal) return;
+  for (const el of modal.querySelectorAll("[data-modal-close]")) {
+    el.addEventListener("click", () => closeExportConflictsModal());
+  }
+  window.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    if (modal.hidden) return;
+    closeExportConflictsModal();
+  });
+}
+
+async function onExportClick(ev, anchor) {
+  // The per-type single-link uses aria-disabled=true as a sentinel
+  // when no type is picked yet; let that be a no-op.
+  if (anchor.getAttribute("aria-disabled") === "true") {
+    ev.preventDefault();
+    return;
+  }
+  const href = anchor.href;
+  if (!href || href.endsWith("#")) {
+    ev.preventDefault();
+    return;
+  }
+  ev.preventDefault();
+  let groups = [];
+  try {
+    const r = await api(`${API}/export/conflicts`);
+    groups = (r && r.conflicts) || [];
+  } catch (e) {
+    // Don't strand the operator if the conflict check itself errors -
+    // proceed with the download but surface the failure as a toast.
+    toast(`conflict check failed: ${e.message || e}`, 3000);
+    triggerExportDownload(href, anchor.getAttribute("download"));
+    return;
+  }
+  if (groups.length === 0) {
+    triggerExportDownload(href, anchor.getAttribute("download"));
+    return;
+  }
+  _pendingExport = { href, download: anchor.getAttribute("download") || "" };
+  openExportConflictsModal(groups);
+}
+
+function triggerExportDownload(href, downloadAttr) {
+  // Use a transient anchor so the browser honours the
+  // ``Content-Disposition: attachment`` set by the server. Setting
+  // ``window.location.href`` would navigate the SPA away.
+  const a = document.createElement("a");
+  a.href = href;
+  if (downloadAttr) a.download = downloadAttr;
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+function openExportConflictsModal(conflicts) {
+  const modal = document.getElementById("export-conflicts-modal");
+  if (!modal) return;
+  renderExportConflictsModal(conflicts);
+  modal.hidden = false;
+}
+
+function closeExportConflictsModal() {
+  const modal = document.getElementById("export-conflicts-modal");
+  if (!modal) return;
+  modal.hidden = true;
+  _pendingExport = null;
+}
+
+function renderExportConflictsModal(conflicts) {
+  const body = document.getElementById("export-conflicts-body");
+  if (!body) return;
+  const totalCells = conflicts.reduce((n, g) => n + (g.cells || []).length, 0);
+  const groupsHtml = conflicts
+    .map((g) => {
+      const cellsHtml = (g.cells || [])
+        .map((c) => {
+          const lab = String(c.label || "");
+          const labelClass = `label-${escapeAttr(lab)}`;
+          const corrStr =
+            c.corrected_value == null ? "" : String(c.corrected_value);
+          return (
+            `<div class="export-conflict-cell">` +
+            `<span class="row-label">row ${Number(c.row)}</span>` +
+            `<span class="label-pill ${labelClass}">${escape(lab)}</span>` +
+            `<span class="corrected" title="${escapeAttr(corrStr)}">${escape(corrStr)}</span>` +
+            `<button type="button" class="jump-btn"` +
+            ` data-source="${escapeAttr(g.source || "")}"` +
+            ` data-row="${Number(c.row)}"` +
+            ` data-column="${escapeAttr(g.column || "")}">Jump</button>` +
+            `</div>`
+          );
+        })
+        .join("");
+      const labelsLabel = (g.labels || [])
+        .map((l) => `<code>${escape(String(l))}</code>`)
+        .join(", ");
+      return (
+        `<div class="export-conflict-group">` +
+        `<div class="export-conflict-head">` +
+        `<span class="source">${escape(g.source || "")}</span>` +
+        `<span class="column">· ${escape(g.column || "")}</span>` +
+        `<span class="value" title="${escapeAttr(g.original_value || "")}">${escape(g.original_value || "")}</span>` +
+        `<span class="muted">· labels: ${labelsLabel}</span>` +
+        `</div>` +
+        `<div class="export-conflict-cells">${cellsHtml}</div>` +
+        `</div>`
+      );
+    })
+    .join("");
+  body.innerHTML =
+    `<div class="export-conflict-summary danger">` +
+    `Found <b>${conflicts.length}</b> value(s) across <b>${totalCells}</b> cell(s)` +
+    ` whose verdicts disagree row-to-row. Click <b>Jump</b> to revise a cell,` +
+    ` or <b>Export anyway</b> to download the JSONL as-is.` +
+    `</div>` +
+    `<div class="export-conflict-list">${groupsHtml}</div>`;
+  for (const btn of body.querySelectorAll(".jump-btn")) {
+    btn.addEventListener("click", () => {
+      const src = btn.dataset.source || "";
+      const row = Number.parseInt(btn.dataset.row, 10);
+      const col = btn.dataset.column || "";
+      if (!src || !Number.isInteger(row)) return;
+      closeExportConflictsModal();
+      jumpToCell(src, row, col);
+    });
+  }
+  // Re-bind on every render so the listener doesn't pile up.
+  const anyway = document.getElementById("export-conflicts-anyway");
+  if (anyway) {
+    anyway.onclick = () => {
+      const pending = _pendingExport;
+      closeExportConflictsModal();
+      if (pending && pending.href) {
+        triggerExportDownload(pending.href, pending.download);
+      }
+    };
+  }
 }
 
 bootstrap().catch((e) => {

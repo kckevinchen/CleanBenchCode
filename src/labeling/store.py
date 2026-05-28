@@ -13,7 +13,7 @@ import threading
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional
 
-from .schema import Label
+from .schema import Label, LabelStatus
 
 
 class LabelStore:
@@ -100,9 +100,19 @@ class LabelStore:
             return list(self._records)
 
     def latest_by_target(self) -> Dict[str, Label]:
-        """Map ``target_id`` to its most recent label (None if unlabelled)."""
+        """Map ``target_id`` to its most recent label (None if unlabelled).
+
+        ``LabelStatus.UNLABELED`` records are tombstones written when an
+        auto-skip-from-exclusion is reverted; they are filtered out
+        here so downstream consumers see "no label" for the target
+        without needing to know about the unlabel mechanism.
+        ``history`` / ``all`` still expose them for the audit trail.
+        """
         with self._lock:
-            return dict(self._latest)
+            return {
+                tid: rec for tid, rec in self._latest.items()
+                if rec.status != LabelStatus.UNLABELED
+            }
 
     def history(self, target_id: str) -> List[Label]:
         with self._lock:
@@ -110,7 +120,10 @@ class LabelStore:
 
     def latest_for(self, target_id: str) -> Optional[Label]:
         with self._lock:
-            return self._latest.get(target_id)
+            rec = self._latest.get(target_id)
+            if rec is not None and rec.status == LabelStatus.UNLABELED:
+                return None
+            return rec
 
     def __iter__(self) -> Iterator[Label]:
         return iter(self.all())

@@ -76,14 +76,14 @@ def _build_payload(run_dir: Path) -> Dict[str, Any]:
 
     # Multi-table cross-sheet pass artifacts (optional). Each line of
     # multi_table_groups.jsonl is a ResolvedWorkbook record from
-    # ``src.core.multi_table_resolver``: workbook name, candidate
+    # ``src.core.multi_table.resolver``: workbook name, candidate
     # groups (union/join), and the LLM's confirm/reject decision +
     # column mapping + primary key. multi_table_violations.jsonl is
     # the flat list of MultiTableViolation rows produced by the
-    # deterministic compiler in ``src.core.multi_table_violations``.
+    # deterministic compiler in ``src.core.multi_table.violations``.
     # multi_table_verifications.jsonl is one Verification record per
     # violation_id from the step-4 verifier in
-    # ``src.core.multi_table_verifier``.
+    # ``src.core.multi_table.verifier``.
     multi_table_groups: List[Dict[str, Any]] = (
         _read_jsonl(multi_groups_path) if multi_groups_path.is_file() else []
     )
@@ -97,25 +97,12 @@ def _build_payload(run_dir: Path) -> Dict[str, Any]:
         if multi_verifications_path.is_file() else []
     )
 
-    # Generalization output (optional). When the runner ran the
-    # parametric-rewrite pass, ``relations_generalized.jsonl`` holds
-    # one parametric rule per collapsed family with a
-    # ``generalized_from`` list pointing back to the originals'
-    # species_keys. The report uses this to surface the parametric
-    # rule as the primary card and tuck the originals under expand,
-    # without ever discarding the LLM's raw output.
-    generalized_path = run_dir / "relations_generalized.jsonl"
-    generalized: List[Dict[str, Any]] = (
-        _read_jsonl(generalized_path) if generalized_path.is_file() else []
-    )
-
     # Aggregation output (optional). When the runner ran the
     # paraphrase-merging pass, ``relations_aggregated.jsonl`` holds
     # one canonical rule per collapsed paraphrase cluster, with an
     # ``aggregated_from`` list pointing back to the originals'
-    # species_keys. The report stacks aggregation BEFORE
-    # generalization in the UI: an aggregated canonical rule may
-    # itself be the originals-side of a generalized parametric rule.
+    # species_keys. The report stacks aggregation on top of the
+    # raw originals in the UI.
     aggregated_path = run_dir / "relations_aggregated.jsonl"
     aggregated: List[Dict[str, Any]] = (
         _read_jsonl(aggregated_path) if aggregated_path.is_file() else []
@@ -203,7 +190,6 @@ def _build_payload(run_dir: Path) -> Dict[str, Any]:
         "sources": sources,
         "sources_detail": sources_payload,
         "gt_summary": gt_summary,
-        "generalized": generalized,
         "aggregated": aggregated,
         "verifications": verifications,
         "multi_table_groups": multi_table_groups,

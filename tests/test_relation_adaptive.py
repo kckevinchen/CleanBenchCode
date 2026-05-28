@@ -1,4 +1,4 @@
-"""Tests for src.core.relation_adaptive: multi-pass discovery driver
+"""Tests for src.core.relations.adaptive: multi-pass discovery driver
 with per-arm Good-Turing stopping."""
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import pytest
 
 from src.core.error_taxonomy import ErrorType, ErrorTaxonomy
 from src.core.llm_client import LLMResponse
-from src.core.relation_adaptive import (
+from src.core.relations.adaptive import (
     AdaptiveSchemaDiscoverer,
     adaptive_summary_dict,
 )
@@ -213,19 +213,21 @@ class TestAdaptiveSchemaDiscoverer:
         d = self._make_discoverer()
         counter = {"i": 0}
 
+        # Pool of distinct real-column pairs; each call picks a fresh
+        # one so species_key (keyed on columns) never repeats.
+        col_pool = ["EmpID", "Zip", "State", "UnitPrice", "Quantity", "TotalPrice"]
+        pairs = [(a, b) for i, a in enumerate(col_pool) for b in col_pool[i + 1:]]
+
         class _SingletonsForeverLLM:
             endpoints = ["fake://0"]
 
             def query(self, model, prompt, **_kwargs):
+                a, b = pairs[counter["i"] % len(pairs)]
                 counter["i"] += 1
-                # ``kind="implication"`` keeps the predicate inside the
-                # species key (the ``fd`` kind with single-col lhs/rhs
-                # would intentionally collapse via bijection, hiding
-                # the per-pass uniqueness this test depends on).
                 payload = {"relations": [{
                     "kind": "implication",
-                    "columns": ["Zip", "State"],
-                    "predicate": f"unique-{counter['i']}",
+                    "columns": [a, b],
+                    "predicate": "always-new",
                     "confidence": "medium",
                     "rationale": "always-new",
                 }]}

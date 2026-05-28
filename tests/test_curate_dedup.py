@@ -59,6 +59,11 @@ def _curate_kwargs(out: Path) -> dict:
         max_empty_ratio=1.0,
         max_cell_chars=None, max_cell_words=None,
         max_oversized_row_ratio=1.0,
+        # The within-group dedup tests below predate the cross-group
+        # feature; pin it off so workbook_b's identical-schema table
+        # isn't swallowed by workbook_a. The dedicated cross-group
+        # tests at the bottom of this file exercise that path.
+        dedupe_across_groups="off",
     )
 
 
@@ -159,3 +164,158 @@ def test_dedup_noop_in_flat_layout(tmp_path):
     assert kept == ["f1.csv", "f2.csv"]
     assert "duplicate_schema_within_group" not in manifest["skip_reason_counts"]
     assert manifest["filters"]["dedupe_schema_within_group"] is None
+
+
+# ---------------------------------------------------------------------------
+# Cross-group dedup
+# ---------------------------------------------------------------------------
+
+
+def test_dedup_across_groups_schema_skips_duplicate_workbooks(tmp_path):
+    """Two workbooks contribute identical-schema single tables.
+
+    Under ``dedupe_across_groups='schema'`` only the first survives; the
+    second workbook is rejected wholesale because all its surviving
+    tables collide with previously accepted signatures. Models the
+    forked-repo / Spark-partition duplication seen in ``curated_git_500``.
+    """
+    src = tmp_path / "corpus"
+    _write_csv(src / "fork_a" / "part.csv", _make_rows(10, "a"))
+    _write_csv(src / "fork_b" / "part.csv", _make_rows(10, "b"))
+    _write_csv(src / "fork_c" / "part.csv", pd.DataFrame({
+        "x": list(range(10)), "y": list(range(10)),
+    }))
+
+    out = tmp_path / "out"
+    kwargs = _curate_kwargs(out)
+    kwargs["dedupe_across_groups"] = "schema"
+    manifest = curate(source_dir=src, **kwargs)
+
+    kept_ids = sorted(g["id"] for g in manifest["selected"])
+    # ``fork_a`` and ``fork_c`` survive; ``fork_b`` is a schema dup of
+    # ``fork_a``. (Order depends on the deterministic shuffle, but the
+    # ``fork_*`` ids are stable across runs given seed=0.)
+    assert "fork_c" in kept_ids
+    assert len(kept_ids) == 2
+    assert manifest["skip_reason_counts"].get("all_tables_duplicate_across_groups") == 1
+    assert manifest["skip_reason_counts"].get("duplicate_across_groups") == 1
+    assert manifest["filters"]["dedupe_across_groups"] == "schema"
+
+
+def test_dedup_across_groups_content_keeps_same_schema_different_rows(tmp_path):
+    """``content`` mode hashes the cleaned body, so two tables with the
+    same headers but different rows survive (where ``schema`` would drop
+    the second).
+    """
+    src = tmp_path / "corpus"
+    _write_csv(src / "g1" / "t.csv", _make_rows(10, "g1"))
+    _write_csv(src / "g2" / "t.csv", _make_rows(10, "g2"))  # same schema, diff rows
+    _write_csv(src / "g3" / "t.csv", _make_rows(10, "g1"))  # byte-identical to g1
+
+    out = tmp_path / "out"
+    kwargs = _curate_kwargs(out)
+    kwargs["dedupe_across_groups"] = "content"
+    manifest = curate(source_dir=src, **kwargs)
+
+    kept_ids = sorted(g["id"] for g in manifest["selected"])
+    # g1 and g2 survive (different rows); g3 is byte-identical to one of
+    # them and is dropped.
+    assert len(kept_ids) == 2
+    assert manifest["skip_reason_counts"].get("all_tables_duplicate_across_groups") == 1
+
+
+def test_dedup_across_groups_off_keeps_all(tmp_path):
+    src = tmp_path / "corpus"
+    _write_csv(src / "g1" / "t.csv", _make_rows(10, "g1"))
+    _write_csv(src / "g2" / "t.csv", _make_rows(10, "g2"))  # same schema
+
+    out = tmp_path / "out"
+    kwargs = _curate_kwargs(out)
+    kwargs["dedupe_across_groups"] = "off"
+    manifest = curate(source_dir=src, **kwargs)
+
+    assert sorted(g["id"] for g in manifest["selected"]) == ["g1", "g2"]
+    assert "duplicate_across_groups" not in manifest["skip_reason_counts"]
+
+
+def test_dedup_across_groups_schema_is_fuzzy_and_orderless(tmp_path):
+    """Schema dedup normalizes column tokens and ignores order.
+
+    All three groups carry the SAME logical schema but with cosmetic
+    differences: snake_case vs camelCase vs space-separated, and
+    reordered columns. The fuzzy ``schema`` match should collapse them.
+    """
+    src = tmp_path / "corpus"
+    n = 10
+    _write_csv(src / "g1" / "t.csv", pd.DataFrame({
+        "user_id": list(range(n)),
+        "full_name": [f"a{i}" for i in range(n)],
+        "city":      [f"x{i}" for i in range(n)],
+    }))
+    _write_csv(src / "g2" / "t.csv", pd.DataFrame({
+        # Reordered, camelCased, and one column renamed with a space.
+        "City":      [f"p{i}" for i in range(n)],
+        "userId":    list(range(n, 2 * n)),
+        "Full Name": [f"d{i}" for i in range(n)],
+    }))
+    _write_csv(src / "g3" / "t.csv", pd.DataFrame({
+        # Hyphenated + uppercase.
+        "USER-ID":   list(range(2 * n, 3 * n)),
+        "FULL_NAME": [f"g{i}" for i in range(n)],
+        "city":      [f"s{i}" for i in range(n)],
+    }))
+
+    out = tmp_path / "out"
+    kwargs = _curate_kwargs(out)
+    kwargs["dedupe_across_groups"] = "schema"
+    manifest = curate(source_dir=src, **kwargs)
+
+    kept = [g["id"] for g in manifest["selected"]]
+    # Only one survives - all three normalize to {userid, fullname, city}.
+    assert len(kept) == 1, f"expected fuzzy dedup to collapse to 1; got {kept}"
+    assert manifest["skip_reason_counts"].get("all_tables_duplicate_across_groups") == 2
+
+
+def test_orphans_pruned_when_overwrite(tmp_path):
+    """With ``overwrite=True``, subdirs from a prior run that are not
+    in the new manifest are removed so the on-disk corpus matches.
+    """
+    src = tmp_path / "corpus"
+    _write_csv(src / "g1" / "t.csv", _make_rows(10, "g1"))
+    _write_csv(src / "g2" / "t.csv", pd.DataFrame({
+        "x": list(range(10)), "y": list(range(10)),
+    }))
+
+    out = tmp_path / "out"
+    # Simulate a previous run that produced an extra group dir that
+    # the new curate won't select (no matching source).
+    (out / "stale_leftover").mkdir(parents=True)
+    (out / "stale_leftover" / "leftover.csv").write_text("a,b\n1,2\n")
+
+    kwargs = _curate_kwargs(out)
+    kwargs["overwrite"] = True
+    manifest = curate(source_dir=src, **kwargs)
+
+    assert not (out / "stale_leftover").exists(), "orphan dir should be pruned"
+    assert manifest["pruned_orphan_groups"] == ["stale_leftover"]
+    # Sanity: the two real groups still got written.
+    assert sorted(g["id"] for g in manifest["selected"]) == ["g1", "g2"]
+
+
+def test_orphans_preserved_without_overwrite(tmp_path):
+    """Without ``overwrite``, the curator must not touch pre-existing
+    output -- the conservative legacy behaviour.
+    """
+    src = tmp_path / "corpus"
+    _write_csv(src / "g1" / "t.csv", _make_rows(10, "g1"))
+
+    out = tmp_path / "out"
+    (out / "stale_leftover").mkdir(parents=True)
+    (out / "stale_leftover" / "leftover.csv").write_text("a,b\n1,2\n")
+
+    kwargs = _curate_kwargs(out)
+    kwargs["overwrite"] = False
+    manifest = curate(source_dir=src, **kwargs)
+
+    assert (out / "stale_leftover" / "leftover.csv").exists()
+    assert manifest["pruned_orphan_groups"] == []

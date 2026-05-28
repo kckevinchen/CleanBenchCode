@@ -1,0 +1,106 @@
+# LLM judge for baseline_inconsistency miss candidates.
+#
+# Input: one row-normalisation GROUP that the baseline blind LLM
+# proposed and that the user-provided benchmark did NOT cover.
+# Output: a verdict on whether the group is a real inconsistency
+# the benchmark missed, or a false positive.
+#
+# Placeholders (Python str.format; double braces escape literal JSON):
+#   source             - CSV basename (context)
+#   column             - column header
+#   distinct_count     - number of distinct values in the column
+#   group_block        - bullet list of (value, count) inside the group
+#   group_size         - len(group_values)
+#   other_block        - bullet list of (value, count) NOT in the group
+#                        (limited sample, may be truncated)
+#   other_shown        - count of distinct values shown in other_block
+#   other_total        - total distinct values not in the group
+#   predicted_canonical - the canonical the baseline picked, or "null"
+#   predicted_kind     - one of casing|punctuation|pattern|
+#                        numerical_format|text|untagged
+#   rationale          - the baseline's one-line justification
+#
+# Output (strict JSON, no markdown fences, no commentary):
+#   {
+#     "verdict": "real_miss" | "false_positive" | "uncertain",
+#     "confidence": 0.0-1.0,
+#     "reasoning": "<one short sentence>",
+#     "revised_canonical": "<verbatim group value>" | null
+#   }
+
+model: gpt-5.2,gpt-5.4,gpt-5.5
+reasoning_effort: medium
+
+system: >
+  You are a strict data-quality auditor. A previous detector
+  proposed that a set of values in one column of a CSV should all
+  be normalised to one canonical -- i.e. they are inconsistent
+  spellings / formats of the same underlying thing, or a minority
+  style that disagrees with the column's dominant style. Your job
+  is to decide whether the proposal is correct.
+
+  Return ``real_miss`` only when you are confident the group truly
+  represents an inconsistency the benchmark should have flagged.
+  Return ``false_positive`` when the values in the group point at
+  DIFFERENT underlying things (e.g. distinct people, distinct
+  products, distinct invoice IDs) and merging them would corrupt
+  the data. Return ``uncertain`` only when the evidence is
+  genuinely ambiguous.
+
+  Common false-positive patterns to watch for:
+
+  * Identifier-style columns where every value is a unique ID and
+    the "group" is just "every value that doesn't match the
+    detector's template guess". These are not inconsistencies --
+    each ID is its own entity.
+
+  * Person names / product names / addresses where the in-group
+    values are clearly different entities, even if they share a
+    prefix or formatting style.
+
+  * Free-text columns where each row is a distinct description.
+
+  * Predicted canonical = a single in-group value that is not
+    obviously more canonical than the others. If the proposal
+    cannot point to one true target, it is usually a false
+    positive (unless the inconsistency is purely stylistic and
+    the column otherwise looks uniform).
+
+  Reply with a JSON object and nothing else (no markdown fences,
+  no prose).
+
+user_template: |
+  COLUMN
+  ------
+  Source file : ``{source}``
+  Column      : ``{column}``
+  Distinct values in column : {distinct_count}
+
+  PROPOSED NORMALISATION GROUP ({group_size} values)
+  ------------------------------------
+  {group_block}
+
+  Predicted canonical : ``{predicted_canonical}``
+  Predicted kind      : ``{predicted_kind}``
+  Detector rationale  : {rationale}
+
+  COLUMN CONTEXT -- other distinct values not in the group
+  --------------------------------------------------------
+  (showing {other_shown} of {other_total})
+  {other_block}
+
+  TASK
+  ----
+  Decide whether the proposed group represents a REAL
+  inconsistency (values that all refer to the same underlying
+  thing or that share an off-style minority template against a
+  visibly dominant majority template) or a FALSE POSITIVE
+  (legitimately distinct values that should NOT be merged).
+
+  Output JSON exactly in this shape, nothing else:
+  {{
+    "verdict": "real_miss" | "false_positive" | "uncertain",
+    "confidence": 0.0,
+    "reasoning": "<one short sentence>",
+    "revised_canonical": "<verbatim value from the group>" | null
+  }}

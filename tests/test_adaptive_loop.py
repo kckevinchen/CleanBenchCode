@@ -30,6 +30,7 @@ import pandas as pd
 import pytest
 
 from experiments.run_cleaning_detection import (
+    _auto_stop_scope_for_types,
     _resolve_adaptive_settings,
     _run_adaptive_loop,
 )
@@ -211,8 +212,10 @@ class TestResolveAdaptiveSettings:
         assert s["num_runs"] == 5
         assert s["min_runs"] == 3
         assert s["target_missing_mass"] == 0.05
-        # New canonical knob; default is per-column granularity.
-        assert s["stop_scope"] == "column"
+        # New canonical knob; default is now "auto" (resolved to a
+        # concrete scope in ``main`` once the active error-type set is
+        # known).
+        assert s["stop_scope"] == "auto"
         # Back-compat alias is preserved on the payload.
         assert "target_policy" in s
 
@@ -246,6 +249,13 @@ class TestResolveAdaptiveSettings:
                 _ns(gt_stop_scope="bogus"), config={},
             )
 
+    def test_stop_scope_auto_passes_through(self) -> None:
+        # ``auto`` is a sentinel resolved later in ``main`` once the
+        # active error-type set is known; ``_resolve_adaptive_settings``
+        # must accept it verbatim.
+        s = _resolve_adaptive_settings(_ns(gt_stop_scope="auto"), config={})
+        assert s["stop_scope"] == "auto"
+
     def test_negative_num_runs_rejected(self) -> None:
         with pytest.raises(ValueError, match="num_runs"):
             _resolve_adaptive_settings(_ns(gt_num_runs=0), config={})
@@ -262,6 +272,51 @@ class TestResolveAdaptiveSettings:
         )
         assert s["num_runs"] == 2
         assert s["min_runs"] == 2  # clamped
+
+
+# ---------------------------------------------------------------------------
+# _auto_stop_scope_for_types
+# ---------------------------------------------------------------------------
+
+
+def _et(category: str) -> ErrorType:
+    return ErrorType(
+        key=f"k_{category.replace(' ', '_').replace('/', '_')}",
+        name="n", category=category, description="d", example="e", notes="n",
+    )
+
+
+class TestAutoStopScope:
+    def test_single_column_only_resolves_to_column(self) -> None:
+        types = [_et("Single-Column / Typo"), _et("Single-Column / Inconsistency")]
+        assert _auto_stop_scope_for_types(types) == "column"
+
+    def test_multi_column_in_mix_resolves_to_column_pair(self) -> None:
+        types = [_et("Single-Column / Typo"), _et("Multi-Column / Intra-Record")]
+        assert _auto_stop_scope_for_types(types) == "column_pair"
+
+    def test_multi_row_in_mix_resolves_to_csv(self) -> None:
+        types = [
+            _et("Single-Column / Typo"),
+            _et("Multi-Column / Intra-Record"),
+            _et("Multi-Row / Cross-Row"),
+        ]
+        assert _auto_stop_scope_for_types(types) == "csv"
+
+    def test_multi_table_wins_over_all_others(self) -> None:
+        types = [
+            _et("Single-Column / Typo"),
+            _et("Multi-Column / Intra-Record"),
+            _et("Multi-Row / Cross-Row"),
+            _et("Multi-Table / Cross-Source"),
+        ]
+        assert _auto_stop_scope_for_types(types) == "multi_table"
+
+    def test_empty_falls_back_to_column(self) -> None:
+        assert _auto_stop_scope_for_types([]) == "column"
+
+    def test_unknown_category_falls_back_to_column(self) -> None:
+        assert _auto_stop_scope_for_types([_et("Unknown-Scope")]) == "column"
 
 
 # ---------------------------------------------------------------------------

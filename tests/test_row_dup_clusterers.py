@@ -1,4 +1,4 @@
-"""Unit tests for ``src.core.row_dup_clusterers``.
+"""Unit tests for ``src.core.row_dup.clusterers``.
 
 Covers:
 - ``merge_clusters`` deduplication + evidence union + confidence escalation.
@@ -17,7 +17,7 @@ import importlib.util
 import pandas as pd
 import pytest
 
-from src.core.row_dup_clusterers import (
+from src.core.row_dup.clusterers import (
     BlockingClusterer,
     Cluster,
     KeyCollisionClusterer,
@@ -183,7 +183,7 @@ _HAS_DATASKETCH = importlib.util.find_spec("datasketch") is not None
 @pytest.mark.skipif(not _HAS_DATASKETCH, reason="datasketch not installed")
 class TestMinHashLSHClusterer:
     def test_near_duplicates_grouped(self) -> None:
-        from src.core.row_dup_clusterers import MinHashLSHClusterer
+        from src.core.row_dup.clusterers import MinHashLSHClusterer
         df = pd.DataFrame(
             {
                 "review": [
@@ -205,7 +205,7 @@ class TestMinHashLSHClusterer:
         assert fox_cluster.evidence["avg_jaccard"] > 0
 
     def test_unrelated_rows_not_grouped(self) -> None:
-        from src.core.row_dup_clusterers import MinHashLSHClusterer
+        from src.core.row_dup.clusterers import MinHashLSHClusterer
         df = pd.DataFrame(
             {
                 "x": [
@@ -220,7 +220,7 @@ class TestMinHashLSHClusterer:
         assert out == []
 
     def test_short_rows_skipped(self) -> None:
-        from src.core.row_dup_clusterers import MinHashLSHClusterer
+        from src.core.row_dup.clusterers import MinHashLSHClusterer
         df = pd.DataFrame({"x": ["a", "b", "c"]})
         cl = MinHashLSHClusterer(min_tokens=3)
         out = cl.cluster(source="t.csv", df=df, digest=None)
@@ -257,7 +257,7 @@ class TestEmbeddingClusterer:
         return _emb
 
     def test_semantic_near_duplicates_clustered(self) -> None:
-        from src.core.row_dup_clusterers import EmbeddingClusterer
+        from src.core.row_dup.clusterers import EmbeddingClusterer
         # Three rows: two semantically similar (vectors [1,0,0] and
         # [0.95,0.1,0]), one unrelated ([0,1,0]).
         texts = [
@@ -278,7 +278,7 @@ class TestEmbeddingClusterer:
         assert not any(2 in c.rows for c in out)
 
     def test_threshold_separates_clusters(self) -> None:
-        from src.core.row_dup_clusterers import EmbeddingClusterer
+        from src.core.row_dup.clusterers import EmbeddingClusterer
         texts = ["a", "b", "c"]
         embedder = self._stub_embedder({
             texts[0]: [1.0, 0.0],
@@ -289,7 +289,7 @@ class TestEmbeddingClusterer:
         # Map the rendered text to vectors. The clusterer renders rows
         # via normalize_for_dedup -> " ".join(parts), so reconstruct
         # the same texts here.
-        from src.core.multi_row_priors import normalize_for_dedup
+        from src.core.row_dup.priors import normalize_for_dedup
         rendered = [normalize_for_dedup(s) for s in df["x"]]
         embedder = self._stub_embedder({
             rendered[0]: [1.0, 0.0],
@@ -302,7 +302,7 @@ class TestEmbeddingClusterer:
         assert out == []
 
     def test_empty_when_no_text_columns(self) -> None:
-        from src.core.row_dup_clusterers import EmbeddingClusterer
+        from src.core.row_dup.clusterers import EmbeddingClusterer
         df = pd.DataFrame({"n": [1, 2, 3]})
         cl = EmbeddingClusterer(embedder=lambda texts: [[1.0]] * len(texts))
         out = cl.cluster(source="t.csv", df=df, digest=None)

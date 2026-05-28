@@ -17,7 +17,6 @@ from src.core.relations import (
     DiscoveryPromptConfig,
     Relation,
     SchemaDiscoverer,
-    _fold_predicate,
     _parse_relations_json,
     load_discovery_prompt,
     sample_rows_for_prompt,
@@ -190,8 +189,28 @@ class TestRelationSpeciesKey:
         return Relation(**defaults)
 
     def test_paraphrase_collapses(self) -> None:
+        # Same (error_type, kind, columns, lhs, rhs) collapses regardless
+        # of predicate phrasing -- the predicate is not in the species key.
         a = self._r(predicate="Zip determines State")
-        b = self._r(predicate="Zip   determines  State.")
+        b = self._r(predicate="The Zip column functionally determines State")
+        assert a.species_key() == b.species_key()
+
+    def test_predicate_changes_do_not_split(self) -> None:
+        # Even semantically distinct predicates over the same column
+        # structure collapse. This is intentional: paraphrase noise
+        # dominates operator-disagreement noise in practice.
+        a = self._r(
+            kind="equation",
+            columns=("total", "price", "qty"),
+            lhs=("total",), rhs=("price", "qty"),
+            predicate="total = price + qty",
+        )
+        b = self._r(
+            kind="equation",
+            columns=("total", "price", "qty"),
+            lhs=("total",), rhs=("price", "qty"),
+            predicate="total = price * qty",
+        )
         assert a.species_key() == b.species_key()
 
     def test_directional_keys_differ(self) -> None:
@@ -233,19 +252,6 @@ class TestRelationSpeciesKey:
         b = self._r(kind="composite_fd")
         assert a.species_key() != b.species_key()
 
-    def test_fold_predicate_strips_punct(self) -> None:
-        # Trailing punctuation, repeated whitespace, and case
-        # variations all collapse to the same fold.
-        assert _fold_predicate("Zip determines State.") == _fold_predicate(
-            "zip   determines  state"
-        )
-
-    def test_fold_predicate_nfkc_normalises(self) -> None:
-        # Full-width digits / operators and no-break spaces fold to
-        # ASCII so visually-equivalent predicates collapse.
-        # ``\uff1e`` is full-width '>'; ``\uff10\uff11`` are full-width 0,1.
-        assert _fold_predicate("a \uff1e b") == _fold_predicate("a > b")
-        assert _fold_predicate("x = \uff10\uff11") == _fold_predicate("x = 01")
 
 
 # ---------------------------------------------------------------------------

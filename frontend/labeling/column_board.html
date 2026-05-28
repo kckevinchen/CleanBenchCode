@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Same strict CSP as label.html: no inline scripts. The dark
+       palette + 3-pane grid + header/footer chrome are inherited
+       from styles.css so this surface and the all-error label page
+       feel like one product. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'" />
+  <title>Data cleaning - column board (inconsistency)</title>
+  <!-- Auto-zoom the workbench so the 3-pane labelling layout stays
+       usable on low-resolution screens. Loads BEFORE styles.css so
+       the first paint is at the right scale. -->
+  <script src="./viewport-zoom.js"></script>
+  <link rel="stylesheet" href="./styles.css" />
+  <link rel="stylesheet" href="./column_board.css?v=5" />
+</head>
+<body>
+  <header>
+    <div class="title">
+      <h1><a href="./" style="color:inherit;">Data-cleaning workbench</a> <span class="muted">· column board (inconsistency)</span></h1>
+      <div class="meta" id="run-meta">loading…</div>
+    </div>
+    <div class="progress" id="progress"></div>
+    <div class="actions">
+      <a href="./">← Runs</a>
+      <a id="label-link" href="#">All-error label page →</a>
+      <a id="report-link" href="#" target="_blank" rel="noopener">Open report</a>
+      <a href="/api/docs" target="_blank" rel="noopener">API</a>
+    </div>
+  </header>
+
+  <aside class="sidebar" id="sidebar">
+    <div class="filters">
+      <div class="filter-cell">
+        <span>Source</span>
+        <select id="filter-source"><option value="">(all)</option></select>
+      </div>
+      <div class="filter-cell">
+        <span>Status</span>
+        <select id="filter-status">
+          <option value="">(any)</option>
+          <option value="unlabeled" selected>unlabeled</option>
+          <option value="labeled">labeled</option>
+          <option value="no_inconsistency">no_inconsistency</option>
+          <option value="dropped_overlapping">dropped_overlapping</option>
+          <option value="dropped_messy">dropped_messy</option>
+        </select>
+      </div>
+      <div class="filter-cell">
+        <span>Has draft</span>
+        <select id="filter-draft">
+          <option value="">(any)</option>
+          <option value="yes" selected>with LLM draft</option>
+          <option value="no">no draft</option>
+        </select>
+      </div>
+    </div>
+    <div class="queue" id="queue">loading…</div>
+  </aside>
+
+  <main class="center" id="center">
+    <!-- Column header strip: which column we're on + cardinality +
+         draft summary. Same shape as label.html's .csv-head so the
+         two pages share the visual cadence. -->
+    <div class="csv-head">
+      <span id="cb-title" class="muted">(select a column from the queue)</span>
+      <span id="cb-stats" class="muted"></span>
+      <span id="cb-draft-meta" class="muted"></span>
+    </div>
+
+    <!-- LLM proposals: the primary "label these" surface. Each draft
+         cluster is rendered as a card with Accept / Reject buttons
+         and inline editors for canonical / members / kind. Below the
+         proposals, an explicit affordance lets the operator promote
+         a custom cluster from the value-list selection (in the
+         detail pane). -->
+    <div class="cb-body">
+      <section class="cb-proposals">
+        <header class="cb-section-head">
+          <h2>LLM-proposed clusters</h2>
+          <span class="muted" id="cb-proposals-meta"></span>
+          <span class="cb-bulk-actions" id="cb-bulk-actions" hidden>
+            <button type="button" id="cb-accept-all" class="ghost">Accept all</button>
+            <button type="button" id="cb-reject-all" class="ghost">Reject all</button>
+          </span>
+        </header>
+        <div class="cb-cluster-list" id="cb-cluster-list">
+          <div class="placeholder muted">(no column selected)</div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <section class="detail" id="detail">
+    <h2>Distinct values</h2>
+    <p class="cb-help muted">All non-empty values in this column. Pick 2+ to add a missed cluster the LLM didn't propose.</p>
+    <input id="cb-value-search" type="text" placeholder="filter values…" autocomplete="off" />
+    <div class="cb-value-list" id="cb-value-list">(no column selected)</div>
+    <div class="cb-value-actions" hidden id="cb-value-actions">
+      <span id="cb-selected-count" class="muted">0 selected</span>
+      <button type="button" id="cb-make-cluster" class="primary">Make cluster from selection</button>
+      <button type="button" id="cb-clear-selection" class="ghost">Clear</button>
+    </div>
+
+    <h2 class="cb-verdict-title">Verdict</h2>
+    <div class="cb-verdict-block">
+      <label>
+        <span>Status</span>
+        <select id="cb-status">
+          <option value="labeled">labeled (apply accepted clusters)</option>
+          <option value="no_inconsistency">no_inconsistency (nothing to fix)</option>
+          <option value="dropped_overlapping">dropped_overlapping</option>
+          <option value="dropped_messy">dropped_messy</option>
+        </select>
+      </label>
+      <label id="cb-drop-reason-cell" hidden>
+        <span>Drop reason</span>
+        <input id="cb-drop-reason" type="text" placeholder="one-line note for drop" />
+      </label>
+      <label class="cb-note-cell">
+        <span>Note</span>
+        <input id="cb-note" type="text" placeholder="optional comment" />
+      </label>
+      <div class="cb-save-row">
+        <button type="button" id="cb-save" class="primary">Save labels</button>
+        <span id="cb-save-msg" class="muted"></span>
+      </div>
+    </div>
+  </section>
+
+  <footer class="shortcuts">
+    <span><kbd>j</kbd>/<kbd>k</kbd> next/prev cluster</span>
+    <span><kbd>1</kbd> accept active cluster</span>
+    <span><kbd>2</kbd> reject active cluster</span>
+    <span><kbd>Enter</kbd> save column</span>
+    <span class="muted">click a value on the right to add it to your selection</span>
+  </footer>
+
+  <div class="toast" id="toast" hidden></div>
+
+  <script src="./column_board.js?v=6" type="module"></script>
+</body>
+</html>

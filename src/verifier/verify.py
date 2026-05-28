@@ -986,6 +986,34 @@ class Verifier:
             if len(ver.evidence) >= self.cfg.max_snippets:
                 break
 
+        # Fallback: when the agent omitted ``payload.evidence`` (or
+        # every URL it cited was filtered as non-grounded) but the
+        # runtime DID record ``url_citation`` annotations, surface
+        # those SDK-attributed citations as evidence so we don't
+        # silently drop trustworthy URLs. This is common with the
+        # Bing Grounding tool: the agent emits a JSON-only response
+        # and forgets to copy the URLs from its own annotations
+        # back into the ``evidence`` array. The annotations are by
+        # construction grounded (the runtime wrote them, not the
+        # model), so this preserves the anti-hallucination guarantee.
+        # The agent's ``reasoning`` is reused as the quote since we
+        # never see the underlying snippet text from Bing.
+        if not ver.evidence and verdict.citations:
+            quote_text = (ver.reasoning or "").strip()[: self.cfg.snippet_chars]
+            seen: set[str] = set()
+            for c in verdict.citations:
+                url = (c.url or "").strip()
+                if not url or url in seen:
+                    continue
+                seen.add(url)
+                ver.evidence.append(EvidenceCitation(
+                    url=url,
+                    title=(c.title or "").strip(),
+                    quote=quote_text,
+                ))
+                if len(ver.evidence) >= self.cfg.max_snippets:
+                    break
+
         # Tighten the verdict if it claims confirmed_error without
         # surviving evidence: downgrade to ambiguous.
         if ver.verdict == "confirmed_error" and not ver.evidence:

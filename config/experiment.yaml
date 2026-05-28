@@ -129,6 +129,11 @@ llm:
   # "is_likely_false_positive" flag. Disable for a free, deterministic-only
   # run (clusters still materialise, just without canonical fields).
   enable_synthesis: true
+  # When true (default) the Phase-B synthesis call also fires for
+  # single-detection clusters so the LLM produces a clean canonical fix
+  # for every flagged cell, not only multi-type ones. Switch off to
+  # restore the original cheaper behaviour (multi-type clusters only).
+  synthesise_singletons: true
   # Reasoning effort for the synthesis call. Defaults to `reasoning_effort`.
   synthesis_effort: medium
 
@@ -294,6 +299,89 @@ row_duplication:
   # The recall-first union of issues / equivalence classes is
   # returned across runs.
 
+# Inter-column detection pipeline (discover -> verify -> filter -> detect).
+# Applied to every "multi-column" / "multi-row" / "multi-table" error type
+# in the taxonomy (i.e. any type that requires `column_mode: all`):
+#   fd_violation, row_calculation_inconsistency,
+#   string_calculation_inconsistency, row_duplication,
+#   inter_table_inconsistency.
+#
+# The pipeline runs four stages per (source, error_type):
+#
+#   1. DISCOVER candidate relations from the table digest + a row sample.
+#      Uses the adaptive Good-Turing / Chao1 stop rule from
+#      `good_turing.per_arm.defaults` so passes stop once the missing
+#      mass on undiscovered species shrinks below the threshold.
+#
+#   2. VERIFY each relation by CODE only. The LLM writes a `check(df)`
+#      predicate and the sandbox runs it against the full frame to get
+#      an empirical pass-rate. When the LLM refuses to write code
+#      (free-text rule, world-knowledge dependency, etc.) the relation
+#      is marked `verifiable=false` and carries no pass-rate signal;
+#      when the sandbox errors while running the code, the verification
+#      records the error. Both cases skip the FILTER gate and fall
+#      through to the LLM table-scan in DETECT (recall fallback).
+#
+#   3. FILTER on the code verification record. Recall-focused: only
+#      drop rules that are *certainly* not useful. Two bounds on the
+#      pass-rate signal:
+#        * pass_rate < min_pass_rate   -> "false rule" (majority violate)
+#        * pass_rate >= max_pass_rate  -> "no error to detect" (rule holds)
+#      A relation that survives is expected to fire on at least one row
+#      but not on most rows -- exactly the band where real defects hide.
+#      The absolute-count cap `max_violations_per_rule` is disabled by
+#      default; pass-rate alone owns the decision regardless of table
+#      size. Rules without a pass-rate (code-refused or code-errored)
+#      bypass this gate and go straight to DETECT.
+#
+#   4. DETECT violating rows on surviving rules. Code-verified rules
+#      re-run their `check(df)` and emit one finding per False row
+#      (`src.core.relation_violations.compile_code_violations`).
+#      Code-refused and code-errored rules go through a whole-table
+#      LLM scan
+#      (`src.core.relation_llm_detector.detect_violations_for_relations`)
+#      which enumerates violating rows with a per-row rationale.
+#
+# Disable the pipeline (`enabled: false`) to fall back to the per-chunk
+# `PerTypeCleaningDetector` for inter-column types -- useful for A/B
+# comparison or when you only want the single-column path to run.
+inter_column_pipeline:
+  # Master switch. When true, every inter-column error type is routed
+  # through this pipeline; the per-chunk detector still owns the four
+  # single-column types (typo, inconsistency, semantic_incompatible,
+  # numeric_outlier).
+  enabled: true
+  # Filter bounds (apply to code-verified rules only -- code-refused /
+  # code-errored rules bypass the gate and go straight to the LLM
+  # table-scan). The gate is recall-focused: it only drops rules that
+  # are *certainly* not useful, leaving everything else for the
+  # labeller to triage.
+  # Lower bound: drop "false rules" where the majority of rows already
+  # violate the proposed relation. 0.5 = drop rules where more than 50%
+  # of rows violate (the relation is almost certainly hallucinated).
+  # Raise toward 0.85 to be stricter; lower toward 0 to keep every rule.
+  min_pass_rate: 0.5
+  # Upper bound: drop "fully satisfied" rules where the relation holds
+  # for every row -- there is no error to detect. Use `1.0` to keep
+  # pass_rate=1.0 rules (no-op but cheap); the default trims them.
+  max_pass_rate: 0.9999999990  # 1.0 - 1e-9
+  # Confidence floor (drops `low`-confidence discovered rules before
+  # they reach detection). high|medium|low.
+  min_confidence: medium
+  # Optional absolute cap on rows compiled per rule. `null` (the
+  # default) disables the cap so the pass-rate band above owns the
+  # decision uniformly across small and large tables -- a real rule
+  # on a 100k-row table can legitimately flag thousands of rows.
+  # Set to a positive integer (e.g. 200) only to bound the cluster
+  # queue against a single very wrong rule.
+  max_violations_per_rule: null
+  # Whole-table LLM-scan caps (consulted on every relation that falls
+  # through to the LLM detector, i.e. code-refused and code-errored
+  # rules). Detection scans the FULL table, so the row cap protects
+  # against context-window overflow on tall tables.
+  llm_detection_max_rows_per_call: 300
+  llm_detection_max_violations_per_rule: 50
+
 good_turing:
   # Settings consumed when `experiment.mode=adaptive` (or `--mode adaptive`
   # on the CLI). Ignored entirely in single mode.
@@ -349,6 +437,11 @@ good_turing:
   # evaluated. Each arm = (scope, error_type) is treated as an
   # independent experiment; the loop stops once every error_type's
   # arms have all saturated.
+  #   auto        -> pick the natural arm scope for the active
+  #                  error-type set: column (single-column-only),
+  #                  column_pair (multi-column included), csv
+  #                  (multi-row included), multi_table (multi-table
+  #                  included). Broadest match wins.
   #   dataset     -> one arm per error_type (pooled across columns and
   #                  sources). Equivalent to the old
   #                  `target_policy: per_type`.
@@ -358,7 +451,7 @@ good_turing:
   #                  but separates files.
   #   column_pair / row / workbook / cross_csv / multi_table -> see
   #     src/adaptive/scoped_gt.py for the full menu.
-  stop_scope: column
+  stop_scope: auto
   # Seed derivation root. (base_seed, num_runs) -> deterministic
   # perturbation seeds (independent of LLM non-determinism).
   base_seed: 42

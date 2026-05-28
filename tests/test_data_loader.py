@@ -27,7 +27,7 @@ from src.core.data_loader import (
     COLUMN_MODE_ALL,
     COLUMN_MODE_SINGLE,
     CsvChunk,
-    _dedupe_columns,
+    _drop_duplicate_columns,
     _visible_whitespace,
     iter_chunks,
     load_csv,
@@ -35,24 +35,33 @@ from src.core.data_loader import (
 
 
 # ---------------------------------------------------------------------------
-# _dedupe_columns
+# _drop_duplicate_columns
 # ---------------------------------------------------------------------------
 
 
-class TestDedupeColumns:
+class TestDropDuplicateColumns:
     def test_no_duplicates_passthrough(self) -> None:
-        assert _dedupe_columns(["a", "b", "c"]) == ["a", "b", "c"]
+        names, keep, dropped = _drop_duplicate_columns(["a", "b", "c"])
+        assert names == ["a", "b", "c"]
+        assert keep == [0, 1, 2]
+        assert dropped == []
 
-    def test_basic_duplicate_suffixed(self) -> None:
-        assert _dedupe_columns(["a", "a", "a"]) == ["a", "a.1", "a.2"]
+    def test_basic_duplicate_drops_later(self) -> None:
+        # "a" appears 3x; only the first position survives.
+        names, keep, dropped = _drop_duplicate_columns(["a", "a", "a"])
+        assert names == ["a"]
+        assert keep == [0]
+        assert dropped == ["a"]
 
     def test_interleaved_duplicates(self) -> None:
-        # "a" appears at positions 0 and 2; the SECOND occurrence becomes
-        # "a.1" regardless of distance from the first.
-        assert _dedupe_columns(["a", "b", "a", "b"]) == ["a", "b", "a.1", "b.1"]
+        # First occurrences win regardless of distance.
+        names, keep, dropped = _drop_duplicate_columns(["a", "b", "a", "b"])
+        assert names == ["a", "b"]
+        assert keep == [0, 1]
+        assert dropped == ["a", "b"]
 
     def test_empty_input(self) -> None:
-        assert _dedupe_columns([]) == []
+        assert _drop_duplicate_columns([]) == ([], [], [])
 
 
 # ---------------------------------------------------------------------------
@@ -99,15 +108,15 @@ class TestLoadCsv:
 
     def test_whitespace_collision_dedupes(self, tmp_path: Path) -> None:
         # Two distinct on-disk labels (" Numeric" + "Numeric") collide
-        # after .strip(); the second one must be renamed so frame[col]
-        # returns a Series, not a DataFrame.
+        # after .strip(); the SECOND one is dropped entirely so callers
+        # always get a single Series per column name.
         p = tmp_path / "x.csv"
         p.write_text(" Numeric,Numeric\n1,2\n3,4\n")
         df = load_csv(p)
-        assert "Numeric" in df.columns
-        assert "Numeric.1" in df.columns
+        assert list(df.columns) == ["Numeric"]
         assert isinstance(df["Numeric"], pd.Series)
-        assert isinstance(df["Numeric.1"], pd.Series)
+        # The kept column is the FIRST occurrence (values "1" and "3").
+        assert list(df["Numeric"]) == ["1", "3"]
 
     def test_embedded_newlines_in_cell_preserved(self, tmp_path: Path) -> None:
         # A quoted cell with an internal newline must survive as a single
@@ -118,6 +127,34 @@ class TestLoadCsv:
         assert len(df) == 1
         assert df.loc[0, "a"] == "line1\nline2"
         assert df.loc[0, "b"] == "ok"
+
+    def test_cells_strip_leading_trailing_whitespace(self, tmp_path: Path) -> None:
+        # Leading/trailing whitespace is treated as a CSV-format padding
+        # artefact and normalised at load time. Internal whitespace
+        # (repeated spaces, embedded newlines) is preserved verbatim so
+        # the typo / inconsistency detectors still see it.
+        p = tmp_path / "x.csv"
+        p.write_text(
+            'name,note\n'
+            '" James Smith","ok"\n'
+            '"James Smith ","trailing"\n'
+            '"James   Smith","internal-repeat"\n'
+            '"a","\tindented"\n'
+            '"  ","whitespace-only collapses to empty"\n'
+            '"alice","line1\nline2"\n'
+        )
+        df = load_csv(p)
+        # Leading / trailing trimmed.
+        assert df.loc[0, "name"] == "James Smith"
+        assert df.loc[1, "name"] == "James Smith"
+        # Internal repeated space preserved.
+        assert df.loc[2, "name"] == "James   Smith"
+        # Leading tab is whitespace -> stripped.
+        assert df.loc[3, "note"] == "indented"
+        # Whitespace-only collapses to empty string.
+        assert df.loc[4, "name"] == ""
+        # Embedded newline survives (str.strip only touches the edges).
+        assert df.loc[5, "note"] == "line1\nline2"
 
 
 # ---------------------------------------------------------------------------

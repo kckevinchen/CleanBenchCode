@@ -41,6 +41,21 @@ PROMPT_FIXTURES: Dict[str, Dict[str, str]] = {
         "start_row": "0",
         "end_row": "1",
     },
+    # Backup of the heavily-gated taxonomy (FAST-SKIP / DOWN-WEIGHT
+    # / R1-R9). Uses the same placeholder set as error_types.yaml.
+    "error_types_focused.yaml": {
+        "type_key": "typo",
+        "type_name": "Typo",
+        "type_category": "Single-Column / Typo",
+        "type_description": "desc",
+        "type_example": "ex",
+        "type_notes": "notes",
+        "table_overview": "(none)",
+        "headers": "a, b",
+        "rows": "(table)",
+        "start_row": "0",
+        "end_row": "1",
+    },
     "synthesise_cluster.yaml": {
         "cluster_id": "x_y_z",
         "row": "0",
@@ -115,15 +130,19 @@ PROMPT_FIXTURES: Dict[str, Dict[str, str]] = {
         "table_md": "| __row__ | a | b |\n|---|---|---|\n| 0 | 1 | 2 |",
         "n_rows": "1",
     },
-    "aggregate_relations.yaml": {
+    "verify_relation.yaml": {
         "source": "a.csv",
         "error_type": "fd_violation",
-        "cluster_size": "2",
-        "columns": "  - a",
-        "cluster_rules": "  1. ...",
-        "sample_rows": "(none)",
+        "kind": "fd",
+        "columns": "a, b",
+        "predicate": "a -> b",
+        "rationale": "",
+        "confidence": "medium",
+        "refusal_reason": "external knowledge required",
+        "table_md": "| __row__ | a | b |\n|---|---|---|\n| 0 | 1 | 2 |",
+        "n_rows": "1",
     },
-    "generalize_relations.yaml": {
+    "aggregate_relations.yaml": {
         "source": "a.csv",
         "error_type": "fd_violation",
         "cluster_size": "2",
@@ -167,6 +186,71 @@ PROMPT_FIXTURES: Dict[str, Dict[str, str]] = {
         "page_index": 1,
         "n_pages": 1,
         "n_sample_rows": 50,
+    },
+    "cluster_column_values.yaml": {
+        "source": "smoke.csv",
+        "column": "State",
+        "value_list": "  - 'CA' (count=18)\n  - 'Calif.' (count=6)\n  - 'California' (count=4)",
+    },
+    "generate_cluster_prompt_variant.yaml": {
+        "base_system": "You are a careful data-quality assistant...",
+        "base_user_template": (
+            "CONTEXT\nsource: {source}\ncolumn: {column}\n\n"
+            "VALUES\n{value_list}"
+        ),
+        "pass_index": "1",
+    },
+    # Single-column baseline detectors: each scans one column's value
+    # vocabulary. They share the same placeholder set.
+    "baseline_inconsistency.yaml": {
+        "source": "smoke.csv",
+        "column": "State",
+        "distinct_count": "3",
+        "truncated_hint": "",
+        "value_list": "  - 'CA' (count=18)\n  - 'Calif.' (count=6)",
+    },
+    "precision_baseline_inconsistency.yaml": {
+        "source": "smoke.csv",
+        "column": "State",
+        "distinct_count": "3",
+        "truncated_hint": "",
+        "value_list": "  - 'CA' (count=18)\n  - 'Calif.' (count=6)",
+    },
+    "precision_baseline_numeric_outlier.yaml": {
+        "source": "smoke.csv",
+        "column": "Amount",
+        "distinct_count": "3",
+        "truncated_hint": "",
+        "value_list": "  - '100' (count=18)\n  - '1000000' (count=1)",
+    },
+    "precision_baseline_semantic_incompatible.yaml": {
+        "source": "smoke.csv",
+        "column": "Unit",
+        "distinct_count": "3",
+        "truncated_hint": "",
+        "value_list": "  - 'kg' (count=18)\n  - 'banana' (count=1)",
+    },
+    "precision_baseline_typo.yaml": {
+        "source": "smoke.csv",
+        "column": "Name",
+        "distinct_count": "3",
+        "truncated_hint": "",
+        "value_list": "  - 'Acme Corp' (count=18)\n  - 'AcmeCo' (count=6)",
+    },
+    # Adjudicates one proposed inconsistency group against the rest of
+    # the column's vocabulary.
+    "baseline_inconsistency_judge.yaml": {
+        "source": "smoke.csv",
+        "column": "State",
+        "distinct_count": "3",
+        "group_block": "  - 'CA'\n  - 'Calif.'",
+        "group_size": "2",
+        "other_block": "  - 'TX'",
+        "other_shown": "1",
+        "other_total": "1",
+        "predicted_canonical": "CA",
+        "predicted_kind": "abbreviation",
+        "rationale": "same state, different surface forms",
     },
 }
 

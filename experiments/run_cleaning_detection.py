@@ -9,9 +9,10 @@ config or ``--mode`` on the CLI:
   3. Flatten detections and run Phase-A clustering
      (:func:`src.aggregator.cluster_issues`) to merge overlapping
      detections on the same row into one cluster per underlying defect.
-  4. For every multi-type cluster, optionally fire one Phase-B LLM
-     synthesis call that picks a ``primary_error_type`` and emits a
-     canonical explanation + fix (disable with ``--no-synthesis``).
+  4. For every cluster (single- or multi-detection by default), fire one
+     Phase-B LLM synthesis call that picks a ``primary_error_type`` and
+     emits a canonical explanation + fix (disable with ``--no-synthesis``;
+     restrict to multi-type only with ``--no-synthesise-singletons``).
   5. Emit JSON / JSONL / Markdown artifacts + the HTML dashboard.
 
 ``mode=adaptive``:
@@ -57,7 +58,7 @@ import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 import yaml
@@ -83,7 +84,7 @@ from src.core.data_loader import (  # noqa: E402
 )
 from src.core.detector import PerTypeCleaningDetector  # noqa: E402
 from src.core.error_taxonomy import load_taxonomy  # noqa: E402
-from src.core.row_duplication_detector import (  # noqa: E402
+from src.core.row_dup.detector import (  # noqa: E402
     AdjudicatorSettings,
     RowDuplicationDetector,
 )
@@ -142,6 +143,42 @@ def _scope_of(category: str) -> str:
 def _normalise_scope(value: Any) -> str:
     """Normalise a user-supplied scope token to the canonical form."""
     return " ".join(str(value).strip().lower().split())
+
+
+# ``stop_scope=auto`` picks the narrowest Good-Turing arm granularity that
+# fits the broadest scope present in the selected error types. We pick the
+# scope that matches each type's natural species_key emitter in
+# ``src/adaptive/scoped_gt.py``:
+#
+#   single-column-only set       -> "column"       (per (source, column, type))
+#   includes multi-column types  -> "column_pair"  (cross-column intra-row arms)
+#   includes multi-row types     -> "csv"          (whole-table / duplicate-pair)
+#   includes multi-table types   -> "multi_table"  (cross-source arms)
+#
+# The most-encompassing scope wins so every selected type can yield at least
+# one species; finer-grained types simply contribute fewer (still valid) arms.
+_AUTO_STOP_SCOPE_PRIORITY: List[Tuple[str, str]] = [
+    ("multi-table", "multi_table"),
+    ("multi-row", "csv"),
+    ("multi-column", "column_pair"),
+    ("single-column", "column"),
+]
+
+
+def _auto_stop_scope_for_types(error_types: Sequence[Any]) -> str:
+    """Pick a concrete ``stop_scope`` for ``--gt-stop-scope auto``.
+
+    Walks ``_AUTO_STOP_SCOPE_PRIORITY`` from broadest to narrowest and
+    returns the first scope whose category prefix is present in any of
+    the active ``ErrorType`` records. Falls back to ``"column"`` if the
+    set is empty or none of the recognised prefixes match (defensive;
+    unknown categories are rare).
+    """
+    cats = {_scope_of(getattr(et, "category", "") or "") for et in error_types}
+    for prefix, scope in _AUTO_STOP_SCOPE_PRIORITY:
+        if prefix in cats:
+            return scope
+    return "column"
 
 
 def _resolve_scopes(
@@ -326,6 +363,16 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help=(
             "Skip Phase-B LLM synthesis of multi-type clusters. Phase-A "
             "deterministic clustering is always performed."
+        ),
+    )
+    parser.add_argument(
+        "--no-synthesise-singletons",
+        action="store_true",
+        help=(
+            "Restrict Phase-B synthesis to multi-type clusters only "
+            "(skip single-detection clusters). By default synthesis "
+            "fires for every cluster so the LLM emits a canonical fix "
+            "even when only one detector flagged the cell."
         ),
     )
     parser.add_argument(
@@ -648,16 +695,20 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--gt-stop-scope",
         choices=(
+            "auto",
             "dataset", "column", "column_pair", "row",
             "csv", "workbook", "cross_csv", "multi_table",
         ),
         help=(
             "Granularity at which --gt-mode=adaptive decides when to "
-            "stop. 'column' (default) treats each (source, column, "
-            "error_type) as an independent arm; the loop ends when "
-            "every error_type has all its arms saturated. 'dataset' "
-            "pools across columns/sources so each error_type has one "
-            "arm (equivalent to the deprecated target_policy=per_type)."
+            "stop. 'auto' (default) picks the natural arm scope for "
+            "the selected error-type set (column / column_pair / csv "
+            "/ multi_table, broadest match wins). 'column' treats "
+            "each (source, column, error_type) as an independent arm; "
+            "the loop ends when every error_type has all its arms "
+            "saturated. 'dataset' pools across columns/sources so "
+            "each error_type has one arm (equivalent to the "
+            "deprecated target_policy=per_type)."
         ),
     )
     parser.add_argument(
@@ -845,13 +896,18 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         "--web-agent-endpoint",
         type=str,
         default=None,
-        help="Foundry project endpoint URL. Falls back to AZURE_AGENTS_ENDPOINT.",
+        help="Foundry project endpoint URL. Pass a comma-separated "
+             "list to round-robin across multiple Foundry projects. "
+             "Falls back to AZURE_AGENTS_ENDPOINTS / "
+             "AZURE_AGENTS_ENDPOINT.",
     )
     parser.add_argument(
         "--web-agent-id",
         type=str,
         default=None,
-        help="Foundry agent id (asst_...). Falls back to "
+        help="Foundry agent id (asst_...). Pass a comma-separated "
+             "list paired positionally with --web-agent-endpoint. "
+             "Falls back to AZURE_AGENTS_VERIFIER_AGENT_IDS / "
              "AZURE_AGENTS_VERIFIER_AGENT_ID.",
     )
     parser.add_argument(
@@ -998,6 +1054,16 @@ def _resolve_synthesis_enabled(
     # Config uses the explicit `enable_synthesis` key (default true) to
     # match the positive CLI flag convention.
     cfg_flag = llm_cfg.get("enable_synthesis", True)
+    return bool(cfg_flag)
+
+
+def _resolve_synthesise_singletons(
+    args: argparse.Namespace, llm_cfg: Dict[str, Any]
+) -> bool:
+    """CLI ``--no-synthesise-singletons`` overrides the YAML default."""
+    if args.no_synthesise_singletons:
+        return False
+    cfg_flag = llm_cfg.get("synthesise_singletons", True)
     return bool(cfg_flag)
 
 
@@ -1402,16 +1468,20 @@ def _resolve_adaptive_settings(
                     f"got {legacy!r}"
                 )
     if stop_scope_raw is None:
-        stop_scope_raw = "column"  # new default
+        stop_scope_raw = "auto"  # new default (resolved against active types)
     stop_scope = str(stop_scope_raw).lower()
+    # ``auto`` is a sentinel resolved later (once the active error-type
+    # set is known) by ``_auto_stop_scope_for_types``. We let it pass
+    # validation here so YAML / CLI can carry the literal through.
     if stop_scope not in {
+        "auto",
         "dataset", "column", "column_pair", "row",
         "csv", "workbook", "cross_csv", "multi_table",
     }:
         raise ValueError(
             "good_turing.stop_scope must be one of "
-            "'dataset','column','column_pair','row','csv','workbook',"
-            f"'cross_csv','multi_table'; got {stop_scope_raw!r}"
+            "'auto','dataset','column','column_pair','row','csv',"
+            f"'workbook','cross_csv','multi_table'; got {stop_scope_raw!r}"
         )
     base_seed = (
         args.gt_base_seed if args.gt_base_seed is not None
@@ -2720,6 +2790,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         concurrency = int(concurrency)
 
     enable_synthesis = _resolve_synthesis_enabled(args, llm_cfg)
+    synthesise_singletons = _resolve_synthesise_singletons(args, llm_cfg)
 
     experiment_cfg = config.get("experiment", {}) or {}
     mode_raw = args.mode or str(experiment_cfg.get("mode", "single"))
@@ -2776,6 +2847,57 @@ def main(argv: Optional[list[str]] = None) -> int:
                 "scopes=%s: kept %d type(s), dropped %d non-matching type(s): %s",
                 sorted(active_scopes), len(error_types), len(dropped), dropped,
             )
+
+    # Inter-column pipeline routing: when ``inter_column_pipeline.enabled``
+    # is true (default), every non-single-column type is owned by the
+    # relation pipeline in ``experiments.run_relation_discovery`` rather
+    # than this per-chunk detector. Drop those types here so we don't
+    # double-detect them via two paths, and log the dropped set so the
+    # operator knows where to find them.
+    inter_column_cfg = config.get("inter_column_pipeline") or {}
+    inter_column_enabled = bool(inter_column_cfg.get("enabled", False))
+    if inter_column_enabled and error_types:
+        before_keys = [et.key for et in error_types]
+        inter_column_types = [
+            et for et in error_types if _scope_of(et.category) != "single-column"
+        ]
+        if inter_column_types:
+            error_types = [
+                et for et in error_types if _scope_of(et.category) == "single-column"
+            ]
+            logger.info(
+                "inter_column_pipeline.enabled: routing %d type(s) through the "
+                "relation pipeline (run `python -m experiments.run_relation_discovery` "
+                "to detect them): %s",
+                len(inter_column_types),
+                [et.key for et in inter_column_types],
+            )
+            if not error_types:
+                logger.warning(
+                    "Every selected type is inter-column; the per-chunk detector "
+                    "has nothing to run. Use `python -m experiments.run_relation_discovery` "
+                    "to detect %s, or set inter_column_pipeline.enabled=false to "
+                    "fall back to the per-chunk path.",
+                    [et.key for et in inter_column_types],
+                )
+
+    # Resolve ``stop_scope=auto`` now that the final active error-type
+    # set is known. We update the resolved value AND the back-compat
+    # ``target_policy`` alias in place so the rest of the pipeline sees
+    # a concrete scope (no consumer downstream understands the literal
+    # ``"auto"`` sentinel).
+    if adaptive_settings is not None and adaptive_settings.get("stop_scope") == "auto":
+        resolved = _auto_stop_scope_for_types(error_types)
+        logger.info(
+            "stop_scope=auto resolved to %r based on active error-type "
+            "categories: %s",
+            resolved,
+            sorted({_scope_of(et.category or "") for et in error_types}),
+        )
+        adaptive_settings["stop_scope"] = resolved
+        adaptive_settings["target_policy"] = (
+            "per_type" if resolved == "dataset" else "stop_scope"
+        )
 
     # ---- Row-duplication detector ---------------------------------
     # When ``row_duplication`` is among the selected types, swap the
@@ -2890,6 +3012,49 @@ def main(argv: Optional[list[str]] = None) -> int:
             if et.key != "inter_table_inconsistency"
         ]
 
+    # Hide ``inconsistency`` from the per-chunk scanner - it's owned
+    # by the dedicated column-clustering post-pass (run_column_clustering)
+    # which scans a whole column at a time and emits draft
+    # canonicalisation clusters. The chunk-based detector would
+    # otherwise emit cell-level findings that are noisy, redundant
+    # with the column-cluster output, and not surfaced in the
+    # labelling UI. The column-clustering trigger downstream uses the
+    # original ``error_types`` list, so this filter does not disable
+    # the inconsistency pipeline - it only suppresses the cell-level
+    # LLM calls.
+    #
+    # Phrasing constraint: this block must NOT contain the
+    # cell-comparison literal that the launcher tests anchor to --
+    # ``tests/test_column_clustering_launcher.py`` uses
+    # ``src.index('et.key' + ' == ' + '"inconsistency"')`` to locate
+    # the column-clustering trigger block (~line 3810) and would
+    # otherwise match the wrong site. Set-membership is the
+    # deliberate workaround here.
+    _chunk_keys = {et.key for et in chunk_error_types}
+    if "inconsistency" in _chunk_keys:
+        chunk_error_types = [
+            et for et in chunk_error_types
+            if et.key != "inconsistency"
+        ]
+        logger.info(
+            "inconsistency: cell-level chunk scan suppressed; "
+            "column-clustering post-pass will run instead."
+        )
+        # If chunk_error_types is now empty and we were in adaptive
+        # mode, coerce mode to ``single`` so the (now-empty) chunk
+        # loop doesn't try to compute Good-Turing artifacts over zero
+        # species. We deliberately KEEP ``adaptive_settings`` populated
+        # because the column-clustering post-pass still consumes its
+        # prompt-ensemble/GT knobs.
+        if not chunk_error_types and mode == "adaptive":
+            logger.info(
+                "inconsistency is the only remaining type after "
+                "filtering; switching chunk-scan mode from 'adaptive' "
+                "to 'single' (column-clustering still uses adaptive "
+                "settings)."
+            )
+            mode = "single"
+
     logger.info("Project root: %s", PROJECT_ROOT)
     if len(csv_paths) == 1:
         logger.info("CSV: %s", csv_paths[0])
@@ -2912,10 +3077,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         concurrency,
     )
     logger.info(
-        "Phase B synthesis: %s (concurrency=%s, effort=%s)",
+        "Phase B synthesis: %s (concurrency=%s, effort=%s, singletons=%s)",
         "ON" if enable_synthesis else "OFF",
         concurrency,
         synthesis_effort,
+        "ON" if (enable_synthesis and synthesise_singletons) else "OFF",
     )
 
     # Load every CSV up front.
@@ -3335,6 +3501,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         "effort": synthesis_effort if enable_synthesis else None,
         "concurrency": None,
         "prompt_file": str(synthesis_prompt_file) if enable_synthesis else None,
+        "include_singletons": (
+            synthesise_singletons if enable_synthesis else None
+        ),
     }
     if enable_synthesis:
         synthesis_prompt = load_synthesis_prompt(synthesis_prompt_file)
@@ -3346,6 +3515,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             reasoning_effort=synthesis_effort,
             reasoning_summary=reasoning_summary,
             concurrency=concurrency,
+            include_singletons=synthesise_singletons,
         )
         clusters = synthesiser.run(clusters)
         synthesis_meta["concurrency"] = synthesiser.concurrency
@@ -3556,12 +3726,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     if multi_table_enabled:
         try:
-            from src.core.multi_table_pipeline import (
+            from src.core.multi_table.pipeline import (
                 detect_violations_pass,
                 group_workbooks,
                 resolve_groups_pass,
             )
-            from src.core.multi_table_resolver import (
+            from src.core.multi_table.resolver import (
                 read_resolved_workbooks_jsonl,
             )
 
@@ -3723,6 +3893,216 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("web verification failed: %s", exc)
+
+    # --- Column-clustering pass for the ``inconsistency`` error type ---
+    # Auto-triggered whenever ``inconsistency`` is in the resolved
+    # active error types. Reuses the in-memory ``source_frames`` so
+    # we don't re-read the CSVs from disk, and uses the same LLM /
+    # reasoning settings as the detection pass. Output lands at
+    # ``<run_dir>/column_cluster_drafts.jsonl`` and the labelling UI
+    # picks it up via ``has_column_cluster_drafts`` on RunInfo.
+    # Failures are logged but do not fail the whole run -- the
+    # detection artifacts are already on disk at this point.
+    #
+    # NOTE for refactorers: the predicate immediately below is
+    # anchored by ``tests/test_column_clustering_launcher.py`` -- the
+    # test does an ``src.index(...)`` of the literal predicate string
+    # to locate THIS trigger block. The cell-level inconsistency gate
+    # higher up (~line 2920) deliberately uses set-membership
+    # (``"inconsistency" in _chunk_keys``) and avoids the same literal
+    # so it does not steal the anchor. If you change the phrasing of
+    # the predicate here, update that test to match.
+    if any(et.key == "inconsistency" for et in error_types):
+        try:
+            from experiments.run_column_clustering import (
+                enumerate_candidates_from_frames,
+                run_for_candidates as _column_clustering_run,
+            )
+
+            # Stopping rule: honor the same per-arm CLI / YAML config
+            # as the detection adaptive loop. Resolution order
+            # (highest priority first): per-error-type override for
+            # ``inconsistency`` > YAML ``good_turing.per_arm.defaults``
+            # / CLI ``--gt-per-arm-*`` > ``--gt-min-runs`` /
+            # ``--gt-num-runs`` fallbacks > ``ArmConfig.default()``.
+            # ``--gt-no-stop`` collapses every knob so all arms run
+            # the full k_max sweep.
+            _cc_arm_default, _cc_arm_by_type, _ = _resolve_per_arm_config(
+                config,
+                args,
+                fallback_k_min=(
+                    args.gt_min_runs if args.gt_min_runs is not None
+                    else None
+                ),
+                fallback_k_max=(
+                    args.gt_num_runs if args.gt_num_runs is not None
+                    else None
+                ),
+                fallback_epsilon=(
+                    args.gt_target_missing_mass
+                    if args.gt_target_missing_mass is not None
+                    else None
+                ),
+            )
+            if "inconsistency" in _cc_arm_by_type:
+                _cc_arm_config = _cc_arm_by_type["inconsistency"].merge_into(
+                    _cc_arm_default,
+                )
+            else:
+                _cc_arm_config = _cc_arm_default
+
+            # Single proposer model: if --model is a rotation pool,
+            # use the first (lead) entry. The proposer is one of
+            # many LLM consumers in this run; cycling models per
+            # column is overkill for a clustering call.
+            _cc_model = _model_parts[0] if _model_parts else args.model
+            _cc_prompt = PROJECT_ROOT / "prompts" / "cluster_column_values.yaml"
+            # ``max_distinct_ratio=1.0`` disables the cardinality
+            # pre-filter so high-cardinality columns (phone numbers,
+            # emails, addresses, ...) still reach the LLM proposer
+            # and are available for human review downstream. The
+            # ``min_distinct=2`` floor is mathematical (a 1-distinct
+            # column cannot form a cluster).
+            _cc_candidates = enumerate_candidates_from_frames(
+                source_frames=source_frames,
+                min_distinct=2,
+                max_distinct_ratio=1.0,
+            )
+
+            # Prompt-ensemble for column clustering: piggy-back on
+            # the same ``--gt-prompt-ensemble`` toggle used by
+            # detection. When on, generate ``k_max - 1`` paraphrased
+            # versions of the cluster proposer prompt (run 0 uses
+            # the seed, runs 1..k_max-1 rotate through variants).
+            # No new CLI flag; the existing variant-effort setting
+            # is reused for the rewriter. Failures here fall back
+            # to value-order-shuffle-only perturbation.
+            _cc_variants: Optional[List[Dict[str, str]]] = None
+            _cc_ensemble_on = bool(
+                adaptive_settings
+                and adaptive_settings.get("prompt_ensemble")
+            )
+            if _cc_ensemble_on:
+                try:
+                    from src.adaptive.prompt_variants import (
+                        ClusterPromptVariantGenerator,
+                        save_cluster_variant_records,
+                    )
+                    # Reuse the variant-effort knob the operator
+                    # already configured for detection; it controls
+                    # the rewriter's reasoning budget which is
+                    # exactly what we need here too.
+                    _cc_variant_effort = str(
+                        adaptive_settings.get(
+                            "variant_generation_effort", "low"
+                        )
+                    )
+                    _cc_ensemble_template = (
+                        PROJECT_ROOT / "prompts" /
+                        "generate_cluster_prompt_variant.yaml"
+                    )
+                    _cc_seed_yaml = yaml.safe_load(
+                        _cc_prompt.read_text(encoding="utf-8")
+                    ) or {}
+                    _cc_seed_system = str(
+                        _cc_seed_yaml.get("system", "")
+                    ).strip()
+                    _cc_seed_user_template = str(
+                        _cc_seed_yaml.get("user_template", "")
+                    )
+                    _cc_n_variants = max(
+                        0,
+                        int(
+                            _cc_arm_config.k_max
+                            or ArmConfig.default().k_max
+                            or 10
+                        ) - 1,
+                    )
+                    if _cc_n_variants > 0:
+                        logger.info(
+                            "column-clustering prompt-ensemble: generating "
+                            "%d variant(s) (effort=%s, template=%s)",
+                            _cc_n_variants, _cc_variant_effort,
+                            _cc_ensemble_template.relative_to(PROJECT_ROOT),
+                        )
+                        _cc_gen = ClusterPromptVariantGenerator(
+                            llm=llm, model=_cc_model,
+                            template_path=_cc_ensemble_template,
+                            reasoning_effort=_cc_variant_effort,
+                            reasoning_summary=reasoning_summary,
+                            concurrency=int(concurrency or 1),
+                        )
+                        _cc_variant_records = _cc_gen.generate(
+                            base_system=_cc_seed_system,
+                            base_user_template=_cc_seed_user_template,
+                            n_variants=_cc_n_variants,
+                        )
+                        save_cluster_variant_records(
+                            _cc_variant_records, run_dir=run_dir,
+                        )
+                        _cc_variants = [
+                            {"system": v.system,
+                             "user_template": v.user_template}
+                            for v in _cc_variant_records
+                        ]
+                        _cc_ok_count = sum(
+                            1 for v in _cc_variant_records if v.ok
+                        )
+                        logger.info(
+                            "column-clustering prompt-ensemble: "
+                            "%d/%d variant(s) rewritten OK "
+                            "(rest fell back to seed)",
+                            _cc_ok_count, len(_cc_variant_records),
+                        )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "column-clustering prompt-ensemble generation "
+                        "failed; continuing with value-order-shuffle-"
+                        "only perturbation."
+                    )
+                    _cc_variants = None
+
+            logger.info(
+                "column-clustering: starting (%d candidates, model=%s, "
+                "k_min=%s, k_max=%s, stop_when=%s, "
+                "epsilon=%s, epsilon_chao1=%s, two_consec=%s, "
+                "prompt_ensemble=%s)",
+                len(_cc_candidates), _cc_model,
+                _cc_arm_config.k_min, _cc_arm_config.k_max,
+                _cc_arm_config.stop_when, _cc_arm_config.epsilon,
+                _cc_arm_config.epsilon_chao1,
+                _cc_arm_config.require_two_consecutive,
+                "on" if _cc_variants else "off",
+            )
+            _cc_results = _column_clustering_run(
+                run_dir=run_dir,
+                candidates=_cc_candidates,
+                model=_cc_model,
+                reasoning_effort=reasoning_effort,
+                reasoning_summary=reasoning_summary,
+                arm_config=_cc_arm_config,
+                prompt_path=_cc_prompt,
+                max_workers=int(concurrency or 1),
+                llm=llm,
+                variants=_cc_variants,
+            )
+            # ``_column_clustering_run`` already emits one INFO line
+            # summarising the result (probed count + output path).
+            # Down-grade our own wrap-up to DEBUG so the log doesn't
+            # carry the same fact twice.
+            logger.debug(
+                "column-clustering: wrap-up -> %d draft record(s) at %s",
+                len(_cc_results),
+                (run_dir / "column_cluster_drafts.jsonl").relative_to(PROJECT_ROOT)
+                if (run_dir / "column_cluster_drafts.jsonl").is_relative_to(PROJECT_ROOT)
+                else run_dir / "column_cluster_drafts.jsonl",
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "column-clustering pass failed; continuing without "
+                "column cluster drafts."
+            )
+
     if gt_artifacts is not None:
         overall = gt_artifacts["overall_estimate"]  # Estimate.to_dict()
         chao1 = overall["chao1"]

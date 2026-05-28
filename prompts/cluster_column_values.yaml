@@ -1,0 +1,385 @@
+# Standardisation-cluster proposer prompt.
+#
+# Asks the LLM to identify groups of distinct values in one CSV column
+# that should be standardised together and return them as a list of
+# clusters. A cluster can capture either of two situations:
+#   (A) Entity-variant grouping -- different surface forms of the
+#       SAME real-world thing (aliases, abbreviations, casing /
+#       punctuation variants).
+#   (B) Shared-pattern grouping -- DIFFERENT entities that share a
+#       DISTINCTIVE surface template (abbreviation style, unit
+#       format, etc.) which contrasts with how the rest of the
+#       column is written. The cluster's job is to flag the
+#       off-style minority so a downstream cleaner can rewrite them
+#       into the column's prevailing form.
+#
+# Crucially this is NOT a partition: most values are typically
+# already in their preferred form and should be left out of the
+# response. Single-value clusters are not emitted -- a cluster
+# represents a standardisation opportunity, which requires >= 2
+# surface forms.
+#
+# Placeholders (Python str.format; double braces escape literal JSON
+# braces in the example):
+#   source       - CSV file basename (context only)
+#   column       - column header (context only)
+#   value_list   - one bullet per distinct value, of the form
+#                  ``- "<value>" (count=<n>)``. Order is shuffled
+#                  between adaptive-loop runs to perturb the LLM.
+#
+# Output schema (strict JSON, no markdown fences, no prose):
+#   {
+#     "clusters": [
+#       {
+#         "values": ["<verbatim value>", "<verbatim value>", ...],
+#         "kind": "text" | "casing" | "pattern" | "punctuation"
+#               | "numerical_format" | "untagged",
+#         "canonical": "<one of the values, verbatim>" | null,
+#         "target_style": "<short phrase describing the column's
+#                            competing majority style>" | null
+#       },
+#       ...
+#     ]
+#   }
+#
+# ``target_style`` is a free-text hint that explains WHAT the
+# cluster's values should be rewritten toward. It is REQUIRED for
+# type-2 (shared-minority-style) groups -- so a human reviewer can
+# tell at a glance which competing majority style the minority is
+# disagreeing with -- and should be ``null`` for type-1 alias groups
+# (where ``canonical`` already names the target form).
+
+system: >
+  You help with a small data-cleaning task. Given the distinct values
+  of one column from a CSV table, you look for groups of values that
+  are INCONSISTENT with the rest of the column and would benefit from
+  being rewritten into the dominant form. A group is worth surfacing
+  only when there is a visible disagreement inside the column: either
+  two values describe the same entity in different ways, or a few
+  values use a write-up style that contrasts with how the majority of
+  the column is written. If the values look "weird" but everyone in
+  the column writes them the same way, there is no inconsistency to
+  fix and no group to propose. You reply with a JSON object and
+  nothing else (no markdown fences, no commentary).
+
+user_template: |
+  You are looking at column ``{column}`` from the file ``{source}``.
+
+  Your goal is to surface INCONSISTENCIES inside the column: places
+  where two or more values disagree about how something should be
+  written. A group is only worth proposing when there is a visible
+  disagreement in this column. If every value follows the same
+  template, the column is already consistent and you should propose
+  nothing -- even if the template itself looks abbreviated, terse,
+  or unusual.
+
+  HOW TO READ THE INPUT
+  ---------------------
+  Below, under "Values", you will see every distinct value in the
+  column together with the number of rows that use it. First, build
+  a mental picture of the column's DOMINANT style: which write-up
+  template (length, casing, abbreviation choices, unit format,
+  punctuation, etc.) describes most of the values? That template is
+  the baseline. Inconsistencies are values that disagree with the
+  baseline, either as aliases of an entity that another row spells
+  differently, or as a minority of values written in a style that
+  contrasts with the baseline.
+
+  TWO KINDS OF GROUPS YOU CAN FORM
+  --------------------------------
+  Group type 1: ALIASES OF THE SAME THING.
+    Two or more values point at the SAME real-world entity but are
+    written in different ways. Examples:
+      - ``"USA"`` / ``"U.S.A."`` / ``"United States"``  (same country)
+      - ``"NYC"`` / ``"New York City"``                  (same city)
+      - ``"james smith"`` / ``"James Smith"``            (same person, casing)
+      - ``"123-456"`` / ``"123\u2013456"``               (same id, hyphen vs en-dash)
+    Put every alias of the same thing into one group. Type-1 groups
+    are about meaning: the trigger is "these surface forms mean the
+    same thing yet look different". They do NOT require a competing
+    majority style in the column -- a single alias-pair is enough.
+
+  Group type 2: SHARED MINORITY STYLE THAT DISAGREES WITH THE MAJORITY.
+    Several values refer to DIFFERENT real-world things, but they
+    all use the SAME write-up style, AND that style is a minority
+    in this column compared with another style that the majority of
+    values use. The cluster's job is to flag the off-style minority
+    so a downstream cleaner can rewrite them into the column's
+    prevailing form.
+
+    Concrete examples:
+      - Column of school names where MOST entries spell out
+        ``"Regional"``. The entries
+        ``"Andover Reg"`` / ``"Bayard Reg"`` / ``"Concord Reg"``
+        share a shortened ``" Reg"`` suffix. Because the majority
+        use the spelled-out form, the ``" Reg"`` minority is an
+        inconsistency and these three values go in one group.
+      - Column of distances where MOST entries use ``" miles"``.
+        The entries ``"5 mi"`` / ``"10 mi"`` / ``"25 mi"`` share
+        the minority ``" mi"`` abbreviation. Group them.
+      - Column of physician names where MOST entries are
+        ``"Dr. <First> <Last>"``. The entries
+        ``"Dr. J. Smith"`` / ``"Dr. A. Khan"`` / ``"Dr. P. Lee"``
+        share the minority initial-only first-name style. Group
+        them.
+
+    Type-2 groups have a HARD PRECONDITION: there must be a
+    COMPETING majority style for the same kind of content visibly
+    present in the value list. If every value in the column uses
+    the ``"CSD"`` suffix, the column is consistent on the ``"CSD"``
+    convention and a ``"CSD"``-suffix group is NOT an
+    inconsistency -- skip it. The same three values WOULD form a
+    group if a fourth value like ``"West Range Community School
+    District"`` were also in the column, because that introduces
+    a competing majority style.
+
+    To check the precondition before proposing a type-2 group, ask
+    yourself: "If I removed the candidate values, would the
+    remaining values still show a different way of writing the
+    same kind of content?" If yes, propose the group. If the
+    remaining values either look the same as the candidates or
+    don't address the same writing choice, do NOT propose the
+    group.
+
+    When you DO see a shared minority style with a competing
+    majority, gather EVERY value that follows the minority style
+    into ONE group, even if there are many of them. Do not split
+    them into pairs or singletons -- one cleaning rule should be
+    able to fix all members at once.
+
+  Notice that group type 2 is about SURFACE FORM, not about meaning.
+  The values in such a group do not have to refer to the same thing
+  -- they can describe distinct entities, and that is fine. What
+  matters is that they share a minority formatting choice AND a
+  competing majority style is visible in the same column.
+
+  HOW TO DECIDE WHETHER A GROUP IS WORTH PROPOSING
+  ------------------------------------------------
+  Use this short checklist:
+
+    a) Can a downstream cleaner rewrite the values in this group in
+       a uniform way to bring them closer to the column's dominant
+       style? If not, the group is probably not useful.
+
+    b) For a type-2 group: is there a competing majority style
+       visibly present in the value list? If every value in the
+       column writes things the same way and you are merely
+       observing that they all share a quirk, the column is
+       already consistent -- do not group.
+
+    c) Does the group have at least two distinct values? Skip
+       single-value groups.
+
+    d) Are you confident the values are linked? When two values
+       look similar but seem to refer to different entities AND do
+       not share a recognisable common style with a competing
+       majority (e.g. ``"Bayard"`` vs ``"Buyard"``), they are more
+       likely typos than a standardisation group -- leave them
+       alone.
+
+    e) For type-1 alias groups, propose the group whenever the link
+       between the values is plausible. Well-known aliases (country
+       names, brand names, common abbreviations) are easy wins, but
+       it is also fine to propose niche-looking aliases when the
+       surface forms strongly suggest a link -- a human reviewer
+       will sanity-check the call.
+
+  Recall guidance: for type-1 alias groups, when you are unsure
+  whether two surface forms refer to the same entity, lean toward
+  proposing the group -- the reviewer can reject it cheaply. For
+  type-2 minority-style groups, do NOT lean toward proposing: the
+  competing-majority precondition is a hard requirement, and
+  groups that fail it create noise rather than catching real
+  inconsistencies.
+
+  TAGS YOU CAN PICK FOR EACH GROUP
+  --------------------------------
+  Every group needs a ``kind`` tag. Pick the one that best fits the
+  relationship between the group's values:
+
+    - ``"text"`` -- values are aliases of the same real-world
+      entity (group type 1). Example: ``"USA"`` and
+      ``"United States"``.
+
+    - ``"casing"`` -- the only difference between values is upper
+      vs lower case. Example: ``"california"`` and ``"California"``.
+
+    - ``"pattern"`` -- values follow different structural templates
+      for the same kind of content. This tag covers both:
+        * alternate templates for the same entity, e.g.
+          ``"Apt 12"`` / ``"Apartment 12"`` / ``"APT 12"``;
+        * a shared minority template across different entities
+          (group type 2), e.g. the ``" Reg"`` school-name suffix
+          example above. In this case every value that uses the
+          minority template goes in the same ``pattern`` group.
+
+    - ``"punctuation"`` -- values differ only by punctuation marks,
+      whitespace, or separator characters. Example: ``"123-456"``
+      vs ``"123\u2013456"`` (hyphen vs en-dash), or
+      ``" California"`` (with a leading space) vs ``"California"``.
+
+    - ``"numerical_format"`` -- values encode numbers in different
+      ways. USE WITH CARE: this tag has a high false-positive rate,
+      so apply the checks below before proposing such a group.
+      Eligible cases:
+        * the SAME numeric quantity written two different ways,
+          e.g. ``"15%"`` vs ``"0.15"``; ``"1,000"`` vs ``"1000"``;
+          ``"$5.00"`` vs ``"5"`` in a price column;
+        * a SHARED minority unit / format style across several
+          rows, with a COMPETING majority style visibly present
+          in the column, e.g. ``"5 mi"`` / ``"10 mi"`` / ``"25 mi"``
+          when the column mostly uses ``"5 miles"`` / ``"10 miles"``;
+          or ``"1.5K"`` / ``"2.0K"`` when most rows write
+          ``"1,500"`` / ``"2,000"``.
+      Use this rather than ``pattern`` whenever the difference is
+      mainly about number/unit/format.
+
+      Do NOT propose a ``numerical_format`` group when ANY of these
+      apply:
+        * the values are simply different numbers at different
+          magnitudes or precisions (e.g. ``12.5``, ``13``,
+          ``100.123``) -- different precision is usually a real
+          measurement choice, not a format quirk;
+        * every numeric value in the column already follows the
+          SAME unit / decimal / thousands-separator style (the
+          column is internally consistent, even if the style looks
+          unusual on its own);
+        * the only "difference" is the count of decimal places or
+          trailing zeros (e.g. ``5.0`` vs ``5.00``) and no other
+          rows establish a competing majority style;
+        * the values are integers vs decimals (``5`` vs ``5.2``)
+          where the decimal carries genuine extra precision rather
+          than a formatting choice;
+        * one of the values is missing/null/zero and the rest are
+          ordinary numbers -- that is a missing-data issue, not a
+          format inconsistency.
+      If you are not confident the values truly disagree about
+      *format* (not magnitude or precision), prefer ``"untagged"``
+      or omit the group entirely.
+
+    - ``"untagged"`` -- you can identify the group but none of the
+      above tags fits cleanly. Prefer this over picking a wrong
+      tag.
+
+  PICKING A CANONICAL VALUE FOR EACH GROUP
+  ----------------------------------------
+  Each group also gets a ``canonical`` field:
+
+    - For group type 1 (aliases of the same entity), set
+      ``canonical`` to the cleanest fully-spelled-out form among
+      the group's values. If two are equally good, prefer the one
+      that appears more often in the input; if still tied, the one
+      that comes first in the input order.
+
+    - For group type 2 (shared minority style across different
+      entities), set ``canonical`` to ``null``. The right
+      replacement depends on each value individually -- you cannot
+      pick one of the group's values as a single target.
+
+    - If you are unsure which value to pick for a type-1 group,
+      using ``null`` is acceptable.
+
+  ANTI-PATTERNS TO AVOID
+  ----------------------
+  These groupings would be incorrect; please avoid them:
+
+    - Grouping two similar-looking values that seem to refer to
+      different entities and do not share a minority style with a
+      competing majority in the column (likely just typos): leave
+      them alone.
+
+    - Grouping values that share a write-up style when that style
+      is also used by the majority of the column. For example, if
+      a column of school names contains ``"East Range CSD"`` and
+      ``"Great Salty Bay CSD"`` and EVERY other school in the
+      column also ends in ``"CSD"``, the ``"CSD"`` suffix is the
+      column's main style and these values are NOT inconsistent --
+      do not group them. The same two values WOULD belong in a
+      group if the column also contained, say, ``"West Range
+      Community School District"``, because that fourth value
+      would establish a competing majority style that the
+      ``"CSD"`` entries disagree with.
+
+    - Grouping values that already match the column's dominant
+      style, just because they happen to look like each other: the
+      goal is to bring outliers in line, not to relitigate the
+      main style.
+
+    - Splitting a single shared-minority-style group into many
+      smaller groups: when several values share the same off-style
+      format AND a competing majority style is present, they all
+      belong together in one group.
+
+    - Flagging numbers that merely differ in magnitude or precision
+      as ``numerical_format``. Numeric columns naturally contain
+      values at different scales (``5``, ``12.5``, ``1000``) and
+      with different precisions (``5.0``, ``5.00``, ``5.123``);
+      that is normal data, not a formatting inconsistency. Only
+      group numeric values when (a) two literal forms encode the
+      SAME quantity (e.g. ``"15%"`` and ``"0.15"``) or (b) several
+      rows share a minority unit/format style AND a competing
+      majority style is visible (e.g. ``"5 mi"`` minority vs
+      ``"5 miles"`` majority). When in doubt, do NOT propose the
+      group -- this category is biased toward over-flagging.
+
+    - Re-writing or normalising values yourself: copy them into
+      the group character-for-character. The host script matches
+      them as exact strings.
+
+  INPUT
+  -----
+  Values:
+  {value_list}
+
+  OUTPUT FORMAT
+  -------------
+  Reply with valid JSON in the following shape (and nothing else):
+
+  {{
+    "clusters": [
+      {{
+        "values":       ["<value>", "<value>", ...],
+        "kind":         "text",
+        "canonical":    "<one of the values>" or null,
+        "target_style": "<short phrase>" or null
+      }}
+    ]
+  }}
+
+  WHAT TO PUT IN ``target_style``
+  -------------------------------
+  ``target_style`` is a short free-text hint (one sentence, < 20
+  words) that tells the human reviewer what the cluster's values
+  should be rewritten toward.
+
+  Rules:
+
+    - For a TYPE-1 alias group (different surface forms of the
+      SAME entity), set ``target_style`` to ``null``. The
+      ``canonical`` field already names the target form, so the
+      hint would be redundant.
+
+    - For a TYPE-2 minority-style group (different entities that
+      share an off-style format), ``target_style`` is REQUIRED.
+      Describe the COMPETING MAJORITY style that the group's
+      values disagree with, and cite one or two representative
+      example values from the column that exemplify it.
+      Examples (illustrative; do not copy verbatim):
+        * ``"spelled-out 'Community School District' suffix, as in 'Norwalk Community School District'"``
+        * ``"bare city name without state suffix, as in 'Cedar Rapids' or 'Des Moines'"``
+        * ``"' miles' unit spelled in full, as in '5 miles' or '12 miles'"``
+      The reviewer reads this string to decide whether the group
+      really is an inconsistency, so make it concrete and grounded
+      in the values you can see.
+
+  A few formatting reminders:
+
+    - Every group has two or more distinct values from the input.
+    - Every value in a group appears in the "Values" list above,
+      copied character-for-character.
+    - A value does not appear in more than one group.
+    - The allowed ``kind`` values are ``text``, ``casing``,
+      ``pattern``, ``punctuation``, ``numerical_format`` and
+      ``untagged``.
+    - If there is nothing worth grouping in this column, reply
+      with ``{{"clusters": []}}``.

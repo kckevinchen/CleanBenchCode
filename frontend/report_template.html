@@ -20,6 +20,80 @@
   <!-- Self-contained file:// report: only inline script + style, embedded data: images. -->
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'" />
   <title>Data Cleaning Error Report</title>
+  <!-- Auto-zoom for low-resolution screens. Mirrors
+       frontend/labeling/viewport-zoom.js; inlined here because this is
+       a self-contained file:// report. Sets html { zoom: N } based on
+       viewport size so the dashboard scales DOWN on small screens
+       (1366x768 / 1280x720 laptops) and stays at 1.0 on 1600x900+.
+       Synchronous + in <head> so the first paint is at the right
+       scale (no FOUC). Override from devtools via
+       ``__workbenchZoom.setOverride(0.85)`` or ``setOverride('off')``. -->
+  <script>
+    (function () {
+      'use strict';
+      var DESIGN_W = 1600, DESIGN_H = 900;
+      var MIN = 0.65, MAX = 1.0;
+      var KEY = 'workbench:zoom-override';
+      function readOverride() {
+        try { return window.localStorage.getItem(KEY); } catch (e) { return null; }
+      }
+      function writeOverride(v) {
+        try {
+          if (v === null || v === undefined) window.localStorage.removeItem(KEY);
+          else window.localStorage.setItem(KEY, String(v));
+        } catch (e) {}
+      }
+      function pick() {
+        var w = window.innerWidth || document.documentElement.clientWidth;
+        var h = window.innerHeight || document.documentElement.clientHeight;
+        if (!w || !h) return 1;
+        var fit = Math.min(w / DESIGN_W, h / DESIGN_H);
+        return fit > MAX ? MAX : (fit < MIN ? MIN : fit);
+      }
+      function resolve() {
+        var o = readOverride();
+        if (o === 'off' || o === '1' || o === '1.0') return 1;
+        if (o) {
+          var n = parseFloat(o);
+          if (!isNaN(n) && isFinite(n)) {
+            if (n < 0.4) n = 0.4;
+            if (n > 2.0) n = 2.0;
+            return n;
+          }
+        }
+        return pick();
+      }
+      function apply() {
+        var z = resolve();
+        var r = document.documentElement;
+        if (!r) return;
+        r.style.zoom = String(z);
+        /* Compensate viewport units: see viewport-zoom.js. */
+        var inv = 1 / z;
+        r.style.setProperty('--workbench-zoom', String(z));
+        r.style.setProperty('--vh-scale', String(inv));
+        r.style.setProperty('--vw-scale', String(inv));
+        r.dataset.viewportZoom = z.toFixed(3);
+      }
+      apply();
+      var pending = 0;
+      window.addEventListener('resize', function () {
+        if (pending) return;
+        pending = window.requestAnimationFrame(function () {
+          pending = 0; apply();
+        });
+      });
+      window.__workbenchZoom = {
+        apply: apply,
+        setOverride: function (v) { writeOverride(v); apply(); },
+        getCurrent: function () {
+          return parseFloat(
+            (document.documentElement && document.documentElement.dataset.viewportZoom) || '1',
+          );
+        },
+      };
+    })();
+  </script>
   <style>
     :root {
       --bg: #0f172a;
@@ -632,6 +706,72 @@
     .row-values-grid .k { color: var(--muted); }
     .row-values-grid .v { color: var(--text); overflow-wrap: anywhere; }
     .row-values-grid .v.empty { color: #6b7a97; font-style: italic; }
+    /* Affected-column highlight: when a cluster's detection points at
+       one or more columns (e.g. "Town Code"), we paint those rows in
+       the grid yellow so the operator can spot the offending value
+       without scanning the whole row dump. */
+    .row-values-grid .k.affected {
+      color: #b45309;
+      font-weight: 600;
+    }
+    .row-values-grid .v.affected {
+      background: #fef3c7;
+      color: #78350f;
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-weight: 600;
+    }
+
+    /* Affected-cell banner: a prominent one-liner at the top of each
+       cluster's drill-down that names the source/row/column and
+       (when row_values is captured) the offending cell value. This
+       answers "which row/value belongs to this cluster?" without
+       requiring a scroll to "Source row values" + a column scan. */
+    .affected-cell-banner {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px 12px;
+      background: #fffbeb;
+      border: 1px solid #fde68a;
+      border-left: 4px solid #f59e0b;
+      border-radius: 6px;
+      padding: 8px 12px;
+      margin-bottom: 10px;
+      font-size: 12.5px;
+    }
+    .affected-cell-banner .acb-loc {
+      color: #78350f;
+      font-weight: 600;
+    }
+    .affected-cell-banner .acb-col {
+      background: #fef3c7;
+      color: #78350f;
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-weight: 600;
+    }
+    .affected-cell-banner .acb-val {
+      color: #1f2937;
+      background: rgba(0,0,0,0.04);
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+      overflow-wrap: anywhere;
+    }
+    .affected-cell-banner .acb-val.empty {
+      color: #6b7a97;
+      font-style: italic;
+      background: transparent;
+    }
+    .affected-cell-banner .acb-link {
+      margin-left: auto;
+      color: #1d4ed8;
+      text-decoration: none;
+      font-weight: 600;
+    }
+    .affected-cell-banner .acb-link:hover { text-decoration: underline; }
+    .affected-cell-banner .acb-muted { color: #6b7a97; }
 
     .detection-card {
       background: var(--panel);
@@ -1004,7 +1144,7 @@
     }
 
     #data-scroll {
-      max-height: 70vh;
+      max-height: calc(70vh * var(--vh-scale, 1));
       overflow: auto;
       border: 1px solid var(--border);
       border-radius: 8px;
@@ -3572,8 +3712,9 @@
         renderClusters(filtered);
       }
 
-      function renderRowValuesGrid(rowValues) {
+      function renderRowValuesGrid(rowValues, affectedCols) {
         rowValues = rowValues || {};
+        var affected = affectedCols || {};
         var keys = Object.keys(rowValues).sort();
         if (!keys.length) {
           return h("div", { class: "muted", text: "(no row values captured)" });
@@ -3582,13 +3723,115 @@
         keys.forEach(function (k) {
           var v = rowValues[k];
           var empty = v === "" || v == null;
-          grid.appendChild(h("div", { class: "k", text: k }));
+          var isAffected = !!affected[k];
           grid.appendChild(h("div", {
-            class: empty ? "v empty" : "v",
+            class: isAffected ? "k affected" : "k",
+            text: k
+          }));
+          grid.appendChild(h("div", {
+            class: (empty ? "v empty" : "v") + (isAffected ? " affected" : ""),
             text: empty ? "(empty)" : String(v)
           }));
         });
         return grid;
+      }
+
+      // Build the union of all affected columns across the cluster +
+      // its detections. Returns a plain object used as a set so the
+      // renderRowValuesGrid / banner can highlight in O(1) per lookup.
+      function clusterAffectedColumns(cluster) {
+        var out = {};
+        (cluster.columns || []).forEach(function (c) {
+          if (c != null && c !== "") out[c] = true;
+        });
+        (cluster.detections || []).forEach(function (d) {
+          (d.columns || []).forEach(function (c) {
+            if (c != null && c !== "") out[c] = true;
+          });
+        });
+        return out;
+      }
+
+      // Affected-cell banner: a prominent header inside the drill
+      // section that names the (source, row, column) and -- when
+      // row_values is populated -- shows the actual offending value.
+      // For inconsistency clusters, also expose a deep link into the
+      // column board so the operator can hop straight to labelling.
+      function renderAffectedCellBanner(cluster) {
+        var cols = Object.keys(clusterAffectedColumns(cluster));
+        var src = cluster.source;
+        var row = cluster.row;
+        var rowValues = cluster.row_values || {};
+        var inferred = !!cluster.inferred;
+        var etypes = cluster.error_types || [];
+        var isInconsistency = etypes.indexOf("inconsistency") !== -1;
+
+        // Same-origin link to the column board page. ``meta.run_id``
+        // is the parent run; when the report is opened via the
+        // workbench (/api/runs/.../report), the link resolves to
+        // /ui/column_board.html on the same host. When the report
+        // is opened from disk (file://) the link will fail to load
+        // -- that's acceptable since the column board requires the
+        // workbench API anyway.
+        var runId = (meta && meta.run_id) || "";
+
+        if (!cols.length) {
+          if (row == null) return null;  // nothing useful to say
+          var basicChildren = [
+            h("span", { class: "acb-loc", text: "row " + row }),
+          ];
+          if (inferred) {
+            basicChildren.push(h("span", {
+              class: "acb-muted",
+              text: "(inferred sibling)"
+            }));
+          }
+          return h("div", { class: "affected-cell-banner" }, basicChildren);
+        }
+
+        var banner = h("div", { class: "affected-cell-banner" }, [
+          h("span", {
+            class: "acb-loc",
+            text: (src ? src + " · " : "") + "row " + (row == null ? "?" : row)
+          }),
+        ]);
+        cols.forEach(function (col, i) {
+          if (i > 0) {
+            banner.appendChild(document.createTextNode(", "));
+          }
+          banner.appendChild(h("span", { class: "acb-col", text: col }));
+          if (Object.prototype.hasOwnProperty.call(rowValues, col)) {
+            var raw = rowValues[col];
+            var isEmpty = raw === "" || raw == null;
+            banner.appendChild(document.createTextNode(" = "));
+            banner.appendChild(h("span", {
+              class: isEmpty ? "acb-val empty" : "acb-val",
+              text: isEmpty ? "(empty)" : String(raw)
+            }));
+          }
+        });
+        if (inferred) {
+          banner.appendChild(h("span", {
+            class: "acb-muted",
+            text: "(inferred sibling — value not captured)"
+          }));
+        }
+        if (isInconsistency && runId && src && cols.length === 1) {
+          // Single-column inconsistency: deep-link straight to the
+          // affected column. For multi-column inconsistency (rare)
+          // we omit the link since the board page is per-column.
+          var link = h("a", {
+            class: "acb-link",
+            href: "/ui/column_board.html?run=" + encodeURIComponent(runId)
+              + "&source=" + encodeURIComponent(src)
+              + "&column=" + encodeURIComponent(cols[0]),
+            target: "_blank",
+            rel: "noopener",
+            text: "Open in column board →"
+          });
+          banner.appendChild(link);
+        }
+        return banner;
       }
 
       function renderDetection(det, isPrimary) {
@@ -3830,6 +4073,13 @@
           // the Review column.
           var drillCell = h("td", { colspan: "9" });
 
+          // Affected-cell banner: names the offending (source, row,
+          // column[=value]) at a glance and, for inconsistency
+          // clusters, deep-links to the column board. Appended FIRST
+          // so it's the first thing the operator sees on expand.
+          var banner = renderAffectedCellBanner(c);
+          if (banner) drillCell.appendChild(banner);
+
           // Synthesis section
           drillCell.appendChild(h("div", { class: "drill-section" }, [
             h("h3", { text: "Synthesis (Phase B)" }),
@@ -3837,9 +4087,10 @@
           ]));
 
           // Row values
+          var affectedCols = clusterAffectedColumns(c);
           drillCell.appendChild(h("div", { class: "drill-section" }, [
             h("h3", { text: "Source row values" }),
-            renderRowValuesGrid(c.row_values)
+            renderRowValuesGrid(c.row_values, affectedCols)
           ]));
 
           // Per-type detections

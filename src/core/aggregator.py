@@ -32,7 +32,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import yaml
 from tqdm.auto import tqdm
@@ -64,6 +64,12 @@ class ClusterDetection:
     explanation: str
     suggested_fix: Optional[str]
     columns: List[str]
+    # Literal canonical replacement value(s) the LLM proposes for the
+    # affected cell(s). Shape is ``{column: literal_or_None}`` keyed by
+    # the detection's ``columns``; ``None`` means the LLM declined to
+    # commit to a literal (use ``suggested_fix`` for the prose).
+    # Always ``None`` for pure row-level findings.
+    corrected_value: Optional[Dict[str, Optional[str]]] = None
     # Sibling rows the detector claimed are part of the same logical
     # incident (e.g. members of a row_duplication group). Preserved
     # verbatim from the flat issue so the labelling UI can bucket
@@ -98,6 +104,13 @@ class ClusterSynthesis:
     root_cause: str = ""
     canonical_explanation: str = ""
     canonical_fix: Optional[str] = None
+    # Phase-B literal canonical replacement(s) for the flagged row,
+    # keyed by column. ``None`` when no defensible literal exists. The
+    # labelling UI prefers this over ``canonical_fix`` for the
+    # ``after`` cell display, falling back to the per-detection
+    # ``corrected_value`` then the free-form ``canonical_fix`` /
+    # ``suggested_fix`` text.
+    canonical_record: Optional[Dict[str, Optional[str]]] = None
     confidence: str = "unknown"
     is_likely_false_positive: bool = False
     reviewer_note: str = ""
@@ -237,7 +250,61 @@ def _cluster_row_group(
         return (-len(members), str(members[0][0].get("id", "")))
 
     ordered = sorted(groups.values(), key=_key)
-    return [(row, members) for members in ordered]
+
+    # Affected-rows fingerprint refinement.
+    #
+    # Column-overlap is a necessary but not sufficient condition for
+    # two detections to describe the same defect. Consider a single
+    # column ``Approval Deadline`` that participates in two distinct
+    # rules:
+    #
+    #   - precise rule:  HR <= Approval <= Pay      flags rows {4, 5}
+    #   - noisy rule:    End - Approval == 1 day    flags rows {0, 3, 4, 5}
+    #
+    # Both rules touch ``Approval``, so column-overlap clustering
+    # alone bundles them together and the operator sees a single
+    # noisy cluster spanning rows {0, 3, 4, 5} - losing the signal
+    # that the precise rule cleanly isolates rows {4, 5}.
+    #
+    # We fix this by sub-splitting each column-overlap component by
+    # ``frozenset(affected_rows)`` whenever the component contains at
+    # least one rule-scoped issue (``cluster_scope == "rule"``).
+    # Detections that share columns AND share the exact same row
+    # signature stay together; detections that disagree on rows fall
+    # into separate sub-clusters. The gate keeps row_duplication and
+    # other non-rule clustering paths unchanged.
+    refined: List[List[Tuple[Mapping[str, Any], bool]]] = []
+    for component in ordered:
+        has_rule_scope = any(
+            str(m[0].get("cluster_scope") or "") == "rule"
+            for m in component
+        )
+        if not has_rule_scope:
+            refined.append(component)
+            continue
+        sub: Dict[FrozenSet[int], List[Tuple[Mapping[str, Any], bool]]] = {}
+        for entry in component:
+            issue = entry[0]
+            aff = issue.get("affected_rows") or ()
+            fp: FrozenSet[int] = frozenset(
+                r for r in aff if isinstance(r, int)
+            )
+            sub.setdefault(fp, []).append(entry)
+        if len(sub) <= 1:
+            refined.append(component)
+            continue
+
+        def _sub_key(
+            members: List[Tuple[Mapping[str, Any], bool]],
+        ) -> Tuple[int, Tuple[int, ...], str]:
+            aff = members[0][0].get("affected_rows") or ()
+            fp_sorted = tuple(sorted({r for r in aff if isinstance(r, int)}))
+            return (-len(members), fp_sorted, str(members[0][0].get("id", "")))
+
+        for sub_members in sorted(sub.values(), key=_sub_key):
+            refined.append(sub_members)
+
+    return [(row, members) for members in refined]
 
 
 def _build_cluster(
@@ -317,6 +384,10 @@ def _build_cluster(
                 observed=str(issue.get("observed", "") or ""),
                 explanation=str(issue.get("explanation", "") or ""),
                 suggested_fix=issue.get("suggested_fix"),
+                corrected_value=_coerce_corrected_value(
+                    issue.get("corrected_value"),
+                    list(issue.get("columns") or []),
+                ),
                 columns=list(issue.get("columns") or []),
                 affected_rows=ar_clean,
                 verdict=str(issue.get("verdict", "") or ""),
@@ -345,6 +416,52 @@ def _build_cluster(
 
 
 _CLUSTER_SOURCE_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _coerce_corrected_value(
+    raw: Any, columns: Optional[Sequence[str]],
+) -> Optional[Dict[str, Optional[str]]]:
+    """Normalise an LLM ``corrected_value`` / ``canonical_record`` payload.
+
+    Accepts a mapping, a list aligned with ``columns``, or a bare
+    scalar (applied to the first column for single-column findings).
+    Returns ``{column: literal_or_None}`` keyed by either the supplied
+    ``columns`` (when provided) or the mapping's own keys (when
+    ``columns`` is ``None`` - used by synthesis where the cluster
+    column list is not handed in). Returns ``None`` when no usable
+    literal was supplied.
+    """
+    if raw in (None, "", "null", "None"):
+        return None
+    cols = [c for c in (columns or []) if isinstance(c, str)] if columns is not None else None
+    out: Dict[str, Optional[str]] = {}
+    if isinstance(raw, Mapping):
+        keys = cols if cols else [str(k) for k in raw.keys() if isinstance(k, (str, int))]
+        for col in keys:
+            val = raw.get(col)
+            if val in (None, "", "null", "None"):
+                out[col] = None
+            else:
+                s = str(val).strip()
+                out[col] = s or None
+    elif isinstance(raw, (list, tuple)):
+        if not cols:
+            return None
+        for col, val in zip(cols, raw):
+            if val in (None, "", "null", "None"):
+                out[col] = None
+            else:
+                s = str(val).strip()
+                out[col] = s or None
+    else:
+        if not cols:
+            return None
+        s = str(raw).strip()
+        if s and s.lower() != "null":
+            out[cols[0]] = s
+    if not any(v for v in out.values()):
+        return None
+    return out
 
 
 def _cluster_source_slug(source: str) -> str:
@@ -408,6 +525,7 @@ def _auto_synthesise_single_type(cluster: Cluster) -> None:
         root_cause="",
         canonical_explanation=rep.explanation,
         canonical_fix=rep.suggested_fix,
+        canonical_record=dict(rep.corrected_value) if rep.corrected_value else None,
         confidence=confidence,
         is_likely_false_positive=False,
         reviewer_note=(
@@ -442,10 +560,20 @@ def cluster_issues(flat_issues: Sequence[Mapping[str, Any]]) -> List[Cluster]:
         rows: Dict[int, bool] = {}  # row -> is_primary
         if isinstance(primary_row, int):
             rows[primary_row] = True
-        for r in issue.get("affected_rows") or ():
-            if isinstance(r, int):
-                # Primary wins if this row is also the issue's primary row.
-                rows.setdefault(r, False)
+        # ``cluster_scope == "rule"`` means this issue is one piece
+        # of rule-level evidence that happens to apply to many rows
+        # (e.g. a relation rule fires on 50 rows). Without this
+        # guard, the per-row fan-out below would manufacture 50
+        # near-identical clusters from a single violation record.
+        # With it set, the issue lands in exactly one bucket
+        # (primary row) and ``affected_rows`` is preserved only as
+        # cluster-level metadata.
+        cluster_scope = str(issue.get("cluster_scope") or "")
+        if cluster_scope != "rule":
+            for r in issue.get("affected_rows") or ():
+                if isinstance(r, int):
+                    # Primary wins if this row is also the issue's primary row.
+                    rows.setdefault(r, False)
         if rows:
             for r, is_primary in rows.items():
                 by_source_row.setdefault((source, r), []).append((issue, is_primary))
@@ -640,6 +768,14 @@ def _apply_synthesis_payload(
         synthesis.canonical_fix = None
     else:
         synthesis.canonical_fix = str(canon_fix).strip() or None
+    # ``canonical_record`` covers every column the synthesiser saw
+    # references for in any detection. Cluster-level columns are not
+    # available here, so we trust the LLM to key by the right column
+    # names; downstream consumers (labeling UI, export) intersect
+    # against the cluster columns when reading.
+    synthesis.canonical_record = _coerce_corrected_value(
+        payload.get("canonical_record"), None,
+    )
     confidence = str(payload.get("confidence", "unknown") or "unknown").strip().lower()
     synthesis.confidence = confidence if confidence in CONFIDENCE_VALUES else "unknown"
     fp = payload.get("is_likely_false_positive", False)
@@ -650,7 +786,14 @@ def _apply_synthesis_payload(
 
 
 class ClusterSynthesiser:
-    """Run Phase-B LLM reconciliation over multi-type clusters in parallel."""
+    """Run Phase-B LLM reconciliation over clusters in parallel.
+
+    By default also runs on single-detection clusters (``include_singletons``)
+    so the operator gets an LLM-curated ``canonical_explanation`` /
+    ``canonical_fix`` even when only one detector fired. Set
+    ``include_singletons=False`` to restore the historical behaviour where
+    only multi-type clusters were synthesised.
+    """
 
     def __init__(
         self,
@@ -662,6 +805,7 @@ class ClusterSynthesiser:
         reasoning_effort: str = "medium",
         reasoning_summary: str = "detailed",
         concurrency: Optional[int] = None,
+        include_singletons: bool = True,
     ) -> None:
         self.llm = llm
         self.taxonomy = taxonomy
@@ -669,6 +813,7 @@ class ClusterSynthesiser:
         self.model = model
         self.reasoning_effort = reasoning_effort
         self.reasoning_summary = reasoning_summary
+        self.include_singletons = bool(include_singletons)
         default_concurrency = min(8, max(1, len(self.llm.endpoints)))
         self.concurrency = (
             concurrency if concurrency and concurrency > 0 else default_concurrency
@@ -704,17 +849,37 @@ class ClusterSynthesiser:
     # ------------------------------------------------------------------
 
     def run(self, clusters: Sequence[Cluster]) -> List[Cluster]:
-        """Attach ``ClusterSynthesis`` to every multi-type cluster in place.
+        """Attach ``ClusterSynthesis`` to every eligible cluster in place.
 
-        Single-type clusters (``evidence_count == 1``) are left untouched -
-        there is nothing to reconcile. The input list order is preserved.
+        When ``self.include_singletons`` is True (default) all real clusters
+        with at least one detection are synthesised so the LLM produces a
+        ``canonical_fix`` / ``canonical_explanation`` even for
+        single-detection cells. Clusters built from sibling-row inference
+        only (``inferred=True``) are always skipped because they have no
+        primary detection. When ``include_singletons`` is False the older
+        behaviour is restored: only multi-type clusters are synthesised.
+
+        Any deterministic auto-synthesis the Phase-A pipeline stamped onto
+        a cluster (see ``_auto_synthesise_single_type``) is overwritten by
+        the LLM result here.
+
+        The input list order is preserved.
         """
         clusters = list(clusters)
-        jobs = [c for c in clusters if c.is_multi_type]
+        if self.include_singletons:
+            jobs = [
+                c
+                for c in clusters
+                if c.detections and not c.inferred
+            ]
+        else:
+            jobs = [c for c in clusters if c.is_multi_type]
         total = len(jobs)
         logger.info(
-            "Phase B: %d multi-type clusters to synthesise (concurrency=%d)",
+            "Phase B: %d clusters to synthesise (include_singletons=%s, "
+            "concurrency=%d)",
             total,
+            self.include_singletons,
             self.concurrency,
         )
         if total == 0:
@@ -791,8 +956,8 @@ def summarise_clusters(clusters: Sequence[Cluster]) -> Dict[str, Any]:
     clusters_by_primary: Dict[str, int] = {}
     clusters_by_confidence: Dict[str, int] = {}
     false_positive = 0
-    synthesised = 0           # Phase-B (LLM) only - multi-type clusters
-    auto_synthesised = 0      # Single-type, multi-evidence auto-synth (no LLM)
+    synthesised = 0           # Phase-B (LLM) - any cluster the LLM saw
+    auto_synthesised = 0      # Deterministic auto-synth (no LLM call)
     synthesis_failed = 0
     for cluster in clusters:
         syn = cluster.synthesis
@@ -805,8 +970,12 @@ def summarise_clusters(clusters: Sequence[Cluster]) -> Dict[str, Any]:
                 clusters_by_primary[key] = clusters_by_primary.get(key, 0) + 1
             continue
         # Distinguish LLM-driven synthesis from the deterministic auto
-        # path used for single-type / multi-evidence clusters.
-        if cluster.is_multi_type:
+        # path. LLM synthesis stamps a real endpoint URL on the
+        # ClusterSynthesis; the auto helper leaves it blank. The
+        # ``cluster.is_multi_type`` proxy used to suffice but no longer
+        # holds now that ClusterSynthesiser also runs on single-type
+        # clusters when ``include_singletons`` is true.
+        if syn.endpoint:
             synthesised += 1
         else:
             auto_synthesised += 1

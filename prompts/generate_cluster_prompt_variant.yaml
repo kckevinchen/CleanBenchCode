@@ -1,0 +1,78 @@
+# Generator template for column-clustering prompt variants.
+#
+# Asks the LLM to paraphrase the cluster-proposer prompt (system +
+# user_template) so the column-clustering adaptive loop can perturb
+# its K samples via prompt-ensemble in addition to value-order
+# shuffling. The placeholders ``{source}``, ``{column}``, and
+# ``{value_list}`` MUST appear verbatim in the rewritten user
+# template (the host pipeline str.format()s them at call time).
+#
+# Placeholders this generator template itself uses (filled by
+# Python str.format on the user_template):
+#   base_system          - the seed system prompt to paraphrase
+#   base_user_template   - the seed user_template to paraphrase
+#                          (contains the {source}, {column},
+#                          {value_list} literals to preserve)
+#   pass_index           - integer index >= 1; included so the model
+#                          can vary the rewrite style per pass
+#
+# Output: strict JSON, no markdown fences, no prose. Schema:
+#   {
+#     "system":        "<paraphrased system prompt>",
+#     "user_template": "<paraphrased user template with {source}, {column}, {value_list} preserved verbatim>"
+#   }
+#
+# Failure handling: when the LLM returns invalid JSON, omits a
+# field, or drops a required placeholder, the host falls back to
+# the seed prompt for that variant slot. Soft failures are logged
+# and persisted in ``cluster_prompt_variants.jsonl``.
+
+base:
+  system: |
+    You help with prompt rewriting. Given a base prompt that asks an
+    LLM to find groups of values to clean in a CSV column, you write
+    a paraphrased version that means the same thing in a different
+    style. Keep every placeholder unchanged. Reply with a JSON object
+    and nothing else.
+  user_template: |
+    Base system prompt:
+
+    {base_system}
+
+    Base user template:
+
+    {base_user_template}
+
+    Please write paraphrase pass {pass_index}: rewrite both the
+    system prompt and the user template above so they read in a
+    different style while still asking for the same thing.
+
+    A few things to keep:
+
+      - The rewritten user template should contain ``{{source}}``,
+        ``{{column}}`` and ``{{value_list}}`` exactly once each
+        (the host script fills them with Python ``str.format``).
+      - Any other ``{{`` or ``}}`` in the rewritten user template
+        (for example a JSON example showing the response shape)
+        must be doubled as ``{{{{`` and ``}}}}`` so ``str.format``
+        treats them as literal braces. Look at how the base user
+        template above escapes its JSON example -- mirror that.
+      - The rewrite should still ask for a JSON reply with a
+        top-level ``clusters`` list of objects of the form
+        ``{{values, kind, canonical}}``.
+      - Groups should contain at least two distinct values, and
+        the allowed ``kind`` tags are: ``text``, ``casing``,
+        ``pattern``, ``punctuation``, ``numerical_format``,
+        ``untagged``.
+      - Values are copied verbatim into groups; do not invite the
+        model to rewrite them.
+      - No extra placeholders, no markdown fences in the reply.
+      - Try to vary the wording, examples and structure between
+        passes so the rewrites are not just copies.
+
+    Reply with a JSON object of the form:
+
+      {{
+        "system":        "<rewritten system prompt>",
+        "user_template": "<rewritten user template with the three placeholders preserved>"
+      }}

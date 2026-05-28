@@ -249,7 +249,17 @@ def test_azure_agent_returns_cached_verdict(tmp_path: Path):
 
 
 def test_azure_agent_missing_id_returns_error(monkeypatch):
+    """When no agent_id can be resolved at all (no arg, no env, AND
+    the default pool has been disabled), ``verify()`` must surface
+    ``missing agent_id`` instead of crashing on a network call.
+
+    We bypass the default-pool fallback by patching the constants
+    so the test exercises the explicit ``not self.agent_id`` branch."""
     monkeypatch.delenv("AZURE_AGENTS_VERIFIER_AGENT_ID", raising=False)
+    monkeypatch.delenv("AZURE_AGENTS_VERIFIER_AGENT_IDS", raising=False)
+    import src.verifier.agent_backend as ab
+    monkeypatch.setattr(ab, "DEFAULT_AGENT_IDS", [])
+    monkeypatch.setattr(ab, "DEFAULT_AGENT_ENDPOINTS", [])
     backend = AzureAgentBackend(endpoint="https://e", agent_id="")
     v = backend.verify("hello")
     assert v.error == "missing agent_id"
@@ -386,3 +396,205 @@ def test_azure_agent_caches_non_empty_payloads(tmp_path: Path):
     assert v.error is None
     assert v.text == '{"verdict": "ambiguous"}'
     assert cache.get(backend.name, "cid::cafebabe") is not None
+
+
+# ---------------------------------------------------------------------------
+# RoundRobinAgentBackend
+# ---------------------------------------------------------------------------
+
+
+from src.verifier import RoundRobinAgentBackend  # noqa: E402
+
+
+def test_round_robin_dispatches_evenly():
+    """Each call advances the index, cycling through every backend."""
+    a = StubAgentBackend(default=AgentVerdict(text="from-a"))
+    b = StubAgentBackend(default=AgentVerdict(text="from-b"))
+    rr = RoundRobinAgentBackend(backends=[a, b])
+
+    out = [rr.verify(f"q{i}").text for i in range(5)]
+    assert out == ["from-a", "from-b", "from-a", "from-b", "from-a"]
+    # Each child saw the prompts that were routed to it.
+    assert [c["prompt"] for c in a.calls] == ["q0", "q2", "q4"]
+    assert [c["prompt"] for c in b.calls] == ["q1", "q3"]
+
+
+def test_round_robin_propagates_system_prompt():
+    """Verifier writes ``system_prompt`` onto its agent attr after
+    construction. RoundRobinAgentBackend must forward that write
+    down to every child so they all use the same instructions
+    override on their next run."""
+    a = StubAgentBackend()
+    b = StubAgentBackend()
+    rr = RoundRobinAgentBackend(backends=[a, b])
+    rr.system_prompt = "SYS"
+    assert a.system_prompt == "SYS"
+    assert b.system_prompt == "SYS"
+    # And subsequent verify() calls record the propagated prompt.
+    a.fixtures["q"] = AgentVerdict(text="x")
+    b.fixtures["q"] = AgentVerdict(text="y")
+    rr.verify("q")
+    rr.verify("q")
+    assert a.system_prompts == ["SYS"]
+    assert b.system_prompts == ["SYS"]
+
+
+def test_round_robin_requires_at_least_one_backend():
+    import pytest
+    with pytest.raises(ValueError):
+        RoundRobinAgentBackend(backends=[])
+
+
+def test_round_robin_thread_safe_under_concurrency():
+    """Counter is guarded by a Lock; concurrent threads must each get
+    a distinct backend so total dispatch counts are balanced. We
+    use 2 backends and 100 calls: each backend should be hit
+    exactly 50 times regardless of thread interleaving."""
+    import threading
+
+    a = StubAgentBackend(default=AgentVerdict(text="a"))
+    b = StubAgentBackend(default=AgentVerdict(text="b"))
+    rr = RoundRobinAgentBackend(backends=[a, b])
+
+    def hit():
+        for i in range(50):
+            rr.verify(f"t-{i}")
+
+    threads = [threading.Thread(target=hit) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # 100 total calls, 2 backends -> exactly 50 each.
+    assert len(a.calls) + len(b.calls) == 100
+    assert len(a.calls) == 50
+    assert len(b.calls) == 50
+
+
+# ---------------------------------------------------------------------------
+# build_agent_backend multi-endpoint factory
+# ---------------------------------------------------------------------------
+
+
+def test_factory_single_endpoint_returns_azure_backend():
+    backend = build_agent_backend(endpoint="https://a", agent_id="asst_a")
+    assert isinstance(backend, AzureAgentBackend)
+    assert backend.endpoint == "https://a"
+
+
+def test_factory_multi_endpoint_via_lists_returns_round_robin():
+    backend = build_agent_backend(
+        endpoints=["https://a", "https://b"],
+        agent_ids=["asst_a", "asst_b"],
+    )
+    assert isinstance(backend, RoundRobinAgentBackend)
+    assert len(backend.backends) == 2
+    inner = backend.backends
+    assert isinstance(inner[0], AzureAgentBackend)
+    assert isinstance(inner[1], AzureAgentBackend)
+    assert (inner[0].endpoint, inner[0].agent_id) == ("https://a", "asst_a")
+    assert (inner[1].endpoint, inner[1].agent_id) == ("https://b", "asst_b")
+
+
+def test_factory_multi_endpoint_via_csv_returns_round_robin():
+    """Comma-separated strings on the singular CLI args are split and
+    paired positionally - the natural form when a flag accepts only
+    one value but the operator wants several."""
+    backend = build_agent_backend(
+        endpoint="https://a, https://b",
+        agent_id="asst_a,asst_b",
+    )
+    assert isinstance(backend, RoundRobinAgentBackend)
+    assert [b.endpoint for b in backend.backends] == ["https://a", "https://b"]
+    assert [b.agent_id for b in backend.backends] == ["asst_a", "asst_b"]
+
+
+def test_factory_mismatched_lengths_raises():
+    import pytest
+    with pytest.raises(ValueError):
+        build_agent_backend(
+            endpoints=["https://a", "https://b"],
+            agent_ids=["asst_a"],
+        )
+
+
+def test_factory_reads_plural_env_vars(monkeypatch):
+    monkeypatch.setenv(
+        "AZURE_AGENTS_ENDPOINTS", "https://a, https://b",
+    )
+    monkeypatch.setenv(
+        "AZURE_AGENTS_VERIFIER_AGENT_IDS", "asst_a,asst_b",
+    )
+    monkeypatch.delenv("AZURE_AGENTS_ENDPOINT", raising=False)
+    monkeypatch.delenv("AZURE_AGENTS_VERIFIER_AGENT_ID", raising=False)
+    backend = build_agent_backend()
+    assert isinstance(backend, RoundRobinAgentBackend)
+    assert [b.endpoint for b in backend.backends] == ["https://a", "https://b"]
+
+
+def test_factory_singular_env_vars_still_work(monkeypatch):
+    """Backwards-compat: AZURE_AGENTS_ENDPOINT (singular) still
+    yields a single AzureAgentBackend (no overhead vs. the legacy
+    code path)."""
+    monkeypatch.setenv("AZURE_AGENTS_ENDPOINT", "https://only")
+    monkeypatch.setenv(
+        "AZURE_AGENTS_VERIFIER_AGENT_ID", "asst_only",
+    )
+    monkeypatch.delenv("AZURE_AGENTS_ENDPOINTS", raising=False)
+    monkeypatch.delenv("AZURE_AGENTS_VERIFIER_AGENT_IDS", raising=False)
+    backend = build_agent_backend()
+    assert isinstance(backend, AzureAgentBackend)
+    assert backend.endpoint == "https://only"
+    assert backend.agent_id == "asst_only"
+
+
+def test_factory_uses_default_pool_when_nothing_configured(monkeypatch):
+    """Out-of-the-box default: with no env vars and no CLI args,
+    ``build_agent_backend()`` returns a RoundRobinAgentBackend over
+    the built-in DEFAULT_AGENT_ENDPOINTS / DEFAULT_AGENT_IDS pool.
+
+    This is what makes multi-endpoint round-robin the experiment's
+    DEFAULT behaviour rather than an opt-in."""
+    from src.verifier import DEFAULT_AGENT_ENDPOINTS, DEFAULT_AGENT_IDS
+
+    # Wipe every env var the resolver knows about so we exercise the
+    # code-default fallback path.
+    for var in (
+        "AZURE_AGENTS_ENDPOINT",
+        "AZURE_AGENTS_VERIFIER_AGENT_ID",
+        "AZURE_AGENTS_ENDPOINTS",
+        "AZURE_AGENTS_VERIFIER_AGENT_IDS",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    backend = build_agent_backend()
+    assert isinstance(backend, RoundRobinAgentBackend)
+    # Pool length matches the shipped defaults.
+    assert len(backend.backends) == len(DEFAULT_AGENT_ENDPOINTS)
+    # Pairs are positional: the i-th endpoint is dispatched against
+    # the i-th agent id.
+    for child, ep, aid in zip(
+        backend.backends, DEFAULT_AGENT_ENDPOINTS, DEFAULT_AGENT_IDS,
+    ):
+        assert child.endpoint == ep
+        assert child.agent_id == aid
+
+
+def test_azure_agent_falls_back_to_default_pool_first_entry(monkeypatch):
+    """Direct ``AzureAgentBackend()`` instantiation (no factory) with
+    no env vars must still pick up the FIRST default pair so legacy
+    callers don't regress to ``missing endpoint`` errors."""
+    from src.verifier import DEFAULT_AGENT_ENDPOINTS, DEFAULT_AGENT_IDS
+
+    for var in (
+        "AZURE_AGENTS_ENDPOINT",
+        "AZURE_AGENTS_VERIFIER_AGENT_ID",
+        "AZURE_AGENTS_ENDPOINTS",
+        "AZURE_AGENTS_VERIFIER_AGENT_IDS",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    backend = AzureAgentBackend()
+    assert backend.endpoint == DEFAULT_AGENT_ENDPOINTS[0]
+    assert backend.agent_id == DEFAULT_AGENT_IDS[0]

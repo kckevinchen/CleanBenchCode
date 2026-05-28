@@ -17,6 +17,10 @@
   --partial: #f59e0b;
   --unsure: #a78bfa;
   --skip: #ec4899;
+  /* Bright cyan reserved exclusively for "the cluster cell I'm
+     currently labelling". Not used by any verdict state so it
+     reads cleanly over every cell-* tint. */
+  --current-cell: #22d3ee;
 }
 * { box-sizing: border-box; }
 html, body {
@@ -27,7 +31,12 @@ html, body {
   color: var(--text);
   font-size: 13px;
   line-height: 1.45;
-  height: 100vh;
+  /* ``--vh-scale`` is set by viewport-zoom.js to ``1 / zoom`` so the
+     body inflates in CSS px to compensate for the visual scale-down;
+     painted height ends up exactly 100vh. Defaults to 1 when the
+     zoom script isn't loaded (e.g. standalone unit tests / older
+     browsers) so behaviour is unchanged. */
+  height: calc(100vh * var(--vh-scale, 1));
   overflow: hidden;
 }
 body {
@@ -82,15 +91,15 @@ body {
   body {
     display: flex;
     flex-direction: column;
-    min-height: 100vh;
+    min-height: calc(100vh * var(--vh-scale, 1));
   }
   header { padding: 8px 12px; gap: 8px 12px; }
   header .title { flex: 1 1 100%; }
   header .progress { flex: 1 1 100%; order: 3; }
   header .actions { flex: 0 1 auto; }
-  .sidebar { border-right: none; border-bottom: 1px solid var(--border); max-height: 50vh; }
+  .sidebar { border-right: none; border-bottom: 1px solid var(--border); max-height: calc(50vh * var(--vh-scale, 1)); }
   .detail { border-left: none; border-top: 1px solid var(--border); }
-  .center { min-height: 50vh; }
+  .center { min-height: calc(50vh * var(--vh-scale, 1)); }
 }
 @media (max-width: 600px) {
   /* Phone-ish: drop the in-header docs/export anchors to a smaller,
@@ -215,6 +224,20 @@ header .actions a {
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--panel);
+}
+/* Header-bar buttons styled to match the anchors next to them. The
+   "Generate all corrections" batch trigger uses this class. */
+header .actions .hdr-btn {
+  font: inherit;
+  color: inherit;
+  padding: 4px 10px;
+  border: 1px solid rgba(34, 197, 94, 0.55);
+  border-radius: 6px;
+  background: rgba(34, 197, 94, 0.10);
+  cursor: pointer;
+}
+header .actions .hdr-btn:hover {
+  background: rgba(34, 197, 94, 0.20);
 }
 /* Per-error-type export dropdown + download anchor live inside an
    inline-flex group so they look like a single control even though
@@ -374,7 +397,9 @@ header .actions .export-single a[aria-disabled="true"] {
   left: 0;
   min-width: 100%;
   width: 280px;
-  max-width: calc(100vw - 32px);
+  /* Match the body's viewport-unit compensation (see html, body rule
+     above) so the popover doesn't clip on zoomed-down layouts. */
+  max-width: calc((100vw - 32px) * var(--vw-scale, 1));
   background: var(--panel-2);
   border: 1px solid var(--border);
   border-radius: 4px;
@@ -753,7 +778,19 @@ header .actions .export-single a[aria-disabled="true"] {
   background: var(--panel-2);
   color: var(--muted);
   font-weight: 600;
-  z-index: 1;
+  /* z-index has to stay ABOVE ``.csv-viewer tr.target td.flagged``
+     (z-index: 2) so the currently-selected flagged cells don't
+     punch through the sticky column-header row when the operator
+     scrolls the target row up behind it. If a cluster flags 5+
+     columns, the cell-level z-index would cover the entire thead
+     row and the operator would see "the column header disappear".
+     We pick 5 to leave headroom for any future single-cell overlay
+     state without re-tripping this bug. The sticky-left row-index
+     column (.csv-viewer tr.row-idx td:first-child) is lifted to
+     z-index: 3 for the same reason - sticky-column cells must beat
+     ``.target td.flagged`` (2) but stay below the sticky thead so
+     the top-left corner cell (which is sticky in both axes) wins. */
+  z-index: 5;
 }
 .csv-viewer th.flagged, .csv-viewer td.flagged {
   outline: 2px solid var(--sev-medium);
@@ -943,10 +980,39 @@ header .actions .export-single a[aria-disabled="true"] {
   color: var(--text);
   border-color: var(--accent);
 }
-.csv-viewer tr.row-idx td:first-child { color: var(--muted); background: var(--panel); position: sticky; left: 0; }
+.csv-viewer tr.row-idx td:first-child {
+  color: var(--muted);
+  background: var(--panel);
+  position: sticky;
+  left: 0;
+  /* Mirror the sticky-thead z-index bump (5). Without an explicit
+     z-index, the sticky # column renders at the default 0 and gets
+     covered by ``.csv-viewer tr.target td.flagged`` (z-index: 2)
+     whenever the operator scrolls right past the flagged cell -
+     the # column would slide BEHIND the flagged cell on its way
+     to ``left: 0``, briefly making the row index invisible.
+     z-index: 3 keeps it above the target-cell ring but still below
+     the sticky thead (5) so the top-left corner stacking is sane. */
+  z-index: 3;
+}
 .csv-viewer tr.target { background: rgba(96,165,250,0.08); }
+/* Currently-viewed cluster cell: a thick cyan ring + outer glow.
+   The cyan (--current-cell) is reserved for this state and clashes
+   with NO verdict tint, so the cell's underlying cell-fp / cell-tp
+   / cell-unsure / cell-partial background stays visible (the
+   operator can still see "this is a labelled FP that I'm now
+   viewing"). The double box-shadow gives a soft halo so the cell
+   stands out even from across the viewport.
+   ``z-index: 2`` lifts the cell above sticky neighbours so the ring
+   doesn't get clipped by adjacent <td>s on horizontal scroll. */
 .csv-viewer tr.target td.flagged {
-  background: rgba(239,68,68,0.22);
+  outline: 3px solid var(--current-cell);
+  outline-offset: -3px;
+  box-shadow:
+    inset 0 0 0 1px rgba(34, 211, 238, 0.55),
+    0 0 0 2px rgba(34, 211, 238, 0.35);
+  position: relative;
+  z-index: 2;
 }
 /* Duplicate-group siblings of a row_duplication cluster: a softer
    amber band so the operator can see the whole group at a glance
@@ -999,6 +1065,27 @@ header .actions .export-single a[aria-disabled="true"] {
 .detail .det-row .et { font-weight: 600; font-size: 12px; }
 .detail .det-row .obs { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; color: var(--muted); margin: 4px 0; word-break: break-word; }
 .detail .det-row .fix { font-size: 11.5px; color: var(--text); }
+/* Multi-column "Violated relation:" hint — surfaces the relation
+   kind + columns it spans for fd_violation / row_calculation_
+   inconsistency / string_calculation_inconsistency detections so
+   the labeller can identify the rule at a glance. Sits between the
+   error-type header and the Observed/Explanation rows. */
+.detail .det-row .rel-violated {
+  font-size: 11.5px;
+  color: var(--text);
+  margin: 4px 0;
+  padding: 4px 6px;
+  background: var(--panel);
+  border-left: 3px solid var(--accent, #4a90e2);
+  border-radius: 3px;
+}
+.detail .det-row .rel-violated code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  background: var(--panel-2);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
 .detail .placeholder { color: var(--muted); padding: 20px; text-align: center; }
 
 /* Original / Fix block. Stacked rows per column ("Original: ..." then
@@ -2248,4 +2335,862 @@ footer.shortcuts {
   vertical-align: middle;
   letter-spacing: 0.3px;
   cursor: help;
+}
+
+/* ===================================================================
+ * Column-cluster (inconsistency) queue items + center highlight +
+ * right-pane detail + Add-cluster modal.
+ * =================================================================== */
+
+/* Queue row tint: subtle teal stripe so inconsistency clusters stand
+   out from cell-level clusters even before reading the badge. */
+.queue .row.row-cc {
+  background: linear-gradient(
+    to right,
+    rgba(20, 184, 166, 0.07),
+    transparent 70%
+  );
+}
+
+/* Badge in the queue row line: "col ×N" where N is the cluster's
+   distinct-value count. Teal to match the row tint. */
+.cc-badge {
+  display: inline-block;
+  padding: 0 5px;
+  margin-left: 6px;
+  border: 1px solid rgba(13, 148, 136, 0.7);
+  border-radius: 3px;
+  font-size: 9px;
+  line-height: 13px;
+  font-weight: 700;
+  color: rgb(15, 118, 110);
+  background: rgba(20, 184, 166, 0.12);
+  vertical-align: middle;
+  letter-spacing: 0.3px;
+}
+
+/* CSV grid highlight for cluster value matches. Two strongly
+   contrasting palettes so the operator can spot canonical vs
+   non-canonical at a glance:
+     * Non-canonical (other variants in the same cluster) -> amber.
+       Reads as "warning, needs canonicalisation".
+     * Canonical (the value the cluster should converge to) ->
+       saturated green. Reads as "this is the right value".
+   The two hues are far apart on the wheel so they remain easy to
+   tell apart on light and dark backgrounds alike. */
+.csv-viewer td.clickable.col-cluster-match {
+  background: rgba(245, 158, 11, 0.22) !important;
+  outline: 1px dashed rgba(217, 119, 6, 0.65);
+  outline-offset: -1px;
+  color: rgb(254, 240, 138);
+}
+.csv-viewer td.clickable.col-cluster-canonical {
+  background: rgba(34, 197, 94, 0.32) !important;
+  outline: 2px solid rgba(34, 197, 94, 0.85);
+  outline-offset: -2px;
+  font-weight: 700;
+  color: rgb(220, 252, 231);
+}
+/* Flash animation when navigating from the value list to a CSV row.
+   Pulses with a bright cyan ring so the eye locks onto the target
+   regardless of which cluster-highlight tint sits underneath. */
+.csv-viewer td.clickable.cc-flash {
+  animation: cc-flash 0.8s ease-out;
+}
+@keyframes cc-flash {
+  0% { box-shadow: 0 0 0 4px rgba(34, 211, 238, 0.75); }
+  100% { box-shadow: 0 0 0 0 rgba(34, 211, 238, 0); }
+}
+
+/* Right-pane value list for a column-cluster item. Mirrors the
+   grid palette: non-canonical chips are amber-tinted, canonical
+   is saturated green, so the right pane and the CSV grid read as
+   the same visual language. */
+.detail .cc-value-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.detail .cc-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border: 1px dashed rgba(217, 119, 6, 0.55);
+  border-radius: 4px;
+  background: rgba(245, 158, 11, 0.14);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+.detail .cc-value:hover {
+  background: rgba(245, 158, 11, 0.28);
+}
+.detail .cc-value.canonical {
+  background: rgba(34, 197, 94, 0.28);
+  border: 1px solid rgba(34, 197, 94, 0.85);
+  font-weight: 700;
+}
+.detail .cc-value.canonical:hover {
+  background: rgba(34, 197, 94, 0.40);
+}
+.detail .cc-canon-badge {
+  color: rgb(187, 247, 208);
+  font-size: 11px;
+}
+.detail .cc-value-count {
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+/* Canonical-confirm radio block (per-cluster detail pane). */
+.detail .cc-canon-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.detail .cc-canon-opt {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12.5px;
+}
+.detail .cc-canon-opt:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+.detail .cc-canon-opt input[type="radio"] {
+  margin: 0;
+  cursor: pointer;
+}
+
+/* Per-value corrections block (LLM-assisted, edit + save). Sits just
+   below the canonical-radio block in the column-cluster detail pane.
+   When saved corrections are present the canonical-radio block is
+   hidden in favour of this richer per-value mapping. */
+.detail .cc-corrections .cc-corrections-running {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  padding: 6px 0;
+}
+.detail .cc-corrections .cc-corrections-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(34, 211, 238, 0.25);
+  border-top-color: rgba(34, 211, 238, 0.95);
+  border-radius: 50%;
+  animation: cc-spin 0.8s linear infinite;
+  display: inline-block;
+}
+@keyframes cc-spin {
+  to { transform: rotate(360deg); }
+}
+.detail .cc-corrections .cc-corrections-error {
+  font-size: 12px;
+  color: rgb(252, 165, 165);
+  background: rgba(220, 38, 38, 0.12);
+  border: 1px solid rgba(220, 38, 38, 0.35);
+  border-radius: 4px;
+  padding: 6px 8px;
+  margin-bottom: 6px;
+}
+.detail .cc-corrections .cc-corrections-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+.detail .cc-corrections .cc-corrections-table th {
+  text-align: left;
+  font-weight: 600;
+  font-size: 11px;
+  color: var(--muted);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 4px 6px;
+}
+.detail .cc-corrections .cc-corrections-table td {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  padding: 4px 6px;
+  vertical-align: top;
+}
+.detail .cc-corrections .cc-correction-action {
+  width: 100%;
+  font-size: 12px;
+  padding: 2px 4px;
+}
+.detail .cc-corrections .cc-correction-text {
+  width: 100%;
+  font-size: 12px;
+  padding: 2px 6px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 3px;
+  color: inherit;
+}
+.detail .cc-corrections .cc-correction-text:disabled {
+  opacity: 0.5;
+}
+.detail .cc-corrections .cc-correction-invalid {
+  border-color: rgba(220, 38, 38, 0.7);
+}
+.detail .cc-corrections .cc-corrections-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.detail .cc-corrections .cc-corrections-actions button {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 4px;
+  border: 1px solid rgba(34, 211, 238, 0.45);
+  background: rgba(34, 211, 238, 0.08);
+  cursor: pointer;
+  color: inherit;
+}
+.detail .cc-corrections .cc-corrections-actions button:hover {
+  background: rgba(34, 211, 238, 0.18);
+}
+.detail .cc-corrections .cc-corrections-actions .cc-corrections-save {
+  border-color: rgba(34, 197, 94, 0.65);
+  background: rgba(34, 197, 94, 0.14);
+}
+.detail .cc-corrections .cc-corrections-actions .cc-corrections-save:hover {
+  background: rgba(34, 197, 94, 0.28);
+}
+.detail .cc-corrections .cc-corrections-actions .cc-corrections-clear {
+  border-color: rgba(220, 38, 38, 0.5);
+  background: rgba(220, 38, 38, 0.10);
+}
+.detail .cc-corrections .cc-corrections-actions .cc-corrections-clear:hover {
+  background: rgba(220, 38, 38, 0.22);
+}
+
+/* Batch correction-job modal: progress bar + per-cluster collapsible
+   result blocks. Lives inside the cc-modal frame so the surrounding
+   modal chrome (head / body / close button) is reused. */
+#batch-corrections-modal .cc-batch-panel {
+  width: min(880px, 94vw);
+  max-height: calc(88vh * var(--vh-scale, 1));
+}
+#batch-corrections-modal .batch-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+#batch-corrections-modal .batch-progress-text {
+  font-size: 12px;
+  color: var(--muted);
+}
+#batch-corrections-modal .batch-progress-bar {
+  height: 8px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.10);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+#batch-corrections-modal .batch-progress-fill {
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    rgba(34, 211, 238, 0.55) 0%,
+    rgba(34, 197, 94, 0.85) 100%
+  );
+  width: 0%;
+  transition: width 0.4s ease-out;
+}
+#batch-corrections-modal .batch-results {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: calc(60vh * var(--vh-scale, 1));
+  overflow: auto;
+}
+#batch-corrections-modal .batch-result-block {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+#batch-corrections-modal .batch-result-block summary {
+  cursor: pointer;
+  font-size: 12px;
+}
+#batch-corrections-modal .cc-corrections-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin-top: 4px;
+}
+#batch-corrections-modal .cc-corrections-table th {
+  text-align: left;
+  font-size: 11px;
+  color: var(--muted);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 4px 6px;
+}
+#batch-corrections-modal .cc-corrections-table td {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  padding: 4px 6px;
+  vertical-align: top;
+}
+
+/* Trivial-typo tagger modal: preview list of (source, row, column,
+   value) about to receive the literal token TRIVIAL in their note,
+   plus a summary card of counts. Reuses the cc-modal frame. */
+#identify-trivial-modal .cc-batch-panel {
+  width: min(880px, 94vw);
+  max-height: calc(88vh * var(--vh-scale, 1));
+}
+#identify-trivial-modal .trivial-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 6px;
+  margin-bottom: 10px;
+}
+#identify-trivial-modal .trivial-stat {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.02);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+#identify-trivial-modal .trivial-stat strong {
+  font-size: 18px;
+  line-height: 1.1;
+}
+#identify-trivial-modal .trivial-stat .trivial-stat-label {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+#identify-trivial-modal .trivial-stat.to-tag strong { color: rgb(34, 197, 94); }
+#identify-trivial-modal .trivial-stat.skip strong { color: var(--muted); }
+#identify-trivial-modal .trivial-preview {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  max-height: calc(48vh * var(--vh-scale, 1));
+  overflow: auto;
+  background: rgba(255, 255, 255, 0.02);
+}
+#identify-trivial-modal .trivial-preview-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+#identify-trivial-modal .trivial-preview-table th {
+  text-align: left;
+  font-size: 11px;
+  color: var(--muted);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 4px 6px;
+  background: rgba(255, 255, 255, 0.04);
+  position: sticky;
+  top: 0;
+}
+#identify-trivial-modal .trivial-preview-table td {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  padding: 4px 6px;
+  vertical-align: top;
+}
+#identify-trivial-modal .trivial-preview-table tr.is-already-tagged td {
+  color: var(--muted);
+  font-style: italic;
+}
+#identify-trivial-modal .trivial-preview-table .ws-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre;
+  /* Repaint visible whitespace in red, mirroring the .has-ws CSV
+     viewer rule so the operator can spot the anomaly at a glance. */
+  background: linear-gradient(
+    transparent 0%,
+    transparent 100%
+  );
+}
+#identify-trivial-modal .trivial-preview-table .ws-value .ws-marker {
+  background: rgba(239, 68, 68, 0.22);
+  border-bottom: 2px solid rgba(239, 68, 68, 0.85);
+  padding: 0 1px;
+  border-radius: 2px;
+}
+#identify-trivial-modal .trivial-preview-table .target-pill {
+  display: inline-block;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--border);
+}
+#identify-trivial-modal .trivial-preview-table .status-pill {
+  display: inline-block;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+#identify-trivial-modal .trivial-preview-table .status-pill.tp { background: rgba(34, 197, 94, 0.18); color: rgb(22, 163, 74); }
+#identify-trivial-modal .trivial-preview-table .status-pill.fn { background: rgba(99, 102, 241, 0.18); color: rgb(79, 70, 229); }
+#identify-trivial-modal .trivial-preview-table .status-pill.partial { background: rgba(234, 179, 8, 0.18); color: rgb(202, 138, 4); }
+#identify-trivial-modal .trivial-preview-table .status-pill.unsure { background: rgba(156, 163, 175, 0.18); color: var(--muted); }
+#identify-trivial-modal .trivial-empty {
+  padding: 18px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+#identify-trivial-modal .trivial-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+#identify-trivial-modal .trivial-actions .left {
+  margin-right: auto;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+#identify-trivial-modal .trivial-actions button {
+  padding: 6px 12px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 12px;
+}
+#identify-trivial-modal .trivial-actions button:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+#identify-trivial-modal .trivial-actions .primary {
+  background: rgb(220, 38, 38);
+  border-color: rgb(185, 28, 28);
+  color: white;
+  font-weight: 600;
+}
+#identify-trivial-modal .trivial-actions .primary:hover {
+  background: rgb(185, 28, 28);
+}
+#identify-trivial-modal .trivial-actions .primary[disabled] {
+  background: rgba(220, 38, 38, 0.30);
+  border-color: rgba(220, 38, 38, 0.30);
+  cursor: not-allowed;
+}
+#identify-trivial-modal .trivial-error {
+  border: 1px solid rgb(220, 38, 38);
+  color: rgb(220, 38, 38);
+  background: rgba(220, 38, 38, 0.10);
+  padding: 6px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+#identify-trivial-modal .trivial-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  border-top-color: var(--muted);
+  border-radius: 50%;
+  animation: trivial-spin 0.8s linear infinite;
+  vertical-align: middle;
+  margin-right: 6px;
+}
+@keyframes trivial-spin { to { transform: rotate(360deg); } }
+
+/* Two-tab strip inside the trivial-tagger modal. The strip lives
+   between the head and the body; clicking a tab toggles
+   ``[data-active-tab]`` on the body, which drives ``.is-active``
+   visibility on each pane. */
+#identify-trivial-modal .trivial-tab-strip {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border);
+  padding: 0 10px;
+}
+#identify-trivial-modal .trivial-tab {
+  appearance: none;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 8px 14px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--muted);
+  cursor: pointer;
+}
+#identify-trivial-modal .trivial-tab:hover {
+  color: inherit;
+}
+#identify-trivial-modal .trivial-tab.is-active {
+  color: inherit;
+  border-bottom-color: rgb(220, 38, 38);
+  font-weight: 600;
+}
+/* Show only the pane matching the body's active-tab attribute. Each
+   pane carries data-trivial-pane="<key>"; the body has
+   data-active-tab="<key>". Matching pair = visible. */
+#identify-trivial-modal .cc-modal-body[data-active-tab="whitespace"]
+  .trivial-pane[data-trivial-pane="whitespace"],
+#identify-trivial-modal .cc-modal-body[data-active-tab="phone"]
+  .trivial-pane[data-trivial-pane="phone"] {
+  display: block;
+}
+#identify-trivial-modal .trivial-pane { display: none; }
+/* Per-column card for the phone-format pane: shows the source CSV,
+   detected column name, the column-majority template, and counts of
+   pending cell corrections + clusters to skip. */
+#identify-trivial-modal .phone-col-card {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  background: rgba(255, 255, 255, 0.02);
+}
+#identify-trivial-modal .phone-col-card .phone-col-head {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: baseline;
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+#identify-trivial-modal .phone-col-card .phone-col-head code {
+  font-size: 12px;
+}
+#identify-trivial-modal .phone-col-card .phone-col-head .muted {
+  color: var(--muted);
+  font-size: 11px;
+}
+#identify-trivial-modal .phone-col-card .phone-col-head .pill {
+  display: inline-block;
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(34, 197, 94, 0.18);
+  color: rgb(22, 163, 74);
+  border: 1px solid rgba(34, 197, 94, 0.30);
+}
+#identify-trivial-modal .phone-corr-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11.5px;
+}
+#identify-trivial-modal .phone-corr-table th {
+  text-align: left;
+  font-size: 10.5px;
+  color: var(--muted);
+  padding: 3px 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+#identify-trivial-modal .phone-corr-table td {
+  padding: 3px 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  vertical-align: top;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+#identify-trivial-modal .phone-corr-table tr.is-already-tagged td {
+  color: var(--muted);
+  font-style: italic;
+}
+#identify-trivial-modal .phone-corr-table .arrow {
+  color: var(--muted);
+  padding: 0 4px;
+}
+
+/* +Add inconsistency cluster button in the CSV head. */
+.add-cluster-btn {
+  margin-left: auto;
+  padding: 4px 10px;
+  border: 1px solid rgba(13, 148, 136, 0.7);
+  border-radius: 4px;
+  background: rgba(20, 184, 166, 0.10);
+  color: rgb(15, 118, 110);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.add-cluster-btn:hover {
+  background: rgba(20, 184, 166, 0.22);
+}
+
+/* Add-cluster modal. */
+.cc-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.cc-modal[hidden] { display: none !important; }
+.cc-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+}
+.cc-modal-panel {
+  position: relative;
+  background: var(--bg, #fff);
+  color: inherit;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  width: min(640px, 92vw);
+  max-height: calc(88vh * var(--vh-scale, 1));
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.45);
+}
+.cc-modal-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.cc-modal-head h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+.cc-modal-close {
+  margin-left: auto;
+  background: none;
+  border: 0;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  color: inherit;
+  padding: 2px 6px;
+}
+.cc-modal-body {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: auto;
+  flex: 1 1 auto;
+}
+.cc-modal-row {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  align-items: center;
+  gap: 10px;
+}
+.cc-modal-label {
+  font-size: 11.5px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+.cc-modal-row select,
+.cc-modal-row input[type="text"] {
+  width: 100%;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: inherit;
+  color: inherit;
+  font-size: 12.5px;
+}
+.cc-modal-static { font-size: 12.5px; }
+.cc-modal-values {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  max-height: 320px;
+  overflow-y: auto;
+  font-size: 12px;
+}
+.cc-modal-values .cc-modal-value {
+  display: grid;
+  grid-template-columns: 22px 22px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.cc-modal-values .cc-modal-value:last-child { border-bottom: 0; }
+.cc-modal-values .cc-modal-value.selected {
+  background: rgba(20, 184, 166, 0.10);
+}
+.cc-modal-values .cc-modal-value.canonical {
+  background: rgba(34, 197, 94, 0.14);
+}
+.cc-modal-values .cc-modal-value-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cc-modal-values .cc-modal-value-count {
+  font-size: 10.5px;
+  color: var(--muted);
+}
+.cc-modal-summary {
+  font-size: 11.5px;
+}
+.cc-modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+}
+.cc-modal-foot button {
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: inherit;
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.cc-modal-foot .cc-modal-submit {
+  background: rgba(20, 184, 166, 0.18);
+  border-color: rgba(13, 148, 136, 0.7);
+  color: rgb(15, 118, 110);
+  font-weight: 600;
+}
+.cc-modal-foot .cc-modal-submit:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Pre-export conflict modal: surfaces (source, column, value) triples
+   whose label verdicts disagree row-to-row before the operator
+   downloads the benchmark JSONL. Reuses the .cc-modal frame so the
+   look matches the other workflow modals. */
+.cc-modal-panel.export-conflict-panel {
+  width: min(880px, 94vw);
+}
+.export-conflict-summary {
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+.export-conflict-summary.danger {
+  color: #fde68a;
+}
+.export-conflict-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: calc(60vh * var(--vh-scale, 1));
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px;
+}
+.export-conflict-group {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  background: rgba(0, 0, 0, 0.08);
+}
+.export-conflict-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 12px;
+}
+.export-conflict-head .source {
+  font-weight: 600;
+}
+.export-conflict-head .column {
+  color: var(--muted);
+}
+.export-conflict-head .value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: rgba(0, 0, 0, 0.18);
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 11.5px;
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-block;
+  vertical-align: middle;
+}
+.export-conflict-cells {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.export-conflict-cell {
+  display: grid;
+  grid-template-columns: 64px 90px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 4px;
+  font-size: 11.5px;
+}
+.export-conflict-cell + .export-conflict-cell {
+  border-top: 1px dashed var(--border);
+}
+.export-conflict-cell .row-label {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.export-conflict-cell .label-pill {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 10.5px;
+  font-weight: 600;
+  text-align: center;
+  text-transform: lowercase;
+}
+.export-conflict-cell .label-pill.label-error {
+  background: rgba(239, 68, 68, 0.18);
+  color: #fca5a5;
+}
+.export-conflict-cell .label-pill.label-clean {
+  background: rgba(34, 197, 94, 0.16);
+  color: #86efac;
+}
+.export-conflict-cell .label-pill.label-ambiguous {
+  background: rgba(234, 179, 8, 0.16);
+  color: #fde68a;
+}
+.export-conflict-cell .corrected {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.export-conflict-cell .jump-btn {
+  background: rgba(20, 184, 166, 0.12);
+  border: 1px solid rgba(13, 148, 136, 0.55);
+  color: inherit;
+  font-size: 10.5px;
+  padding: 2px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.export-conflict-cell .jump-btn:hover {
+  background: rgba(20, 184, 166, 0.22);
+}
+.cc-modal-foot .cc-modal-export-anyway {
+  background: rgba(234, 179, 8, 0.18);
+  border-color: rgba(202, 138, 4, 0.7);
+  color: rgb(234, 179, 8);
+  font-weight: 600;
 }

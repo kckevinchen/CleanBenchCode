@@ -279,22 +279,16 @@ def build_relations_argv(payload: Dict[str, Any]) -> List[str]:
         _append_if(argv, "--stop-when", payload.get("stop_when"))
         _append_if(argv, "--epsilon-chao1", payload.get("epsilon_chao1"))
         _append_if(argv, "--base-seed", payload.get("base_seed"))
-    # Post-discovery passes. Both default ON in the CLI; the launcher
-    # form sends ``aggregate``/``generalize`` as bools so we can flip
-    # the negative flag without leaking flag-name semantics into the
-    # form payload schema.
+    # Post-discovery passes. Defaults ON in the CLI; the launcher
+    # form sends ``aggregate`` as a bool so we can flip the negative
+    # flag without leaking flag-name semantics into the form payload
+    # schema.
     if payload.get("aggregate") is False:
         argv.append("--no-aggregate")
     else:
         _append_if(argv, "--aggregate-prompt", payload.get("aggregate_prompt"))
         _append_if(argv, "--aggregate-min-cluster",
                    payload.get("aggregate_min_cluster"))
-    if payload.get("generalize") is False:
-        argv.append("--no-generalize")
-    else:
-        _append_if(argv, "--generalize-prompt", payload.get("generalize_prompt"))
-        _append_if(argv, "--generalize-min-cluster",
-                   payload.get("generalize_min_cluster"))
     # Empirical-validation pass also defaults ON; flip the negative
     # flag when the form explicitly opts out.
     if payload.get("validate") is False:
@@ -314,6 +308,46 @@ def build_relations_argv(payload: Dict[str, Any]) -> List[str]:
 
 def build_relation_report_argv(run_dir: Path) -> List[str]:
     return ["-m", "experiments.build_relation_report", str(run_dir)]
+
+
+def build_relation_detection_argv(payload: Dict[str, Any]) -> List[str]:
+    """Argv for ``experiments.run_relation_detection`` (Step 2).
+
+    Translates the UI launcher form into a CLI invocation. The payload's
+    ``discovery_run`` is the absolute path to a Step-1 run directory;
+    it's a positional arg to the script, so we append it directly.
+    """
+    discovery_run = payload.get("discovery_run")
+    if not discovery_run:
+        raise ValueError("relation_detection: 'discovery_run' is required")
+    argv: List[str] = [
+        "-m", "experiments.run_relation_detection", str(discovery_run),
+    ]
+    _append_if(argv, "--config", payload.get("config"))
+    _append_if(argv, "--output-dir", payload.get("output_dir"))
+    _append_if(argv, "--run-name", payload.get("run_name"))
+    _append_if(argv, "--error-types", payload.get("error_types"))
+    _append_if(argv, "--review-filter", payload.get("review_filter"))
+    _append_if(argv, "--model", payload.get("model"))
+    _append_if(argv, "--reasoning-effort", payload.get("reasoning_effort"))
+    _append_if(argv, "--concurrency", payload.get("concurrency"))
+    _append_if(argv, "--violations-min-pass-rate",
+               payload.get("violations_min_pass_rate"))
+    _append_if(argv, "--violations-max-pass-rate",
+               payload.get("violations_max_pass_rate"))
+    _append_if(argv, "--violations-max-per-rule",
+               payload.get("violations_max_per_rule"))
+    _append_if(argv, "--violations-min-confidence",
+               payload.get("violations_min_confidence"))
+    _append_if(argv, "--llm-detect-max-rows",
+               payload.get("llm_detect_max_rows"))
+    _append_if(argv, "--llm-detect-max-per-rule",
+               payload.get("llm_detect_max_per_rule"))
+    if payload.get("no_llm_detect"):
+        argv.append("--no-llm-detect")
+    if payload.get("no_synthesis"):
+        argv.append("--no-synthesis")
+    return argv
 
 
 def build_relation_validation_argv(
@@ -463,6 +497,7 @@ _CURATE_FIELDS: List[tuple] = [
     ("max_cell_chars",            "--max-cell-chars"),
     ("max_cell_words",            "--max-cell-words"),
     ("max_oversized_row_ratio",   "--max-oversized-row-ratio"),
+    ("dedupe_across_groups",      "--dedupe-across-groups"),
 ]
 
 # Legacy payload keys that callers may still send. We translate them onto

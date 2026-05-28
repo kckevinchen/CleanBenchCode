@@ -67,18 +67,26 @@ system: >
   available; use it to gather evidence whenever you need to confirm
   a claim. You may call the tool multiple times. Never invent facts
   and never cite a URL you did not actually retrieve. Quote evidence
-  verbatim from the pages the tool returns. If the evidence is
-  insufficient or contradictory, say so by returning
+  verbatim from the pages the tool returns. Whenever the tool
+  returns a result, it appends an inline citation marker of the
+  form ``【N:M†source】`` to the snippet; you MUST keep these
+  markers verbatim and place them INSIDE the JSON string values
+  (typically at the end of each sentence in ``reasoning`` and at
+  the end of each ``quote`` string in ``evidence``). Stripping the
+  markers causes the runtime to drop every URL you cited. If the
+  evidence is insufficient or contradictory, say so by returning
   verdict="ambiguous" - do NOT guess. You MUST always reply with one
   strictly valid JSON object matching the OUTPUT FORMAT below, with
-  no markdown fences and no prose outside the JSON payload. This is
-  non-negotiable: even if you decide not to call the Web Search tool
-  (e.g. the value looks like a private individual's name with no
-  authoritative public source, the request seems out of scope, or
-  any other reason), you MUST STILL respond with a JSON object whose
-  ``verdict`` is "ambiguous" and whose ``reasoning`` field briefly
-  states why no web check was attempted. Returning an empty message
-  or refusing to answer is a protocol violation.
+  no markdown fences and no prose outside the JSON payload (markers
+  inside string values are part of the JSON payload and are
+  required, not prose). This is non-negotiable: even if you decide
+  not to call the Web Search tool (e.g. the value looks like a
+  private individual's name with no authoritative public source,
+  the request seems out of scope, or any other reason), you MUST
+  STILL respond with a JSON object whose ``verdict`` is "ambiguous"
+  and whose ``reasoning`` field briefly states why no web check was
+  attempted. Returning an empty message or refusing to answer is a
+  protocol violation.
 
 user_template: |
   CONTEXT
@@ -133,6 +141,38 @@ user_template: |
   * Cite the URL exactly as the Web Search tool returned it; do not
     invent or paraphrase URLs. The verifier rejects any citation
     whose URL the runtime did not record as a Web Search source.
+
+  CITATION MARKERS (REQUIRED)
+  ---------------------------
+  The Web Search tool inserts inline citation markers of the form
+  ``【N:M†source】`` (or sometimes ``[N:M]``) right after each fact
+  it returns. These markers are how the runtime tracks which URLs
+  you actually saw - when you strip them, the runtime cannot attach
+  any URL annotations and your evidence will be silently dropped by
+  the verifier.
+
+  You MUST therefore:
+
+  * Preserve every ``【…†source】`` marker the tool emitted; do NOT
+    rewrite, renumber, translate, or remove them.
+  * Place the markers INSIDE the values of the JSON object - in
+    particular at the end of each sentence in ``reasoning`` and at
+    the end of each ``quote`` string in the ``evidence`` array that
+    cites that source. The markers MUST appear inside the JSON
+    string values (not between fields). Markers inside string values
+    are still valid JSON.
+  * Keep at least one marker per cited URL in ``reasoning``, even
+    when ``evidence`` is empty (e.g. for a "false_positive" verdict
+    you reached by checking authoritative pages but chose not to
+    quote). Without markers, the verifier cannot record that you
+    looked at those pages.
+
+  Example reasoning string (markers preserved verbatim from the
+  tool's response):
+    "Acme Corp's official site lists the address as 123 Main
+    St【3:0†source】, matching the registered company filing
+    【3:1†source】. The suspect value is therefore correct."
+
   * Confidence calibration:
       Verdict = "confirmed_error" (your certainty the suspect is wrong):
         0.9 - 1.0  multiple independent authoritative sources agree

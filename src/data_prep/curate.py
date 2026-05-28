@@ -5,7 +5,9 @@ This module is the unified replacement for the old ``curate_tables`` and
 
 **Flat layout** (e.g. ``data/Excel50KTables/*.csv``)
     A directory of independent CSVs. Each CSV is its own "target".
-    Output is written flat: ``<output-dir>/<name>.csv``.
+    Output is written nested under the file's group id (the stem,
+    or for PBI-style ``<workbook>_<table>.csv`` files the prefix
+    before the first ``_``): ``<output-dir>/<group>/<name>.csv``.
 
 **Grouped layout** (e.g. ``data/bing21_grouped/<workbook>.xlsx/*.csv``)
     A directory of *subdirectories*, where each subdirectory holds
@@ -13,6 +15,10 @@ This module is the unified replacement for the old ``curate_tables`` and
     workbook is accepted only if **every** one of its tables passes
     the gates (all-or-nothing per workbook). Output is written
     nested: ``<output-dir>/<workbook>/<name>.csv``.
+
+In both layouts every kept CSV ends up inside a workbook-style
+subdirectory, which is the format the labeling UI expects when it
+resolves source files via ``data/*/<workbook>/<sheet>``.
 
 The layout is auto-detected from the source directory structure: if
 any non-hidden, non-underscored entry is a subdirectory we treat the
@@ -74,8 +80,8 @@ Usage
 Outputs
 -------
 
-* Per-table CSVs written under ``<output-dir>/`` (flat) or
-  ``<output-dir>/<workbook>/`` (grouped).
+* Per-table CSVs written under ``<output-dir>/<group>/`` (one
+  workbook-style subdir per group, even in flat mode).
 * ``<output-dir>/manifest.json`` records the layout, all filter
   parameters, every selected target, and the per-target reject
   reasons (bucketed for grouped mode).
@@ -89,12 +95,13 @@ import json
 import logging
 import random
 import re
+import shutil
 import sys
 import unicodedata
 from collections import defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pandas as pd
 
@@ -658,50 +665,94 @@ def _assert_no_empty_cells(df: pd.DataFrame, path: Path) -> None:
 
 
 def _spreadsheet_id(name: str) -> str:
-    """Everything before the first underscore in the file stem.
+    """Return the file stem; kept for back-compat with external callers.
 
-    Used as a grouping key for **flat** corpora that follow the
-    ``<workbook-id>_<table-name>.csv`` naming convention (e.g. PBI).
-    Files without an underscore become their own group of size 1.
+    Earlier versions of this module collapsed flat CSVs that shared an
+    underscore-separated prefix into one group (a PBI convention). That
+    heuristic mis-grouped corpora whose filenames happen to share a
+    common prefix (e.g. reconstructed Excel dumps whose names all start
+    with ``d_...``), causing every CSV to land in one giant group.
+    Flat layouts now treat each CSV as its own group; if you want
+    PBI-style cohorting, pre-group the CSVs into subdirectories first
+    (see ``src.data_prep.bing21_group_by_workbook``).
     """
-    stem = Path(name).stem
-    return stem.split("_", 1)[0] if "_" in stem else stem
+    return Path(name).stem
+
+
+def _is_visible_dir(p: Path) -> bool:
+    return (
+        p.is_dir()
+        and not p.name.startswith(".")
+        and not p.name.startswith("_")
+    )
+
+
+def _list_csvs(d: Path) -> List[Path]:
+    return sorted(p for p in d.iterdir() if p.is_file() and p.suffix.lower() == ".csv")
 
 
 def _scan(source_dir: Path) -> Tuple[Dict[str, List[Path]], str]:
     """Group CSVs from ``source_dir`` and report the detected layout.
 
     Returns ``(groups, layout)`` where layout is ``"grouped"`` (when the
-    source dir contains workbook subdirectories) or ``"flat"`` (when it
-    contains CSVs directly).
+    source dir contains workbook subdirectories with CSVs inside) or
+    ``"flat"`` (when it contains CSVs directly).
 
-    * Grouped layout: ``<source-dir>/<workbook-dir>/*.csv``. Group key
-      is the workbook directory name; subdirectories whose names start
-      with ``.`` or ``_`` are skipped (e.g. ``_unmatched/``,
-      ``.lang_cache/``).
-    * Flat layout: ``<source-dir>/<file>.csv``. CSVs that share an
-      underscore-separated prefix are co-grouped (PBI convention);
-      CSVs without an underscore become their own group of size 1.
+    * **Grouped layout** (``<source-dir>/<workbook-dir>/*.csv``): each
+      visible subdirectory becomes a group keyed by its name.
+      Subdirectories whose names start with ``.`` or ``_`` are skipped
+      (e.g. ``_unmatched/``, ``.lang_cache/``).
+    * **Flat layout** (``<source-dir>/*.csv``): each CSV becomes its
+      own group of size 1 (keyed by its stem). No prefix-based
+      collapsing — pre-group via subdirectories if cohorting is needed.
+    * **Wrapper-subdir flat** (``<source-dir>/<inner>/*.csv`` where the
+      source dir has exactly one visible subdir that itself holds only
+      CSVs): treated as flat with the inner dir as the effective root,
+      so corpora like ``data/Gov/data/*.csv`` work out of the box
+      without manual unwrapping.
+
+    Mixed layouts (subdirs *and* CSVs at the top level) use grouped
+    mode and any top-level CSVs are placed in a synthetic ``_loose``
+    group keyed by file stem (so they're not silently dropped).
     """
     groups: Dict[str, List[Path]] = defaultdict(list)
     entries = list(source_dir.iterdir())
-    pre_grouped = any(
-        p.is_dir() and not p.name.startswith(".") and not p.name.startswith("_")
-        for p in entries[:32]
-    )
-    if pre_grouped:
-        for d in entries:
-            if not d.is_dir():
-                continue
-            if d.name.startswith(".") or d.name.startswith("_"):
-                continue
-            for p in sorted(d.iterdir()):
-                if p.is_file() and p.suffix.lower() == ".csv":
-                    groups[d.name].append(p)
+    visible_subdirs = [p for p in entries if _is_visible_dir(p)]
+    top_level_csvs = [p for p in entries if p.is_file() and p.suffix.lower() == ".csv"]
+
+    # Wrapper-subdir flat: exactly one visible subdir whose *name* is a
+    # generic container like ``data/`` (commonly produced when a corpus
+    # tarball ships its CSVs under a wrapper directory, e.g.
+    # ``Gov/data/*.csv``). The inner dir must hold CSVs and no further
+    # subdirs. We deliberately key off the name — a single-workbook
+    # grouped corpus (``corpus/workbook_x/*.csv``) is structurally
+    # identical but semantically different.
+    _WRAPPER_NAMES = {"data", "csv", "csvs", "tables"}
+    if (
+        not top_level_csvs
+        and len(visible_subdirs) == 1
+        and visible_subdirs[0].name.lower() in _WRAPPER_NAMES
+    ):
+        inner = visible_subdirs[0]
+        inner_csvs = _list_csvs(inner)
+        inner_has_subdirs = any(_is_visible_dir(p) for p in inner.iterdir())
+        if inner_csvs and not inner_has_subdirs:
+            for p in inner_csvs:
+                groups[p.stem].append(p)
+            return dict(groups), "flat"
+
+    if visible_subdirs:
+        for d in visible_subdirs:
+            for p in _list_csvs(d):
+                groups[d.name].append(p)
+        # Loose CSVs sitting alongside the workbook dirs: keep them as
+        # their own singleton groups rather than silently dropping.
+        for p in top_level_csvs:
+            groups[p.stem].append(p)
         return dict(groups), "grouped"
-    for p in entries:
-        if p.is_file() and p.suffix.lower() == ".csv":
-            groups[_spreadsheet_id(p.name)].append(p)
+
+    for p in top_level_csvs:
+        groups[p.stem].append(p)
     return dict(groups), "flat"
 
 
@@ -982,6 +1033,7 @@ def curate(
     max_cell_words: Optional[int] = 40,
     max_oversized_row_ratio: float = 0.1,
     dedupe_schema_within_group: bool = True,
+    dedupe_across_groups: str = "schema+content",
 ) -> Dict[str, Any]:
     """Curate up to ``num_targets`` source units (CSVs or workbooks).
 
@@ -1029,6 +1081,10 @@ def curate(
         raise ValueError(
             "language_check must be one of: off, script, langdetect, lingua, llm"
         )
+    if dedupe_across_groups not in ("off", "schema", "content", "schema+content"):
+        raise ValueError(
+            "dedupe_across_groups must be one of: off, schema, content, schema+content"
+        )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     if language_cache_dir is None:
@@ -1070,6 +1126,65 @@ def curate(
     skipped_examples: List[ScanSkip] = []
     scanned = 0
 
+    # Cross-group dedup state. Forked-repo corpora (e.g.
+    # ``curated_git_500``) often contain many groups whose tables are
+    # byte-identical Spark partition outputs under different group
+    # ids. Per-workbook dedup can't catch that because each fork lives
+    # in its own subdir. We track per-table signatures of every
+    # accepted group and skip later groups whose surviving tables all
+    # collide. Modes:
+    #   * ``schema``         - cleaned column-name tuple
+    #   * ``content``        - schema + BLAKE2 of the cleaned CSV body
+    #   * ``schema+content`` - union: drop on EITHER a schema OR a
+    #                          content hit. Catches both forked-repo
+    #                          near-dups (same header, drifted rows)
+    #                          AND renamed-header byte-identical dups.
+    seen_schema_sigs: Dict[frozenset, str] = {}
+    seen_content_sigs: Dict[str, str] = {}
+
+    def _normalize_col(name: object) -> str:
+        # Order-insensitive, normalization-tolerant column key. We
+        # lowercase and strip every non-alphanumeric so trivial
+        # rewrites like ``user_id`` / ``User ID`` / ``userid`` / ``User-Id``
+        # collapse to the same token. Columns whose entire name is
+        # punctuation/whitespace fall back to the raw stripped string
+        # so they don't collide as empty strings.
+        s = str(name).strip().lower()
+        norm = re.sub(r"[^0-9a-z]+", "", s)
+        return norm or s
+
+    def _schema_sig(ev: "_TableEval") -> frozenset:
+        return frozenset(_normalize_col(c) for c in ev.clean_df.columns)
+
+    def _content_sig(ev: "_TableEval") -> str:
+        body = ev.clean_df.to_csv(index=False).encode("utf-8", errors="replace")
+        return hashlib.blake2b(body, digest_size=16).hexdigest()
+
+    def _dedup_hit(ev: "_TableEval") -> Optional[str]:
+        """Return the group id this table collides with, or None."""
+        if dedupe_across_groups == "off":
+            return None
+        if dedupe_across_groups in ("schema", "schema+content"):
+            prev = seen_schema_sigs.get(_schema_sig(ev))
+            if prev is not None:
+                return prev
+        if dedupe_across_groups in ("content", "schema+content"):
+            prev = seen_content_sigs.get(_content_sig(ev))
+            if prev is not None:
+                return prev
+        return None
+
+    def _record_sigs(ev: "_TableEval", sid: str) -> None:
+        if dedupe_across_groups == "off":
+            return
+        sch = _schema_sig(ev)
+        if sch not in seen_schema_sigs:
+            seen_schema_sigs[sch] = sid
+        if dedupe_across_groups in ("content", "schema+content"):
+            con = _content_sig(ev)
+            if con not in seen_content_sigs:
+                seen_content_sigs[con] = sid
+
     eval_kwargs = dict(
         min_rows=min_rows, max_rows=max_rows,
         min_cols=min_columns, max_cols=max_columns,
@@ -1102,12 +1217,14 @@ def curate(
         paths = sorted(groups[sid])
 
         # Decide output paths up front so we can honour --no-overwrite cheaply.
-        if layout == "grouped":
-            out_subdir = output_dir / sid
-            out_paths = [out_subdir / p.name for p in paths]
-        else:
-            out_subdir = output_dir
-            out_paths = [output_dir / paths[0].name]
+        # Both flat and grouped layouts now write under a per-group subdir
+        # (``<output_dir>/<sid>/<file>.csv``). For flat singletons this means
+        # the file lives at ``<output_dir>/<stem>/<stem>.csv``; that workbook-
+        # style nesting is what the labeling UI globs for via
+        # ``data/*/<workbook>/<sheet>``, so curated outputs from any source
+        # layout are picked up uniformly.
+        out_subdir = output_dir / sid
+        out_paths = [out_subdir / p.name for p in paths]
         if not overwrite and any(p.exists() for p in out_paths):
             skip_reasons["output_exists"] += 1
             if len(skipped_examples) < 20:
@@ -1117,7 +1234,7 @@ def curate(
         # Evaluate every table; in grouped mode any reject kills the workbook.
         evals: List[Tuple[Path, _TableEval]] = []
         reject_reason: Optional[str] = None
-        seen_schemas: Dict[Tuple[str, ...], str] = {}
+        seen_schemas: Dict[frozenset, str] = {}
         dropped_dupes: List[Tuple[str, str]] = []  # (dropped_name, kept_name)
         for p in paths:
             ev, reason = _evaluate_table(p, **eval_kwargs)
@@ -1125,7 +1242,10 @@ def curate(
                 reject_reason = f"{p.name}: {reason}"
                 break
             if dedupe_schema_within_group and layout == "grouped" and len(paths) > 1:
-                schema_key = tuple(str(c) for c in ev.clean_df.columns)
+                # Same normalization as the cross-group dedup so the
+                # two layers behave consistently. Reordered or
+                # cosmetically-renamed columns count as duplicates.
+                schema_key = frozenset(_normalize_col(c) for c in ev.clean_df.columns)
                 prev = seen_schemas.get(schema_key)
                 if prev is not None:
                     dropped_dupes.append((p.name, prev))
@@ -1166,15 +1286,47 @@ def curate(
         if dropped_dupes:
             skip_reasons["duplicate_schema_within_group"] += len(dropped_dupes)
 
+        # Cross-group dedup. Drop tables whose signature was already
+        # contributed by an earlier accepted group; if the group falls
+        # below ``min_tables`` afterwards (grouped layout) or loses its
+        # only table (flat layout), skip the whole group. The signature
+        # set is updated AFTER acceptance so two simultaneously-eligible
+        # near-duplicates don't both survive.
+        cross_dupes: List[Tuple[str, str]] = []  # (dropped_name, kept_group)
+        if dedupe_across_groups != "off":
+            kept: List[Tuple[Path, _TableEval]] = []
+            for src_path, ev in evals:
+                hit = _dedup_hit(ev)
+                if hit is not None:
+                    cross_dupes.append((src_path.name, hit))
+                    logger.debug(
+                        "  cross-group dedup %s/%s: collides with group %s (mode=%s)",
+                        sid, src_path.name, hit, dedupe_across_groups,
+                    )
+                    continue
+                kept.append((src_path, ev))
+            if cross_dupes:
+                skip_reasons["duplicate_across_groups"] += len(cross_dupes)
+            evals = kept
+            min_required = min_tables if layout == "grouped" else 1
+            if not evals or len(evals) < min_required:
+                reason = (
+                    f"all_tables_duplicate_across_groups: "
+                    f"kept {len(evals)} < required {min_required} "
+                    f"(dropped {len(cross_dupes)} cross-group duplicate(s))"
+                )
+                skip_reasons["all_tables_duplicate_across_groups"] += 1
+                if len(skipped_examples) < 20:
+                    skipped_examples.append(ScanSkip(sid, reason))
+                logger.debug("skip %s: %s", sid, reason)
+                continue
+
         # Write the (cleaned) outputs. Re-derive out_paths from the surviving
         # evals so that schema-dedup drops are honoured cleanly.
         out_subdir.mkdir(parents=True, exist_ok=True)
         table_meta: List[Dict[str, Any]] = []
         for src_path, ev in evals:
-            if layout == "grouped":
-                out_path = out_subdir / src_path.name
-            else:
-                out_path = output_dir / src_path.name
+            out_path = out_subdir / src_path.name
             _assert_no_empty_cells(ev.clean_df, out_path)
             ev.clean_df.to_csv(out_path, index=False)
             try:
@@ -1195,6 +1347,10 @@ def curate(
                 "empty_ratio_original": ev.empty_ratio_original,
                 "sampled": ev.sampled,
             })
+            # Record the signature only AFTER we commit to keeping
+            # this group, so a later collision is judged against the
+            # actually-written corpus.
+            _record_sigs(ev, sid)
 
         selected.append({
             "id": sid,
@@ -1204,11 +1360,44 @@ def curate(
                 {"filename": dropped, "duplicate_of": kept}
                 for dropped, kept in dropped_dupes
             ],
+            "dropped_duplicate_across_groups": [
+                {"filename": dropped, "duplicate_of_group": kept_group}
+                for dropped, kept_group in cross_dupes
+            ],
         })
         logger.info(
             "  selected %s (%d table(s), %d row(s) total)",
             sid, len(table_meta), sum(t["rows"] for t in table_meta),
         )
+
+    # Prune orphan group dirs. When ``--overwrite`` is on we treat the
+    # output_dir as authoritative for the current manifest: any subdir
+    # left over from a previous run that isn't in ``selected`` is a
+    # stale leftover (e.g. an old curation that picked a slightly
+    # different sample) and would otherwise show up to downstream
+    # consumers as a phantom 501st group. Removing them keeps the
+    # on-disk corpus in sync with the manifest. With overwrite=False
+    # we preserve everything (the prior behaviour).
+    pruned_orphans: List[str] = []
+    if overwrite:
+        kept_ids = {g["id"] for g in selected}
+        for entry in output_dir.iterdir():
+            if not entry.is_dir() or entry.name.startswith("."):
+                continue
+            if entry.name in kept_ids:
+                continue
+            try:
+                shutil.rmtree(entry)
+                pruned_orphans.append(entry.name)
+            except OSError as exc:  # noqa: BLE001
+                logger.warning(
+                    "failed to prune orphan group dir %s: %s", entry, exc,
+                )
+        if pruned_orphans:
+            logger.info(
+                "pruned %d orphan group dir(s) left from a previous run",
+                len(pruned_orphans),
+            )
 
     manifest = {
         "source_dir": str(source_dir),
@@ -1239,10 +1428,12 @@ def curate(
             "dedupe_schema_within_group": (
                 dedupe_schema_within_group if layout == "grouped" else None
             ),
+            "dedupe_across_groups": dedupe_across_groups,
         },
         "skip_reason_counts": dict(skip_reasons),
         "skipped_examples": [asdict(s) for s in skipped_examples],
         "selected": selected,
+        "pruned_orphan_groups": pruned_orphans,
     }
     (output_dir / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2),
@@ -1346,6 +1537,27 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         action="store_false",
         help="Disable per-workbook schema deduplication.",
     )
+    p.add_argument(
+        "--dedupe-across-groups",
+        choices=("off", "schema", "content", "schema+content"),
+        default="schema+content",
+        help=(
+            "Drop tables whose signature was already contributed by an "
+            "earlier accepted group. 'schema' matches on a fuzzy "
+            "column-name signature: each header is lowercased and "
+            "stripped of non-alphanumerics, then compared as an "
+            "*unordered set* - so reordered columns and cosmetic "
+            "renames ('user_id' / 'User ID' / 'userid') collapse to "
+            "the same key. Catches forked-repo / Spark-partition "
+            "duplicates that share headers. 'content' hashes the "
+            "cleaned CSV body - catches byte-identical tables even "
+            "after rename. 'schema+content' (default) drops on EITHER "
+            "hit: the most aggressive setting, recommended for forked-"
+            "repo corpora like curated_git_500. 'off' disables. If "
+            "all of a candidate group's surviving tables collide, the "
+            "whole group is skipped."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -1381,6 +1593,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         max_cell_words=args.max_cell_words or None,
         max_oversized_row_ratio=args.max_oversized_row_ratio,
         dedupe_schema_within_group=args.dedupe_schema_within_group,
+        dedupe_across_groups=args.dedupe_across_groups,
     )
     if manifest["num_targets_selected"] == 0:
         print(

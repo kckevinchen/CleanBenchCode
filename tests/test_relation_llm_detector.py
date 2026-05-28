@@ -1,4 +1,4 @@
-"""Tests for ``src.core.relation_llm_detector``.
+"""Tests for ``src.core.relations.llm_detector``.
 
 Cover:
 
@@ -10,7 +10,9 @@ Cover:
   ``RelationViolation`` records with ``detection_method ==
   "llm_table_scan"`` and the LLM's reason copied verbatim.
 * ``detect_violations_for_relations`` walks the verifications dict
-  and only invokes the LLM for ``verifiable=False`` rules.
+  and only invokes the LLM for rules the code-path validator could
+  not produce a pass-rate for: refused (``verifiable=False``) and
+  errored verifications.
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ import json
 import pandas as pd
 import pytest
 
-from src.core.relation_llm_detector import (
+from src.core.relations.llm_detector import (
     _parse_violations_response,
     detect_violations_for_relations,
     detect_violations_llm,
@@ -60,7 +62,7 @@ class _StubLLM:
 
 PROMPT_CFG = {
     "system_prompt": "you are a stub",
-    "user_template": "scan {source} for {predicate}\n{table_md}",
+    "user_template": "scan {source} for {predicate}\nrefusal: {refusal_reason}\n{table_md}",
     "reasoning_effort": "low",
 }
 
@@ -268,10 +270,13 @@ class TestDetectViolationsLlm:
 
 
 class TestDetectViolationsForRelations:
-    def test_only_invokes_for_non_code_verifiable(
+    def test_only_invokes_for_code_refused(
         self, freeform_relation, freeform_frame,
     ) -> None:
-        # Two relations: one is code-verifiable (skipped), one isn't.
+        # Two relations: a code-verified rule (handled by the
+        # code-violation compiler, skipped here) and a code-refused
+        # rule -- the LLM declined to write check(df), so the
+        # dispatcher hands the rule to the whole-table LLM scan.
         code_rel = {
             "species_key": "code_rule",
             "source": "products.csv",
@@ -281,8 +286,17 @@ class TestDetectViolationsForRelations:
             "confidence": "high",
         }
         verifications = {
-            "code_rule": {"verifiable": True, "code": "def check(df): return df['color'].notna()"},
-            "ft_color_name": {"verifiable": False, "reason": "naming convention"},
+            "code_rule": {
+                "verifier_kind": "code",
+                "verifiable": True,
+                "code": "def check(df): return df['color'].notna()",
+                "pass_rate": 0.95,
+            },
+            "ft_color_name": {
+                "verifier_kind": "code",
+                "verifiable": False,
+                "reason": "free-text rule; code refused",
+            },
         }
         stub = _StubLLM([
             json.dumps({
@@ -296,11 +310,14 @@ class TestDetectViolationsForRelations:
             source_frames={"products.csv": freeform_frame},
             llm=stub, model="gpt-stub", prompt_cfg=PROMPT_CFG,
         )
-        # Only the freeform relation produced a violation; the code
-        # relation was filtered upstream of any LLM call.
+        # Only the code-refused relation produced a violation; the
+        # code-verified one is the code compiler's job.
         assert len(out) == 1
         assert out[0].relation_species_key == "ft_color_name"
         assert len(stub.calls) == 1
+        # The validator's refusal reason should be forwarded to the
+        # LLM prompt.
+        assert "free-text rule; code refused" in stub.calls[0]["prompt"]
 
     def test_skips_relations_without_verification(self, freeform_relation, freeform_frame) -> None:
         stub = _StubLLM([])  # would raise if called
@@ -326,28 +343,104 @@ class TestDetectViolationsForRelations:
         stub = _StubLLM([])
         out = detect_violations_for_relations(
             [rel],
-            verifications={"mt_rule": {"verifiable": False, "reason": "needs sheets"}},
+            verifications={"mt_rule": {
+                "verifier_kind": "code",
+                "verifiable": False,
+                "reason": "needs sheets",
+            }},
             source_frames={"products.csv": freeform_frame},
             llm=stub, model="gpt-stub", prompt_cfg=PROMPT_CFG,
         )
         assert out == []
         assert stub.calls == []
 
-    def test_skips_relations_with_verifier_error(self, freeform_relation, freeform_frame) -> None:
-        stub = _StubLLM([])
+    def test_routes_errored_verifications_to_llm_scan(
+        self, freeform_relation, freeform_frame,
+    ) -> None:
+        # Recall-focused behaviour: a verifier error leaves the rule
+        # without a pass-rate signal, but the rule itself may still be
+        # real. Instead of dropping silently, the dispatcher now routes
+        # errored rules through the LLM table scan so any violators it
+        # finds reach the labelling queue. The verifier error string is
+        # forwarded as the refusal_reason in the prompt.
+        stub = _StubLLM([
+            json.dumps({
+                "applicable": True,
+                "violations": [{"row": 1, "reason": "casing differs"}],
+            })
+        ])
         out = detect_violations_for_relations(
             [freeform_relation],
             verifications={
                 "ft_color_name": {
+                    "verifier_kind": "code",
                     "verifiable": False,
-                    "error": "sandbox: NameError",
+                    "error": "sandbox: ValueError",
                     "reason": "(unused)",
                 }
             },
             source_frames={"products.csv": freeform_frame},
             llm=stub, model="gpt-stub", prompt_cfg=PROMPT_CFG,
         )
-        # Verifier-error rules don't get LLM detection (unreliable
-        # signal that the rule even makes sense).
+        assert len(out) == 1
+        assert out[0].relation_species_key == "ft_color_name"
+        assert len(stub.calls) == 1
+        # The verifier's error string must reach the prompt so the LLM
+        # knows the rule is unvalidated.
+        assert "sandbox: ValueError" in stub.calls[0]["prompt"]
+
+    def test_errored_code_path_routed_to_llm_scan(
+        self, freeform_relation, freeform_frame,
+    ) -> None:
+        # Symmetric fallback for the code path: when the LLM-written
+        # check(df) raised in the sandbox, the deterministic compiler
+        # cannot proceed. The dispatcher routes the rule to the LLM
+        # scan so the labelling queue still sees it.
+        stub = _StubLLM([
+            json.dumps({
+                "applicable": True,
+                "violations": [{"row": 2, "reason": "naming drift"}],
+            })
+        ])
+        out = detect_violations_for_relations(
+            [freeform_relation],
+            verifications={
+                "ft_color_name": {
+                    "verifier_kind": "code",
+                    "verifiable": True,
+                    "code": "def check(df): return df['missing'].notna()",
+                    "error": "sandbox: KeyError: 'missing'",
+                    "pass_rate": None,
+                }
+            },
+            source_frames={"products.csv": freeform_frame},
+            llm=stub, model="gpt-stub", prompt_cfg=PROMPT_CFG,
+        )
+        assert len(out) == 1
+        assert out[0].relation_species_key == "ft_color_name"
+        assert "sandbox: KeyError" in stub.calls[0]["prompt"]
+
+    def test_legacy_llm_sample_records_are_ignored(
+        self, freeform_relation, freeform_frame,
+    ) -> None:
+        # Old runs may have ``verifier_kind="llm_sample"`` records on
+        # disk. The current pipeline only runs the code-path verifier,
+        # so those legacy records are skipped silently rather than
+        # crashing or being re-scanned.
+        stub = _StubLLM([])  # would raise if called
+        out = detect_violations_for_relations(
+            [freeform_relation],
+            verifications={
+                "ft_color_name": {
+                    "verifier_kind": "llm_sample",
+                    "verifiable": True,
+                    "pass_rate": 0.9,
+                    "n_violating": 3,
+                    "reason": "legacy artifact",
+                }
+            },
+            source_frames={"products.csv": freeform_frame},
+            llm=stub, model="gpt-stub", prompt_cfg=PROMPT_CFG,
+        )
         assert out == []
         assert stub.calls == []

@@ -68,18 +68,76 @@ system_prompt: |
     * Reference columns by their EXACT header strings via
       ``df["col"]``. Header strings may contain spaces, punctuation,
       or unicode - use bracket indexing, not attribute access.
-    * DO NOT NORMALIZE values before comparing. Do not strip
-      whitespace, change case, or coerce types (no ``.astype(...)``,
-      no ``pd.to_numeric``, no ``.str.strip()`` / ``.str.lower()``,
-      no rounding, no date re-parsing). Compare cells as-is. Two
-      cells that "look the same except for whitespace or casing"
-      are DIFFERENT for this check - that's the inconsistency we
-      want to surface.
+    * NORMALIZATION POLICY -- depends on what the rule checks:
+
+      (a) VALUE-EQUALITY / INCONSISTENCY rules. These flag cells
+      that LOOK alike but DIFFER ("NYC" vs "nyc", "10001" vs
+      "10001 "). Applies to ``fd_violation``, ``inconsistency``,
+      ``semantic_incompatibility``, ``case_inconsistency``,
+      ``whitespace_anomaly``, ``typo``, ``abbreviation`` and any
+      rule whose predicate compares cells for SAME-NESS without
+      arithmetic. Here: DO NOT normalize. Do not strip whitespace,
+      change case, or coerce types. Compare cells as-is - two cells
+      that differ only in casing or whitespace are DIFFERENT for
+      this check; that's the inconsistency we want to surface.
+
+      (b) ARITHMETIC / FORMULA rules. These check that columns
+      satisfy a NUMERIC or DATE-ARITHMETIC relationship
+      (``Total == Gold + Silver + Bronze``,
+      ``EndDate - StartDate == 13 days``,
+      ``Cost >= Students * 25.9``,
+      ``ratio == col_a / col_b``). Applies to
+      ``row_calculation_inconsistency``,
+      ``string_calculation_inconsistency``, and any rule whose
+      ``executable`` does arithmetic, comparison, or date math.
+      Here: COERCION IS REQUIRED. The columns are typically stored
+      as strings ("36" instead of 36) because the table came from a
+      CSV; you MUST coerce them to verify the formula. Use:
+
+        * ``pd.to_numeric(df["col"].astype(str).str.strip(), errors="coerce")``
+          for numeric columns stored as strings (drops currency
+          symbols, thousands separators with a prior ``.str.replace``
+          if needed).
+        * ``pd.to_datetime(df["col"], errors="coerce")`` for date
+          columns stored as strings.
+
+      Rows where the coerced value is NaN/NaT (un-parseable input,
+      missing value) count as rule-not-applicable - return ``True``
+      for those rows (do not flag them).
+
+      If you cannot tell which case applies from the predicate +
+      error_type, look at the executable: any ``+``, ``-``, ``*``,
+      ``/``, ``<``, ``>``, ``>=``, ``<=``, ``.dt.``, ``timedelta``
+      means category (b); a bare equality or ``.duplicated()`` /
+      ``.nunique()`` means category (a).
+    * For ELEMENT-WISE STRING COMPARISON between TWO columns
+      (e.g. "does col_a start with col_b's first 3 chars?"),
+      pandas ``.str.startswith`` / ``.str.endswith`` /
+      ``.str.contains`` only accept a SCALAR pattern, not a Series -
+      using a Series raises ``TypeError: expected a string or
+      tuple, not Series``. For column-vs-column patterns use a
+      list-comprehension wrapped in a Series:
+
+          mask = pd.Series(
+              [a.startswith(b) for a, b in zip(
+                  df["col_a"].fillna("").astype(str),
+                  df["col_b"].fillna("").astype(str),
+              )],
+              index=df.index,
+          )
+
+      Or use ``df["col_a"].combine(df["col_b"], lambda a, b: ...)``.
+      Do NOT use ``np.char.find`` / ``np.char.startswith`` on
+      object-dtype Series - those numpy ufuncs require fixed-width
+      U/S string arrays and crash with ``UFuncTypeError`` on
+      object-dtype data.
     * For NaN handling: rows whose answer depends on a missing input
       should evaluate to ``True`` (rule not violated by absent
       data), unless the rule itself is a non-null constraint.
     * Vectorised ops only for any non-trivial size; no per-row
-      Python loops over big frames.
+      Python loops over big frames (a list-comprehension over two
+      Series of a few hundred rows for elementwise string ops is
+      fine).
 
   Rules for the REFUSAL path (verifiable=false):
     Use this when the rule cannot be checked deterministically against
@@ -97,6 +155,19 @@ system_prompt: |
     The reason field should be ONE short sentence naming the missing
     information. Do NOT use refusal as a way to dodge a rule that is
     in fact code-verifiable.
+
+    NOT VALID REFUSAL REASONS - these are all code-verifiable:
+      * "Columns are typed as strings, so numeric/date arithmetic
+        cannot be checked without coercion." -> Coerce with
+        ``pd.to_numeric`` / ``pd.to_datetime``; that's exactly what
+        the policy above tells you to do for arithmetic rules.
+      * "The values contain whitespace / currency symbols." -> Strip
+        them with ``.str.replace`` / ``.str.strip`` before coercion.
+      * "Some rows have NaN inputs." -> Return ``True`` for those
+        rows; the policy above covers that case.
+      * "The formula has rounding error / floating point noise." ->
+        Use ``np.isclose`` with a small tolerance
+        (e.g. ``rtol=1e-6, atol=1e-2`` for currency).
 
   Keep the function short. The cleanest one-liner that expresses the
   rule is almost always the right answer. If the predicate is "Email
@@ -136,11 +207,20 @@ user_template: |
   -------------------------------------------------------------------
   {sample_csv}
 
-  Use the dtypes above to choose the right pandas operation directly
-  (e.g. arithmetic on int/float columns, ``.str.contains`` only on
-  ``object`` columns, ``.dt.*`` only on datetime columns). Do not
-  coerce or normalize - the schema tells you what each column already
-  is.
+  Use the dtypes above to choose the right pandas operation. CSV
+  ingestion routinely stores everything as ``object`` (= Python
+  ``str``); apply the NORMALIZATION POLICY from the system prompt
+  accordingly:
+
+    * For value-equality / inconsistency rules: do NOT coerce -
+      compare cells as-is (whitespace/casing differences ARE the
+      inconsistency).
+    * For arithmetic / formula rules: COERCE with
+      ``pd.to_numeric(..., errors='coerce')`` or
+      ``pd.to_datetime(..., errors='coerce')`` even when the
+      schema says ``object`` - that's the expected workflow for
+      CSV-loaded numeric/date columns. Refusing because "columns
+      are typed as strings" is NOT a valid refusal reason.
 
   Decide: can this rule be tested by Python code over the listed
   columns? If yes, return verifiable=true with the appropriate

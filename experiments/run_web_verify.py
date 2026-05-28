@@ -48,6 +48,7 @@ from src.verifier import (  # noqa: E402
     GateConfig,
     Verifier,
     VerifierConfig,
+    build_agent_backend,
     classify_cluster,
     cluster_shape,
     should_verify,
@@ -78,13 +79,19 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--agent-endpoint", default=None,
-        help="Foundry project endpoint URL. Falls back to "
-             "AZURE_AGENTS_ENDPOINT.",
+        help="Foundry project endpoint URL. Pass a comma-separated list "
+             "to round-robin across multiple Foundry projects (e.g. "
+             "\"https://a/api/projects/p1,https://b/api/projects/p2\"). "
+             "Falls back to AZURE_AGENTS_ENDPOINTS (plural, comma-"
+             "separated) or AZURE_AGENTS_ENDPOINT (singular).",
     )
     p.add_argument(
         "--agent-id", default=None,
-        help="Foundry agent id (asst_...). Falls back to "
-             "AZURE_AGENTS_VERIFIER_AGENT_ID.",
+        help="Foundry agent id (asst_...). Pass a comma-separated list "
+             "with the SAME order/length as --agent-endpoint to pair "
+             "each endpoint with its agent. Falls back to "
+             "AZURE_AGENTS_VERIFIER_AGENT_IDS (plural) or "
+             "AZURE_AGENTS_VERIFIER_AGENT_ID (singular).",
     )
     p.add_argument("--model", default="gpt-5.2",
                    help="Stamped on each Verification record for traceability; "
@@ -330,9 +337,12 @@ def verify_single_cluster(
         )
 
     # Cache + agent backend. Same on-disk cache as the batch path so a
-    # manual verify benefits from any previous searches.
+    # manual verify benefits from any previous searches. We go through
+    # ``build_agent_backend`` so a multi-endpoint config (comma-
+    # separated CLI args / AZURE_AGENTS_ENDPOINTS env var) activates
+    # the round-robin dispatcher transparently.
     cache = WebCache(run_dir / "web_cache")
-    agent = AzureAgentBackend(
+    agent = build_agent_backend(
         endpoint=agent_endpoint or "",
         agent_id=agent_id or "",
         cache=cache,
@@ -471,7 +481,12 @@ def verify_run(
         len(eligible) - len(todo), len(todo),
     )
 
-    agent = AzureAgentBackend(
+    # ``build_agent_backend`` returns a single-endpoint AzureAgentBackend
+    # for legacy configs (one endpoint / one agent id) and a
+    # RoundRobinAgentBackend when multiple endpoints are configured
+    # via comma-separated CLI args or AZURE_AGENTS_ENDPOINTS /
+    # AZURE_AGENTS_VERIFIER_AGENT_IDS env vars.
+    agent = build_agent_backend(
         endpoint=agent_endpoint or "",
         agent_id=agent_id or "",
         cache=cache,

@@ -6,6 +6,11 @@
   <!-- Defense-in-depth: block inline-script regressions and third-party loads. -->
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'" />
   <title>Data cleaning - workbench</title>
+  <!-- Auto-zoom the workbench so the 3-pane layout stays usable on
+       low-resolution screens (1366x768 / 1280x720 laptops). Loads
+       synchronously BEFORE stylesheets so the first paint is at
+       the right scale (no FOUC). See viewport-zoom.js for the API. -->
+  <script src="./viewport-zoom.js"></script>
   <link rel="stylesheet" href="./styles.css" />
   <link rel="stylesheet" href="./runs.css" />
   <link rel="stylesheet" href="./compare.css" />
@@ -37,6 +42,25 @@
       <div class="panel-head">
         <h2>Runs <span class="muted" id="runs-count"></span></h2>
         <button id="refresh-runs">Refresh</button>
+      </div>
+      <div class="runs-toolbar" id="runs-toolbar" hidden>
+        <input
+          type="search"
+          id="runs-search"
+          class="runs-search"
+          placeholder="Search run id, name, model…"
+          aria-label="Filter runs"
+        />
+        <div class="runs-filter" role="tablist" aria-label="Star filter">
+          <button class="runs-chip active" data-filter="all" role="tab" aria-selected="true">All</button>
+          <button class="runs-chip" data-filter="starred" role="tab" aria-selected="false">★ Starred</button>
+          <button class="runs-chip" data-filter="unstarred" role="tab" aria-selected="false">Unstarred</button>
+        </div>
+        <div class="runs-bulk" id="runs-bulk" hidden>
+          <span class="runs-bulk-count" id="runs-bulk-count">0 selected</span>
+          <button id="runs-bulk-clear" class="ghost">Clear</button>
+          <button id="runs-bulk-delete" class="danger">Delete selected</button>
+        </div>
       </div>
       <div class="runs-list" id="runs-list">loading…</div>
     </section>
@@ -116,6 +140,12 @@
               <option value="medium">medium</option>
               <option value="high">high</option>
             </select>
+          </label>
+          <label class="checkbox">
+            <input id="synthesise-singletons" type="checkbox" checked />
+            <span>Synthesise single-detection clusters
+              <span class="muted">(LLM emits a canonical fix even when only one detector fired; uncheck for the cheaper multi-type-only behaviour)</span>
+            </span>
           </label>
         </fieldset>
 
@@ -206,7 +236,8 @@
           <label>
             <span>Stop scope <span class="muted">(what's an arm?)</span></span>
             <select id="gt-stop-scope">
-              <option value="">(default: column)</option>
+              <option value="">(default: auto)</option>
+              <option value="auto">auto&nbsp;&mdash; pick by selected error types</option>
               <option value="column">column&nbsp;&mdash; per (source, column, type)</option>
               <option value="dataset">dataset&nbsp;&mdash; one arm per type</option>
               <option value="csv">csv&nbsp;&mdash; per (source, type)</option>
@@ -507,32 +538,10 @@
           </label>
         </fieldset>
 
-        <!-- Generalization pass (parametric rewrite) -->
-        <fieldset id="rel-generalize-block" class="gt-block">
-          <legend>Generalization pass <span class="muted" style="font-weight: normal; font-size: 11px;">(parametric rewrite)</span></legend>
-          <p class="muted" style="grid-column: 1 / -1; margin: 0 0 4px 0; font-size: 12px;">
-            After aggregation, cluster value-keyed rule families (one
-            rule per literal cell value of a column) and ask the LLM
-            to rewrite each family as one parametric rule using
-            pseudo-functions like
-            <code>regex_extract</code> / <code>parse_int</code>.
-            Originals stay in <code>relations.jsonl</code> and surface
-            under expand on the parametric card.
-          </p>
-          <label class="checkbox" style="grid-column: 1 / -1;">
-            <input id="rel-generalize" type="checkbox" checked />
-            <span>Run generalization pass</span>
-          </label>
-          <label>
-            <span>Min cluster size <span class="muted">(skip families with fewer rules)</span></span>
-            <input id="rel-generalize-min-cluster" type="number" min="2" placeholder="2" />
-          </label>
-        </fieldset>
-
         <fieldset id="rel-validate-block" class="gt-block">
           <legend>Validation pass <span class="muted" style="font-weight: normal; font-size: 11px;">(empirical pass-rates)</span></legend>
           <p class="muted" style="grid-column: 1 / -1; margin: 0 0 4px 0; font-size: 12px;">
-            After aggregation/generalization, ask the LLM to write a
+            After aggregation, ask the LLM to write a
             <code>check(df) -> Series</code> function for each rule
             (or refuse when not code-verifiable). Functions run in a
             restricted sandbox; per-rule pass-rates and sample
@@ -546,8 +555,8 @@
           <label>
             <span>Layer <span class="muted">(which rules to score)</span></span>
             <select id="rel-validate-layer">
-              <option value="auto" selected>auto (highest available)</option>
-              <option value="generalized">generalized</option>
+              <option value="union" selected>union (aggregated + un-absorbed originals)</option>
+              <option value="auto">auto (aggregated, else originals)</option>
               <option value="aggregated">aggregated</option>
               <option value="originals">originals</option>
             </select>
@@ -589,14 +598,122 @@
         </div>
         <pre id="rel-cmd-preview" class="cmd-preview" hidden></pre>
       </form>
+
+      <!-- ========== Step 2: Detect violations from approved relations ========== -->
+      <div class="panel-head" style="margin-top: 24px; border-top: 1px solid var(--border, #2a2f3a); padding-top: 18px;">
+        <h2>Detect violations <span class="muted">step 2 · per-cell findings from approved relations</span></h2>
+        <div class="muted" style="font-size: 11.5px; max-width: 760px;">
+          Pick a previous discovery run, review its relations (Approve / Reject
+          on the run row), then launch detection here. The runner re-executes
+          each verifiable <code>check()</code> against the source data, runs an
+          LLM table-scan for the rest, clusters the violations, and writes a
+          new run dir in <code>clusters.json</code>/<code>issues.jsonl</code>
+          shape so the unified label page surfaces them like any other error
+          type.
+        </div>
+      </div>
+      <form id="rel-detect-form" class="launch-form discover">
+        <fieldset>
+          <legend>Source</legend>
+          <label>
+            <span>Discovery run <span class="muted">(Step 1 output)</span></span>
+            <select id="rd-discovery-run"><option value="">(loading…)</option></select>
+          </label>
+          <label>
+            <span>Review filter</span>
+            <select id="rd-review-filter">
+              <option value="approved" selected>approved only (recommended)</option>
+              <option value="approved+unreviewed">approved + unreviewed</option>
+              <option value="all">all (except rejected/cleared)</option>
+            </select>
+          </label>
+          <label>
+            <span>Error types <span class="muted">(comma-sep; empty = all)</span></span>
+            <input id="rd-error-types" type="text" placeholder="row_calculation_inconsistency,..." />
+          </label>
+        </fieldset>
+        <fieldset>
+          <legend>LLM</legend>
+          <label>
+            <span>Model</span>
+            <input id="rd-model" type="text" placeholder="(use config default)" />
+          </label>
+          <label>
+            <span>Reasoning effort</span>
+            <select id="rd-reasoning-effort">
+              <option value="">(default)</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high" selected>high</option>
+            </select>
+          </label>
+          <label>
+            <span>Concurrency</span>
+            <input id="rd-concurrency" type="number" min="1" placeholder="20" />
+          </label>
+        </fieldset>
+        <fieldset>
+          <legend>Filters &amp; toggles</legend>
+          <label>
+            <span>Min pass-rate <span class="muted">(drop hallucinated rules)</span></span>
+            <input id="rd-min-pass-rate" type="number" step="0.01" min="0" max="1" placeholder="0.85" />
+          </label>
+          <label>
+            <span>Max pass-rate <span class="muted">(drop fully-satisfied)</span></span>
+            <input id="rd-max-pass-rate" type="number" step="0.0001" min="0" max="1" placeholder="0.999999999" />
+          </label>
+          <label>
+            <span>Max violations / rule</span>
+            <input id="rd-max-per-rule" type="number" min="1" placeholder="200" />
+          </label>
+          <label>
+            <span>Min confidence</span>
+            <select id="rd-min-confidence">
+              <option value="">(default: medium)</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+            </select>
+          </label>
+          <label class="checkbox" style="grid-column: 1 / -1;">
+            <input id="rd-no-llm-detect" type="checkbox" />
+            <span>Skip LLM table-scan <span class="muted">(only deterministic code path)</span></span>
+          </label>
+          <label class="checkbox" style="grid-column: 1 / -1;">
+            <input id="rd-no-synthesis" type="checkbox" />
+            <span>Skip Phase-B synthesis <span class="muted">(no canonical_fix)</span></span>
+          </label>
+        </fieldset>
+        <div class="form-actions">
+          <button type="button" id="rd-show-cmd">Preview command</button>
+          <button type="submit" id="rd-submit">Detect violations</button>
+        </div>
+        <pre id="rd-cmd-preview" class="cmd-preview" hidden></pre>
+      </form>
     </section>
 
     <!-- ========== Compare runs tab ========== -->
     <section class="panel hidden" data-panel="compare" id="panel-compare" role="tabpanel" aria-label="Compare runs" aria-hidden="true">
       <div class="panel-head">
-        <h2>Compare two runs</h2>
-        <div class="muted" style="font-size: 11.5px;">Cell-level bucket diff. Focus is on cells where exactly one run flagged.</div>
+        <h2>Compare</h2>
+        <div class="muted" style="font-size: 11.5px;">Cell-level diff. Toggle the mode to switch comparison source.</div>
       </div>
+
+      <!-- Sub-tab switcher: existing "two workbench runs" vs new
+           "labelled benchmark JSONL vs an external detector TSV". -->
+      <div class="cmp-mode-switch" role="tablist" aria-label="Compare mode">
+        <button type="button" class="cmp-mode active"
+                data-cmp-mode="runs" role="tab" aria-selected="true">
+          Run vs run
+        </button>
+        <button type="button" class="cmp-mode"
+                data-cmp-mode="external" role="tab" aria-selected="false">
+          Benchmark vs external run
+        </button>
+      </div>
+
+      <!-- ============= MODE: run vs run (existing) ============= -->
+      <div class="cmp-mode-panel" data-cmp-mode-panel="runs">
 
       <div class="compare-pickers">
         <label>
@@ -675,6 +792,128 @@
           <button type="button" id="cmp-next">Next ›</button>
         </div>
       </div>
+      </div><!-- /cmp-mode-panel runs -->
+
+      <!-- ============= MODE: benchmark vs external (new) ============= -->
+      <div class="cmp-mode-panel hidden" data-cmp-mode-panel="external">
+        <div class="ext-pickers">
+          <label>
+            <span>Labelled benchmark <span class="muted">(<code>label_result/</code>)</span></span>
+            <select id="ext-benchmark"><option value="">(loading…)</option></select>
+          </label>
+          <label>
+            <span>External detector run <span class="muted">(<code>external/</code>)</span></span>
+            <select id="ext-predictions"><option value="">(loading…)</option></select>
+          </label>
+          <label>
+            <span>Dataset root <span class="muted">(for CSV context)</span></span>
+            <select id="ext-dataset">
+              <option value="">(skip — no CSV context)</option>
+            </select>
+          </label>
+          <label class="checkbox">
+            <input id="ext-include-trivial" type="checkbox" />
+            <span>Include trivial diffs</span>
+          </label>
+          <button type="button" id="ext-load" disabled>Compare</button>
+        </div>
+        <div id="ext-meta" class="compare-meta muted"></div>
+        <div id="ext-warn" class="compare-warn" hidden></div>
+
+        <!-- Post-relabel action bar. Surfaces the count of rows the
+             operator has edited via the UI that still lack a canonical
+             corrected_value, and a single click runs the LLM
+             canonicalize pipeline on just those rows. The result
+             status appears in #ext-canon-status. -->
+        <div id="ext-canon-bar" class="ext-canon-bar" hidden>
+          <button type="button" id="ext-canon-run" disabled
+                  title="Run LLM canonicalization on rows you've relabeled via the UI">
+            ✨ Canonicalize relabels
+          </button>
+          <span id="ext-canon-count" class="muted"></span>
+          <span class="ext-canon-spacer"></span>
+          <span id="ext-canon-status" class="ext-canon-status"></span>
+        </div>
+
+        <div id="ext-results" hidden>
+          <!-- Headline metrics + confusion matrix. -->
+          <div class="ext-metrics-grid">
+            <div class="ext-metric"><div class="ext-metric-label">Precision</div><div class="ext-metric-value" id="ext-m-precision">—</div></div>
+            <div class="ext-metric"><div class="ext-metric-label">Recall</div><div class="ext-metric-value" id="ext-m-recall">—</div></div>
+            <div class="ext-metric"><div class="ext-metric-label">F1</div><div class="ext-metric-value" id="ext-m-f1">—</div></div>
+            <div class="ext-metric"><div class="ext-metric-label">Bench errors</div><div class="ext-metric-value" id="ext-m-errors">—</div></div>
+            <div class="ext-metric"><div class="ext-metric-label">Predictions in scope</div><div class="ext-metric-value" id="ext-m-preds">—</div></div>
+            <div class="ext-metric"><div class="ext-metric-label">Correction exact-match</div><div class="ext-metric-value" id="ext-m-corr">—</div></div>
+          </div>
+
+          <h3 class="compare-section-h">Agreement breakdown <span class="muted" style="font-weight: normal; font-size: 11px;">(click a row to filter)</span></h3>
+          <div class="compare-table-wrap">
+            <table id="ext-state-table" class="compare-table">
+              <thead>
+                <tr>
+                  <th>State</th>
+                  <th class="num">Cells</th>
+                  <th>What it means</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+
+          <h3 class="compare-section-h">Cells <span id="ext-cell-count" class="muted" style="font-weight: normal; font-size: 11px;"></span></h3>
+          <div class="ext-filters">
+            <label>
+              <span>State</span>
+              <select id="ext-filter-state">
+                <option value="" selected>(all)</option>
+                <option value="actionable">⚑ Actionable (FN + FP + ambiguous + unmatched)</option>
+                <option value="false_negative">false_negative — bench=error, model missed it</option>
+                <option value="false_positive">false_positive — bench=clean, model flagged it</option>
+                <option value="ambiguous_in_bench">ambiguous — needs adjudication</option>
+                <option value="mixed_conflict">mixed_conflict — bench has both clean and error</option>
+                <option value="unmatched_prediction">unmatched — model flagged a value the bench has never seen</option>
+                <option value="bench_gap">↳ bench coverage gap (value IS in CSV — labeling candidate)</option>
+                <option value="unmatched_hallucination">↳ unmatched, no CSV hit (value not in source)</option>
+                <option value="true_positive">true_positive — agreement on error</option>
+                <option value="agreed_clean">agreed_clean — both say clean</option>
+              </select>
+            </label>
+            <label>
+              <span>Source</span>
+              <input id="ext-filter-source" type="text" placeholder="(any source)" />
+            </label>
+            <label>
+              <span>Search original</span>
+              <input id="ext-filter-search" type="text" placeholder="substring of cell value" />
+            </label>
+            <button type="button" id="ext-apply-filters">Apply</button>
+            <button type="button" id="ext-clear-filters" class="ext-secondary">Clear</button>
+          </div>
+          <div class="compare-cells-wrap">
+            <table id="ext-cells-table" class="compare-table">
+              <thead>
+                <tr>
+                  <th>State</th>
+                  <th>Source</th>
+                  <th class="num">Row</th>
+                  <th>Column</th>
+                  <th>Original value</th>
+                  <th>Bench label</th>
+                  <th>Bench correction</th>
+                  <th>External prediction</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="compare-pager">
+            <button type="button" id="ext-prev">‹ Prev</button>
+            <span id="ext-page-info"></span>
+            <button type="button" id="ext-next">Next ›</button>
+          </div>
+        </div>
+      </div><!-- /cmp-mode-panel external -->
     </section>
 
     <!-- ========== Cell-detail drawer ========== -->
@@ -684,6 +923,15 @@
         <button type="button" id="cmp-drawer-close" aria-label="Close">×</button>
       </div>
       <div id="cmp-drawer-body" class="cmp-drawer-body"></div>
+    </aside>
+
+    <!-- ========== External-compare edit drawer ========== -->
+    <aside id="ext-drawer" class="cmp-drawer" hidden>
+      <div class="cmp-drawer-head">
+        <h3 id="ext-drawer-title">Cell detail</h3>
+        <button type="button" id="ext-drawer-close" aria-label="Close">×</button>
+      </div>
+      <div id="ext-drawer-body" class="cmp-drawer-body"></div>
     </aside>
 
     <!-- ========== Data prep tab ========== -->
@@ -714,11 +962,21 @@
           </label>
           <label class="checkbox">
             <input id="cu-overwrite" type="checkbox" />
-            <span>Overwrite existing files</span>
+            <span>Overwrite existing files <span class="muted">(also prunes orphan group dirs from prior runs)</span></span>
           </label>
           <label class="checkbox">
             <input id="cu-dedupe-schema-within-group" type="checkbox" checked />
             <span>Deduplicate same-schema CSVs within a workbook <span class="muted">(grouped only)</span></span>
+          </label>
+          <label>
+            <span>Deduplicate across workbooks <span class="muted">(catches forked-repo / Spark-partition duplicates)</span></span>
+            <select id="cu-dedupe-across-groups">
+              <option value="">(default: schema+content)</option>
+              <option value="schema+content">schema+content (drop on either hit; recommended)</option>
+              <option value="schema">schema (fuzzy: case/punctuation/order-insensitive headers)</option>
+              <option value="content">content (byte-identical body)</option>
+              <option value="off">off</option>
+            </select>
           </label>
         </fieldset>
 
@@ -884,7 +1142,7 @@
 
           <article class="concept-card">
             <h4>Experiment mode</h4>
-            <p><code>single</code>: one pass per (chunk, error_type). Fast.<br /><code>adaptive</code>: Good-Turing / Chao1 multi-pass loop. Each <code>(stop_scope, error_type)</code> arm is tracked independently; the loop halts once every error_type's arms have all saturated under <code>gt_target_missing_mass</code> (or <code>num_runs</code> is reached). Use <em>Stop scope</em> to choose granularity (<code>column</code> = per-(source, column, error_type), <code>dataset</code> = one arm per error_type, etc.).</p>
+            <p><code>single</code>: one pass per (chunk, error_type). Fast.<br /><code>adaptive</code>: Good-Turing / Chao1 multi-pass loop. Each <code>(stop_scope, error_type)</code> arm is tracked independently; the loop halts once every error_type's arms have all saturated under <code>gt_target_missing_mass</code> (or <code>num_runs</code> is reached). Use <em>Stop scope</em> to choose granularity (<code>auto</code> = pick by selected error types &mdash; <code>column</code> when single-column-only, <code>column_pair</code> when multi-column is included, <code>csv</code> when multi-row, <code>multi_table</code> when multi-table; <code>column</code> = per-(source, column, error_type); <code>dataset</code> = one arm per error_type; etc.).</p>
           </article>
 
           <article class="concept-card">
@@ -913,7 +1171,85 @@
 
   <div class="toast" id="toast" hidden></div>
 
+  <!-- ========== Web-verify modal ==========
+       Triggered by the "Verify on web" button in the runs list.
+       Lets the operator pick concurrency / budget / error-type
+       whitelist before launching ``experiments.run_web_verify``
+       for the chosen run. -->
+  <div class="wv-modal" id="wv-modal" hidden role="dialog" aria-modal="true" aria-labelledby="wv-modal-title">
+    <div class="wv-modal-backdrop" data-wv-close="1"></div>
+    <div class="wv-modal-card" role="document">
+      <header class="wv-modal-head">
+        <div>
+          <h2 id="wv-modal-title">Verify all labelled cells on the web</h2>
+          <div class="wv-modal-sub muted">
+            Runs the LLM web-verifier over every gate-eligible cluster
+            in <code id="wv-modal-run">…</code> and writes results to
+            <code>web_verifications.json</code>. Existing records are
+            kept (use <em>Force re-verify</em> to ignore the cache).
+          </div>
+        </div>
+        <button type="button" class="wv-modal-close" data-wv-close="1" aria-label="Close">×</button>
+      </header>
+
+      <div class="wv-modal-stats" id="wv-modal-stats" aria-live="polite">
+        <div class="wv-stat"><span class="wv-stat-label">Clusters</span><span class="wv-stat-val" id="wv-stat-clusters">–</span></div>
+        <div class="wv-stat"><span class="wv-stat-label">Already verified</span><span class="wv-stat-val" id="wv-stat-verified">–</span></div>
+        <div class="wv-stat"><span class="wv-stat-label">Confirmed errors</span><span class="wv-stat-val" id="wv-stat-confirmed">–</span></div>
+        <div class="wv-stat"><span class="wv-stat-label">False positives</span><span class="wv-stat-val" id="wv-stat-fp">–</span></div>
+      </div>
+
+      <form class="wv-modal-form" id="wv-modal-form">
+        <fieldset class="wv-fields">
+          <legend>Run options</legend>
+          <label>
+            <span>Concurrency <small class="muted">(parallel agent calls)</small></span>
+            <input id="wv-concurrency" type="number" min="1" max="64" value="4" />
+          </label>
+          <label>
+            <span>Max clusters <small class="muted">(empty = all eligible)</small></span>
+            <input id="wv-max-clusters" type="number" min="1" placeholder="(all)" />
+          </label>
+          <label>
+            <span>Reasoning effort</span>
+            <select id="wv-reasoning-effort">
+              <option value="">(default: medium)</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+            </select>
+          </label>
+          <label>
+            <span>Model <small class="muted">(stamped on each record)</small></span>
+            <input id="wv-model" type="text" placeholder="gpt-5.2" />
+          </label>
+          <label class="wv-fields-wide">
+            <span>Error-type whitelist <small class="muted">(comma-separated, leave empty to verify every web-eligible type)</small></span>
+            <div id="wv-error-types" class="wv-et-chips"></div>
+          </label>
+          <label class="wv-fields-checkbox">
+            <input id="wv-force" type="checkbox" />
+            <span>Force re-verify <small class="muted">(ignore on-disk cache + existing <code>web_verifications.json</code>)</small></span>
+          </label>
+        </fieldset>
+
+        <p class="muted wv-hint">
+          The verifier uses an Azure Foundry agent with the Web Search
+          tool attached. Each cluster is one agent call; expect 5-30 s
+          per cluster depending on how many searches the agent decides
+          to run. Progress streams to the <strong>Jobs</strong> tab.
+        </p>
+
+        <div class="wv-modal-actions">
+          <button type="button" data-wv-close="1">Cancel</button>
+          <button type="submit" class="primary" id="wv-submit">Launch verification</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <script type="module" src="./runs.js"></script>
   <script type="module" src="./compare.js"></script>
+  <script type="module" src="./external_compare.js"></script>
 </body>
 </html>

@@ -6,20 +6,7 @@
 document.documentElement.style.height = "auto";
 document.documentElement.style.overflow = "auto";
 
-const $ = (sel) => document.querySelector(sel);
-const $$ = (sel) => Array.from(document.querySelectorAll(sel));
-
-async function api(path, options = {}) {
-  const res = await fetch(path, {
-    headers: { "content-type": "application/json" },
-    ...options,
-  });
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`${res.status} ${res.statusText}: ${body.slice(0, 200)}`);
-  }
-  return res.json();
-}
+import { $, $$, api, escapeHtml as escape } from "./shared/utils.js";
 
 function toast(msg, ms = 1800) {
   const el = $("#toast");
@@ -27,12 +14,6 @@ function toast(msg, ms = 1800) {
   el.hidden = false;
   clearTimeout(toast._t);
   toast._t = setTimeout(() => { el.hidden = true; }, ms);
-}
-
-function escape(s) {
-  return String(s ?? "")
-    .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
 
 // --------------------------------------------------------- tabs
@@ -50,6 +31,12 @@ function showTab(name) {
     p.setAttribute("aria-hidden", on ? "false" : "true");
   });
   localStorage.setItem("dq-ws-tab", name);
+  // The Step-2 discovery-run picker depends on the run registry; refresh
+  // it whenever the operator opens the relations tab so a newly-finished
+  // discovery run shows up without a page reload.
+  if (name === "relations" && typeof populateDetectDiscoveryRuns === "function") {
+    try { populateDetectDiscoveryRuns(); } catch (_) {}
+  }
 }
 $$(".tab").forEach((t) => t.addEventListener("click", () => showTab(t.dataset.tab)));
 
@@ -62,6 +49,14 @@ const state = {
   activeJobId: null,
   logOffset: 0,
   jobPoller: null,
+  // Runs-tab UI state. ``selectedRuns`` is the bulk-select set;
+  // ``filter`` is one of "all" / "starred" / "unstarred"; ``query`` is
+  // the live search box value (lower-cased). All three persist across
+  // refreshes so re-clicking Refresh doesn't lose the operator's
+  // narrowed view.
+  selectedRuns: new Set(),
+  runsFilter: localStorage.getItem("dq-ws-runs-filter") || "all",
+  runsQuery: "",
 };
 
 // --------------------------------------------------------- bootstrap
@@ -81,8 +76,10 @@ async function bootstrap() {
   $("#launch-form").addEventListener("submit", onSubmit);
   $("#mode").addEventListener("change", onModeChange);
 
+  initRunsToolbar();
   initDataPrep();
   initRelationsForm();
+  initRelationDetectionForm();
 
   // Poll jobs list every 3s (cheap - one small JSON).
   setInterval(refreshJobs, 3000);
@@ -94,11 +91,88 @@ async function refreshWorkspace() {
   const ws = await api("/api/runs");
   state.workspace = ws;
   $("#ws-meta").textContent = `${ws.project_root} · annotator ${ws.annotator} · ${ws.runs.length} runs`;
+  // Drop any stale bulk-selection ids that no longer exist on disk
+  // (e.g. another tab deleted them) so the toolbar count stays honest.
+  const live = new Set(ws.runs.map((r) => r.run_id));
+  for (const id of [...state.selectedRuns]) {
+    if (!live.has(id)) state.selectedRuns.delete(id);
+  }
   renderRuns(ws.runs);
+}
+
+// ---- Runs toolbar wiring ----
+
+function initRunsToolbar() {
+  const tb = $("#runs-toolbar");
+  if (!tb) return;
+  const search = $("#runs-search");
+  search.addEventListener("input", () => {
+    state.runsQuery = search.value.trim().toLowerCase();
+    renderRuns(state.workspace?.runs || []);
+  });
+  $$("#runs-toolbar .runs-chip").forEach((c) => {
+    c.addEventListener("click", () => {
+      state.runsFilter = c.dataset.filter;
+      localStorage.setItem("dq-ws-runs-filter", state.runsFilter);
+      $$("#runs-toolbar .runs-chip").forEach((x) => {
+        const on = x === c;
+        x.classList.toggle("active", on);
+        x.setAttribute("aria-selected", on ? "true" : "false");
+      });
+      renderRuns(state.workspace?.runs || []);
+    });
+  });
+  // Restore persisted filter chip selection.
+  const active = $$("#runs-toolbar .runs-chip").find((c) => c.dataset.filter === state.runsFilter);
+  if (active) {
+    $$("#runs-toolbar .runs-chip").forEach((x) => {
+      const on = x === active;
+      x.classList.toggle("active", on);
+      x.setAttribute("aria-selected", on ? "true" : "false");
+    });
+  }
+  $("#runs-bulk-clear").addEventListener("click", () => {
+    state.selectedRuns.clear();
+    renderRuns(state.workspace?.runs || []);
+  });
+  $("#runs-bulk-delete").addEventListener("click", onBulkDelete);
+}
+
+function applyRunsFilter(runs) {
+  const q = state.runsQuery;
+  const f = state.runsFilter;
+  return runs.filter((r) => {
+    if (f === "starred" && !r.starred) return false;
+    if (f === "unstarred" && r.starred) return false;
+    if (!q) return true;
+    const hay = (
+      (r.run_id || "") + " " +
+      (r.display_name || "") + " " +
+      (r.model || "") + " " +
+      (r.mode || "") + " " +
+      (r.dataset || "")
+    ).toLowerCase();
+    return hay.includes(q);
+  });
+}
+
+function sortRuns(runs) {
+  // Starred first; within each group preserve server order (= newest
+  // first by mtime, see RunRegistry.list). A stable sort is mandated
+  // by the JS spec since ES2019.
+  return [...runs].sort((a, b) => {
+    if (a.starred && !b.starred) return -1;
+    if (!a.starred && b.starred) return 1;
+    return 0;
+  });
 }
 
 function renderRuns(runs) {
   $("#runs-count").textContent = `(${runs.length})`;
+  const tb = $("#runs-toolbar");
+  if (tb) tb.hidden = runs.length === 0;
+  updateBulkBar();
+
   const box = $("#runs-list");
   if (!runs.length) {
     box.innerHTML = `
@@ -110,61 +184,147 @@ function renderRuns(runs) {
     box.querySelector("[data-goto-launch]")?.addEventListener("click", () => showTab("launch"));
     return;
   }
-  box.innerHTML = runs.map((r) => {
-    if (r.kind === "relations") {
-      return renderRelationsRunRow(r);
-    }
-    // The unified label page covers both cluster items and
-    // cross-sheet (multi-table) findings, so a single "Label" entry
-    // is enough. We surface the cross-sheet count in the link text
-    // when the run has any, so the operator can spot detection runs
-    // that include MT findings without drilling in.
-    const hasAny = r.has_clusters || r.has_multi_table;
-    const mtSuffix = r.has_multi_table
-      ? ` <span class="muted">(+${escape(String(r.n_multi_table_findings ?? 0))} MT)</span>`
-      : "";
-    const labelLink = hasAny
-      ? `<a class="primary" href="./label.html?run=${encodeURIComponent(r.run_id)}">Label${mtSuffix}</a>`
-      : `<span class="muted">(no findings)</span>`;
-    const reportLink = r.has_report
-      ? `<a href="/api/runs/${encodeURIComponent(r.run_id)}/report" target="_blank" rel="noopener">Report</a>`
-      : `<button data-action="build-report" data-run="${escape(r.run_id)}">Build report</button>`;
-    const exportLink = r.has_clusters
-      ? `<a href="/api/runs/${encodeURIComponent(r.run_id)}/export/benchmark" download>Benchmark</a>`
-      : "";
-    const exportByTypeLink = r.has_clusters
-      ? `<a href="/api/runs/${encodeURIComponent(r.run_id)}/export/benchmark-by-type" download title="One JSONL per error_type, bundled as a ZIP">By type</a>`
-      : "";
-    const created = r.created ? escape(r.created.slice(0, 19).replace("T", " ")) + " UTC" : "";
-    // Build tag spans through one helper so future contributors adding
-    // a new tag can't accidentally forget to escape the value.
-    const tagSpan = (cls, value) => value
-      ? `<span class="tag ${cls}">${escape(value)}</span>`
-      : "";
-    const tags = [
-      tagSpan("model", r.model),
-      tagSpan("mode", r.mode),
-    ].join("");
-    return `
-      <div class="row">
-        <div>
-          <div class="id">${escape(r.run_id)}</div>
-          <div class="sub">${tags}${created ? `<span>${created}</span>` : ""}</div>
-        </div>
-        <div class="num"><span class="label">clusters</span>${escape(String(r.clusters ?? 0))}</div>
-        <div class="num"><span class="label">issues</span>${escape(String(r.issues ?? 0))}</div>
-        <div class="num"><span class="label">labelled</span>${r.has_labels ? "yes" : "–"}</div>
-        <div class="actions">
-          ${labelLink}
-          ${reportLink}
-          ${exportLink}
-          ${exportByTypeLink}
-          <button class="danger" data-action="delete-run" data-run="${escape(r.run_id)}" title="Delete this run">Delete</button>
-        </div>
-      </div>
-    `;
+  const visible = sortRuns(applyRunsFilter(runs));
+  if (!visible.length) {
+    box.innerHTML = `<div class="runs-empty-filtered">No runs match the current filter.</div>`;
+    return;
+  }
+  box.innerHTML = visible.map((r) => {
+    if (r.kind === "relations") return renderRelationsRunRow(r);
+    return renderDetectionRunRow(r);
   }).join("");
+  wireRowActions(box);
+}
 
+// Returns the leading `<button class="row-select">…</button>
+// <button class="row-star">…</button> <div class="name-block">…</div>`
+// HTML that's shared between detection + relations row renderers. The
+// rest of each row's grid cells (counts, actions) is renderer-specific.
+function renderRowLead(r, extraTags = "") {
+  const id = escape(r.run_id);
+  const selected = state.selectedRuns.has(r.run_id);
+  const checkbox = `
+    <div class="row-select">
+      <input type="checkbox" data-action="row-select" data-run="${id}"
+        ${selected ? "checked" : ""}
+        aria-label="Select run ${id}" />
+    </div>`;
+  const starBtn = `
+    <button class="row-star ${r.starred ? "is-starred" : ""}"
+      data-action="toggle-star" data-run="${id}"
+      title="${r.starred ? "Unstar (allow deletion)" : "Star to pin this run"}"
+      aria-pressed="${r.starred ? "true" : "false"}">
+      ${r.starred ? "★" : "☆"}
+    </button>`;
+  const created = r.created
+    ? escape(r.created.slice(0, 19).replace("T", " ")) + " UTC"
+    : "";
+  const dn = r.display_name || "";
+  const displayName = dn
+    ? `<div class="display-name" data-action="rename" data-run="${id}" title="Click to rename">
+         <span>${escape(dn)}</span><span class="pencil">✎</span>
+       </div>`
+    : `<div class="display-name placeholder" data-action="rename" data-run="${id}" title="Click to add a friendly name">
+         <span>(unnamed)</span><span class="pencil">✎</span>
+       </div>`;
+  const nameBlock = `
+    <div class="name-block">
+      ${displayName}
+      <div class="id">${id}</div>
+      <div class="sub">${extraTags}${created ? `<span>${created}</span>` : ""}</div>
+    </div>`;
+  return { checkbox, starBtn, nameBlock, selected };
+}
+
+function renderDetectionRunRow(r) {
+  // Primary "Label" CTA: the single entry point into labelling.
+  // ``label.html`` is the unified surface that hosts every error
+  // type a run can produce - per-cell typo / row-duplication /
+  // semantic-incompatible clusters, multi-table findings, AND
+  // inconsistency clusters merged in from ``/column-clusters``
+  // (with LLM drafts surfaced as queue items). The legacy column
+  // board (``column_board.html``) is still reachable via the deep
+  // link in the right-pane detail when an operator needs bulk
+  // editing, but it is no longer the run-list CTA.
+  const hasColumnClusters =
+    r.has_column_cluster_drafts || r.has_column_cluster_labels;
+  const hasCellLevel = r.has_clusters || r.has_multi_table;
+  const hasAnyFindings = hasColumnClusters || hasCellLevel;
+  const mtSuffix = r.has_multi_table
+    ? ` <span class="muted">(+${escape(String(r.n_multi_table_findings ?? 0))} MT)</span>`
+    : "";
+  const ccDrafts = Number(r.n_column_cluster_drafts ?? 0);
+  const ccLabels = Number(r.n_column_cluster_labels ?? 0);
+  const ccTotal = ccDrafts + ccLabels;
+  const ccSuffix = hasColumnClusters
+    ? ` <span class="muted">(+${escape(String(ccTotal))} inconsistency)</span>`
+    : "";
+  let labelLink;
+  if (hasAnyFindings) {
+    labelLink = `<a class="primary" href="./label.html?run=${encodeURIComponent(r.run_id)}" title="Label every finding in this run (cells + multi-table + inconsistency clusters)">Label${mtSuffix}${ccSuffix}</a>`;
+  } else {
+    labelLink = `<span class="muted">(no findings)</span>`;
+  }
+  const reportLink = r.has_report
+    ? `<a href="/api/runs/${encodeURIComponent(r.run_id)}/report" target="_blank" rel="noopener">Report</a>`
+    : `<button data-action="build-report" data-run="${escape(r.run_id)}">Build report</button>`;
+  const exportLink = r.has_clusters
+    ? `<a href="/api/runs/${encodeURIComponent(r.run_id)}/export/benchmark" download>Benchmark</a>`
+    : "";
+  const exportByTypeLink = r.has_clusters
+    ? `<a href="/api/runs/${encodeURIComponent(r.run_id)}/export/benchmark-by-type" download title="One JSONL per error_type, bundled as a ZIP">By type</a>`
+    : "";
+  const verifyBtn = r.has_clusters
+    ? (r.has_web_verifications
+        ? `<button data-action="verify-web" data-run="${escape(r.run_id)}" title="Verify all labelled cells on the web (re-run / extend coverage)" class="verify-web-btn"><span class="verify-web-icon">⌕</span> Verified <span class="verify-web-count">${escape(String(r.n_web_verifications ?? 0))}</span></button>`
+        : `<button data-action="verify-web" data-run="${escape(r.run_id)}" title="Run experiments.run_web_verify on every gate-eligible cluster" class="verify-web-btn"><span class="verify-web-icon">⌕</span> Verify on web</button>`)
+    : "";
+  const tagSpan = (cls, value) => value
+    ? `<span class="tag ${cls}">${escape(value)}</span>`
+    : "";
+  const tags = [
+    tagSpan("model", r.model),
+    tagSpan("mode", r.mode),
+  ].join("");
+  const { checkbox, starBtn, nameBlock, selected } = renderRowLead(r, tags);
+  const rowClass = [
+    "row",
+    r.starred ? "starred" : "",
+    selected ? "row-selected" : "",
+  ].filter(Boolean).join(" ");
+  return `
+    <div class="${rowClass}">
+      ${checkbox}
+      ${starBtn}
+      ${nameBlock}
+      <div class="num"><span class="label">clusters</span>${escape(String(r.clusters ?? 0))}</div>
+      <div class="num"><span class="label">issues</span>${escape(String(r.issues ?? 0))}</div>
+      <div class="num"><span class="label">labelled</span>${r.has_labels ? "yes" : "–"}</div>
+      <div class="actions">
+        ${labelLink}
+        ${reportLink}
+        ${exportLink}
+        ${exportByTypeLink}
+        ${verifyBtn}
+        <button class="danger" data-action="delete-run" data-run="${escape(r.run_id)}" title="Delete this run">Delete</button>
+      </div>
+    </div>
+  `;
+}
+
+// --------------------------------------------------------- runs: row actions
+
+function findRun(runId) {
+  return (state.workspace?.runs || []).find((r) => r.run_id === runId);
+}
+
+function replaceRunInState(updated) {
+  const list = state.workspace?.runs || [];
+  const i = list.findIndex((r) => r.run_id === updated.run_id);
+  if (i >= 0) list[i] = { ...list[i], ...updated };
+}
+
+function wireRowActions(box) {
   box.querySelectorAll('[data-action="build-report"]').forEach((b) => {
     b.addEventListener("click", async () => {
       try {
@@ -221,25 +381,376 @@ function renderRuns(runs) {
   });
 
   box.querySelectorAll('[data-action="delete-run"]').forEach((b) => {
+    b.addEventListener("click", () => deleteSingleRun(b));
+  });
+
+  box.querySelectorAll('[data-action="verify-web"]').forEach((b) => {
+    b.addEventListener("click", () => {
+      const runId = b.dataset.run;
+      const run = findRun(runId);
+      openWebVerifyModal(run || { run_id: runId });
+    });
+  });
+
+  // Star toggle (★/☆) - optimistic UI: flip the icon immediately and
+  // roll back if the PATCH fails. The starred state pins the run to
+  // the top of the list AND guards it against accidental deletion.
+  box.querySelectorAll('[data-action="toggle-star"]').forEach((b) => {
     b.addEventListener("click", async () => {
       const runId = b.dataset.run;
-      if (!confirm(`Delete run "${runId}"?\n\nThis will permanently remove its outputs/${runId}/ directory (clusters, summary, report, labels). This cannot be undone.`)) {
-        return;
-      }
-      b.disabled = true;
-      b.textContent = "Deleting…";
+      const r = findRun(runId);
+      if (!r) return;
+      const next = !r.starred;
+      r.starred = next;             // optimistic
+      renderRuns(state.workspace.runs);
       try {
-        await api(`/api/runs/${encodeURIComponent(runId)}`, { method: "DELETE" });
-        toast(`deleted run ${runId}`);
-        refreshWorkspace();
+        const updated = await api(`/api/runs/${encodeURIComponent(runId)}`, {
+          method: "PATCH",
+          body: JSON.stringify({ starred: next }),
+        });
+        replaceRunInState(updated);
+        renderRuns(state.workspace.runs);
       } catch (e) {
-        toast(`delete failed: ${e.message}`, 4000);
-        b.disabled = false;
-        b.textContent = "Delete";
+        r.starred = !next;          // rollback
+        renderRuns(state.workspace.runs);
+        toast(`star failed: ${e.message}`, 3500);
       }
     });
   });
+
+  // Inline rename. Click the display-name area to swap it for an
+  // <input>; Enter commits, Esc cancels, blur commits. We rebuild
+  // just the input so we don't re-render the whole row mid-edit.
+  box.querySelectorAll('[data-action="rename"]').forEach((el) => {
+    el.addEventListener("click", (ev) => {
+      // Ignore clicks on a pre-existing input (re-entrancy guard).
+      if (ev.target.tagName === "INPUT") return;
+      startInlineRename(el);
+    });
+  });
+
+  // Bulk-select checkboxes.
+  box.querySelectorAll('[data-action="row-select"]').forEach((cb) => {
+    cb.addEventListener("change", () => {
+      const runId = cb.dataset.run;
+      if (cb.checked) state.selectedRuns.add(runId);
+      else state.selectedRuns.delete(runId);
+      cb.closest(".row")?.classList.toggle("row-selected", cb.checked);
+      updateBulkBar();
+    });
+  });
 }
+
+function startInlineRename(el) {
+  const runId = el.dataset.run;
+  const r = findRun(runId);
+  if (!r) return;
+  const current = r.display_name || "";
+  el.innerHTML = `<input type="text" maxlength="120" value="${escape(current)}" placeholder="Friendly name (optional)" />`;
+  const input = el.querySelector("input");
+  input.focus();
+  input.select();
+  let done = false;
+  const commit = async () => {
+    if (done) return;
+    done = true;
+    const next = input.value.trim();
+    if (next === current) {
+      renderRuns(state.workspace.runs);
+      return;
+    }
+    try {
+      const updated = await api(`/api/runs/${encodeURIComponent(runId)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ display_name: next }),
+      });
+      replaceRunInState(updated);
+      toast(next ? `renamed: ${next}` : "name cleared");
+    } catch (e) {
+      toast(`rename failed: ${e.message}`, 3500);
+    }
+    renderRuns(state.workspace.runs);
+  };
+  const cancel = () => {
+    if (done) return;
+    done = true;
+    renderRuns(state.workspace.runs);
+  };
+  input.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") { ev.preventDefault(); commit(); }
+    else if (ev.key === "Escape") { ev.preventDefault(); cancel(); }
+  });
+  input.addEventListener("blur", commit);
+}
+
+async function deleteSingleRun(btn) {
+  const runId = btn.dataset.run;
+  const r = findRun(runId);
+  const isStarred = !!r?.starred;
+  const niceName = r?.display_name ? `"${r.display_name}" (${runId})` : `"${runId}"`;
+  let msg = `Delete run ${niceName}?\n\nThis will permanently remove its outputs/${runId}/ directory (clusters, summary, report, labels). This cannot be undone.`;
+  if (isStarred) {
+    msg = `⚠ This run is STARRED.\n\n${msg}\n\nDelete the starred run anyway?`;
+  }
+  if (!confirm(msg)) return;
+  btn.disabled = true;
+  btn.textContent = "Deleting…";
+  try {
+    const url = `/api/runs/${encodeURIComponent(runId)}${isStarred ? "?force=true" : ""}`;
+    await api(url, { method: "DELETE" });
+    toast(`deleted run ${runId}`);
+    state.selectedRuns.delete(runId);
+    refreshWorkspace();
+  } catch (e) {
+    toast(`delete failed: ${e.message}`, 4000);
+    btn.disabled = false;
+    btn.textContent = "Delete";
+  }
+}
+
+function updateBulkBar() {
+  const bar = $("#runs-bulk");
+  if (!bar) return;
+  const n = state.selectedRuns.size;
+  if (n === 0) { bar.hidden = true; return; }
+  bar.hidden = false;
+  $("#runs-bulk-count").textContent = `${n} selected`;
+}
+
+async function onBulkDelete() {
+  const ids = [...state.selectedRuns];
+  if (!ids.length) return;
+  const runs = ids.map(findRun).filter(Boolean);
+  const starred = runs.filter((r) => r.starred);
+  const deletable = runs.filter((r) => !r.starred);
+  if (!deletable.length) {
+    toast(`All ${ids.length} selected runs are starred - unstar first`, 3500);
+    return;
+  }
+  let msg = `Delete ${deletable.length} run${deletable.length === 1 ? "" : "s"}?\n\n`
+    + deletable.slice(0, 8).map((r) => "  • " + (r.display_name ? `${r.display_name} (${r.run_id})` : r.run_id)).join("\n")
+    + (deletable.length > 8 ? `\n  …and ${deletable.length - 8} more` : "");
+  if (starred.length) {
+    msg += `\n\n${starred.length} starred run${starred.length === 1 ? " was" : "s were"} skipped.`;
+  }
+  msg += "\n\nThis cannot be undone.";
+  if (!confirm(msg)) return;
+  const btn = $("#runs-bulk-delete");
+  btn.disabled = true;
+  btn.textContent = "Deleting…";
+  let okN = 0, failN = 0;
+  // Sequential deletes - keeps server load low and lets us show a
+  // clean "N/M deleted" toast at the end. The N here is small (UI
+  // bulk-selection), so latency is fine.
+  for (const r of deletable) {
+    try {
+      await api(`/api/runs/${encodeURIComponent(r.run_id)}`, { method: "DELETE" });
+      okN += 1;
+      state.selectedRuns.delete(r.run_id);
+    } catch (e) {
+      failN += 1;
+    }
+  }
+  btn.disabled = false;
+  btn.textContent = "Delete selected";
+  toast(`deleted ${okN}${failN ? ` · ${failN} failed` : ""}`);
+  refreshWorkspace();
+}
+
+// --------------------------------------------------------- web-verify modal
+//
+// Lets the operator launch ``experiments.run_web_verify`` over every
+// gate-eligible cluster in a finished detection run. Modal lives in
+// ``index.html`` (#wv-modal); we just wire up open/close + submit.
+
+const WV_DEFAULT_TYPES = [
+  "typo",
+  "inconsistency",
+  "semantic_incompatible",
+  "row_duplication",
+  "fd_violation",
+  "inter_table_inconsistency",
+];
+
+const WV_NON_VERIFIABLE = new Set([
+  "row_calculation_inconsistency",
+  "string_calculation_inconsistency",
+  "numeric_outlier",
+]);
+
+const wvState = {
+  runId: null,
+  selectedTypes: new Set(),
+  // Cache the last fetched verifications per run so re-opening the
+  // modal feels instant.
+  statsCache: new Map(),
+};
+
+function openWebVerifyModal(run) {
+  const modal = $("#wv-modal");
+  if (!modal) return;
+  wvState.runId = run.run_id;
+  wvState.selectedTypes = new Set();
+
+  // Headline: which run + clusters total.
+  $("#wv-modal-run").textContent = run.run_id;
+  $("#wv-stat-clusters").textContent =
+    run.clusters != null ? String(run.clusters) : "–";
+  $("#wv-stat-verified").textContent = "…";
+  $("#wv-stat-confirmed").textContent = "…";
+  $("#wv-stat-fp").textContent = "…";
+
+  renderWvErrorTypes();
+
+  // Reset form state on every open so a previous run's settings
+  // don't bleed in.
+  $("#wv-concurrency").value = 4;
+  $("#wv-max-clusters").value = "";
+  $("#wv-reasoning-effort").value = "";
+  $("#wv-model").value = "";
+  $("#wv-force").checked = false;
+  $("#wv-submit").disabled = false;
+  $("#wv-submit").textContent = "Launch verification";
+
+  modal.hidden = false;
+  // Tiny defer so transitions can fire if we add any later.
+  requestAnimationFrame(() => modal.classList.add("open"));
+
+  // Pull existing verification stats in the background so the
+  // headline numbers fill in. Doesn't block the modal.
+  void loadWvStats(run.run_id);
+}
+
+function closeWebVerifyModal() {
+  const modal = $("#wv-modal");
+  if (!modal) return;
+  modal.classList.remove("open");
+  modal.hidden = true;
+}
+
+function renderWvErrorTypes() {
+  // Use the launcher config's error_types when available so chips
+  // stay in sync with the cleaning launcher; fall back to the
+  // hard-coded web-verifiable defaults if config hasn't loaded yet.
+  const box = $("#wv-error-types");
+  if (!box) return;
+  box.innerHTML = "";
+  const cfg = state.launcherConfig || {};
+  const all = (cfg.error_types || []).map((et) => ({
+    key: et.key,
+    name: et.name || et.key,
+  }));
+  // Hide non-web-verifiable types entirely so the operator can't
+  // pick a useless filter.
+  const items = (all.length ? all : WV_DEFAULT_TYPES.map((k) => ({ key: k, name: k })))
+    .filter((et) => !WV_NON_VERIFIABLE.has(et.key));
+
+  for (const et of items) {
+    const label = document.createElement("label");
+    label.className = "chip wv-chip";
+    label.title = et.key;
+    label.innerHTML = `<input type="checkbox" value="${escape(et.key)}"><span>${escape(et.name)}</span>`;
+    const input = label.querySelector("input");
+    input.addEventListener("change", () => {
+      label.classList.toggle("active", input.checked);
+      if (input.checked) wvState.selectedTypes.add(et.key);
+      else wvState.selectedTypes.delete(et.key);
+    });
+    box.appendChild(label);
+  }
+}
+
+async function loadWvStats(runId) {
+  // Cache hit: instant repaint.
+  const cached = wvState.statsCache.get(runId);
+  if (cached) {
+    paintWvStats(cached);
+  }
+  try {
+    const data = await api(
+      `/api/runs/${encodeURIComponent(runId)}/web-verifications`,
+    );
+    wvState.statsCache.set(runId, data);
+    // Only paint if the modal is still showing this run.
+    if (wvState.runId === runId) paintWvStats(data);
+  } catch (e) {
+    // Silent: 404 just means "no verifications yet".
+    if (wvState.runId === runId && !cached) {
+      paintWvStats({ counts: {}, items: [] });
+    }
+  }
+}
+
+function paintWvStats(data) {
+  const items = data.items || [];
+  const counts = data.counts || {};
+  $("#wv-stat-verified").textContent = String(items.length);
+  $("#wv-stat-confirmed").textContent = String(counts.confirmed_error || 0);
+  $("#wv-stat-fp").textContent = String(counts.false_positive || 0);
+}
+
+async function submitWvForm(ev) {
+  ev.preventDefault();
+  if (!wvState.runId) return;
+  const params = {};
+  const concurrency = parseInt($("#wv-concurrency").value, 10);
+  if (Number.isFinite(concurrency) && concurrency > 0) {
+    params.concurrency = concurrency;
+  }
+  const maxClusters = parseInt($("#wv-max-clusters").value, 10);
+  if (Number.isFinite(maxClusters) && maxClusters > 0) {
+    params.max_clusters = maxClusters;
+  }
+  const re = $("#wv-reasoning-effort").value.trim();
+  if (re) params.reasoning_effort = re;
+  const model = $("#wv-model").value.trim();
+  if (model) params.model = model;
+  if (wvState.selectedTypes.size > 0) {
+    params.error_types = Array.from(wvState.selectedTypes).join(",");
+  }
+  if ($("#wv-force").checked) params.force = true;
+
+  const submit = $("#wv-submit");
+  submit.disabled = true;
+  submit.textContent = "Launching…";
+  try {
+    const job = await api("/api/launcher/jobs", {
+      method: "POST",
+      body: JSON.stringify({
+        kind: "web_verify",
+        run_id: wvState.runId,
+        params,
+      }),
+    });
+    toast(`web verification started: ${job.job_id}`);
+    closeWebVerifyModal();
+    showTab("jobs");
+    if (typeof openJob === "function") openJob(job.job_id);
+    refreshJobs();
+  } catch (e) {
+    toast(`error: ${e.message}`, 3500);
+    submit.disabled = false;
+    submit.textContent = "Launch verification";
+  }
+}
+
+// Wire up modal close + submit listeners. ``runs.js`` loads as
+// ``type="module"`` which is implicitly deferred, so the DOM is ready
+// by the time we get here -- no DOMContentLoaded gymnastics needed.
+function initWebVerifyModal() {
+  const modal = document.getElementById("wv-modal");
+  if (!modal) return;
+  modal.querySelectorAll("[data-wv-close]").forEach((el) => {
+    el.addEventListener("click", closeWebVerifyModal);
+  });
+  const form = document.getElementById("wv-modal-form");
+  if (form) form.addEventListener("submit", submitWvForm);
+  // Esc key closes the modal when it's open.
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape" && !modal.hidden) closeWebVerifyModal();
+  });
+}
+initWebVerifyModal();
 
 // --------------------------------------------------------- launcher config
 
@@ -396,6 +907,12 @@ function applyConfigDefaults(defaults) {
   // Checkbox meaning is inverted: `no-synthesis` is ON when
   // enable_synthesis is FALSE.
   setChecked("no-synthesis", llm.enable_synthesis === false);
+  // `synthesise-singletons` mirrors the YAML default directly. Treat
+  // missing/null as the new default-ON behaviour.
+  setChecked(
+    "synthesise-singletons",
+    llm.synthesise_singletons !== false,
+  );
 
   // ----- Experiment + GT -----
   markDefaultOption("mode", exp.mode);
@@ -562,6 +1079,12 @@ function collectParams() {
     reasoning_effort: val("reasoning-effort"),
     concurrency: num("concurrency"),
     no_synthesis: check("no-synthesis") || null,
+    // The checkbox is positively phrased ("Synthesise single-detection
+    // clusters"), so the CLI flag fires only when the user OPTS OUT.
+    no_synthesise_singletons:
+      $("#synthesise-singletons") && !check("synthesise-singletons")
+        ? true
+        : null,
     synthesis_effort: val("synthesis-effort"),
     normalize_input: check("normalize-input") || null,
     normalize_fold_punctuation: check("normalize-fold-punctuation") || null,
@@ -661,6 +1184,7 @@ function previewCommand() {
   };
   const boolMap = {
     no_synthesis: ["--no-synthesis", null],
+    no_synthesise_singletons: ["--no-synthesise-singletons", null],
     normalize_input: ["--normalize-input", null],
     normalize_fold_punctuation: ["--normalize-fold-punctuation", null],
     normalize_lowercase: ["--normalize-lowercase", null],
@@ -817,8 +1341,13 @@ async function openJob(jobId) {
 
 function updateJobMeta(job) {
   const box = $("#job-detail-meta");
+  // Single label entry point: ``label.html`` hosts every error type
+  // (per-cell typo, multi-table findings, and inconsistency clusters
+  // surfaced from the column-clusters endpoint). The page copes
+  // gracefully when the run has nothing in a given category.
   const linkHTML = job.run_id
-    ? ` · <a href="./label.html?run=${encodeURIComponent(job.run_id)}">Label</a> · <a href="/api/runs/${encodeURIComponent(job.run_id)}/report" target="_blank" rel="noopener">Report</a>`
+    ? ` · <a href="./label.html?run=${encodeURIComponent(job.run_id)}" title="Label this run">Label</a>` +
+      ` · <a href="/api/runs/${encodeURIComponent(job.run_id)}/report" target="_blank" rel="noopener">Report</a>`
     : "";
   box.innerHTML = `<span class="status ${escape(job.status)}">${escape(job.status)}</span>` +
     ` <span>started ${escape(job.started_at || "")}</span>` +
@@ -913,6 +1442,7 @@ const CURATE_FIELDS = [
   ["max_cell_chars",            "cu-max-cell-chars"],
   ["max_cell_words",            "cu-max-cell-words"],
   ["max_oversized_row_ratio",   "cu-max-oversized-row-ratio"],
+  ["dedupe_across_groups",      "cu-dedupe-across-groups"],
 ];
 
 function initDataPrep() {
@@ -998,9 +1528,6 @@ bootstrap().catch((e) => {
 // =============================================================
 
 function renderRelationsRunRow(r) {
-  const created = r.created
-    ? escape(r.created.slice(0, 19).replace("T", " ")) + " UTC"
-    : "";
   const reportLink = r.has_report
     ? `<a class="primary" href="/api/runs/${encodeURIComponent(r.run_id)}/report" target="_blank" rel="noopener">View relations</a>`
     : `<button data-action="build-relation-report" data-run="${escape(r.run_id)}">Build report</button>`;
@@ -1010,13 +1537,24 @@ function renderRelationsRunRow(r) {
   // dashboard at the end so users don't need a separate "rebuild"
   // step.
   const validateBtn = `<button data-action="validate-relations" data-run="${escape(r.run_id)}" title="Run LLM-written check() code against the data and record pass-rates">Validate</button>`;
-  // Multi-table inconsistencies (cross-sheet attribute conflicts /
-  // duplicate rows / surface drift) also attach to relations runs
-  // when the relation discovery pipeline did the cross-sheet pass.
-  // The unified label page hosts the cross-sheet queue alongside
-  // cluster items, so a single "Label MT" link routes there.
-  const mtLink = r.has_multi_table
-    ? `<a class="primary" href="./label.html?run=${encodeURIComponent(r.run_id)}" title="Cross-sheet findings (label page)">Label MT (${escape(String(r.n_multi_table_findings ?? 0))})</a>`
+  // Review CTA: Step-1 → Step-2 bridge. Operators open this page to
+  // approve / reject the discovered relations; the detection runner
+  // (``experiments/run_relation_detection``) consumes those verdicts
+  // when compiling per-cell violations.
+  const reviewLink = `<a class="primary" href="./relations_review.html?run=${encodeURIComponent(r.run_id)}" title="Approve or reject the discovered relations before running detection">Review${r.n_relations ? ` (${escape(String(r.n_relations))})` : ""}</a>`;
+  // Unified Label CTA: relations runs can produce per-row violation
+  // clusters (from the post-validation violation-compilation step in
+  // run_relation_discovery) AND multi-table findings. Both are hosted
+  // by the same label.html surface as detection runs, so a single
+  // link routes there. The suffixes show what's inside.
+  const clusterSuffix = r.has_clusters
+    ? ` <span class="muted">(${escape(String(r.clusters ?? 0))} clusters)</span>`
+    : "";
+  const mtSuffix = r.has_multi_table
+    ? ` <span class="muted">(+${escape(String(r.n_multi_table_findings ?? 0))} MT)</span>`
+    : "";
+  const labelLink = (r.has_clusters || r.has_multi_table)
+    ? `<a class="primary" href="./label.html?run=${encodeURIComponent(r.run_id)}" title="Label findings in this run (relation violations + cross-sheet)">Label${clusterSuffix}${mtSuffix}</a>`
     : "";
   const tag = (cls, value, title) => value
     ? `<span class="tag ${cls}"${title ? ` title="${escape(title)}"` : ""}>${escape(String(value))}</span>`
@@ -1037,19 +1575,25 @@ function renderRelationsRunRow(r) {
   const thirdStat = r.n_passes != null
     ? `<div class="num"><span class="label">passes</span>${escape(String(r.n_passes))}</div>`
     : `<div class="num"><span class="label">mode</span>single</div>`;
+  const { checkbox, starBtn, nameBlock, selected } = renderRowLead(r, tags);
+  const rowClass = [
+    "row",
+    r.starred ? "starred" : "",
+    selected ? "row-selected" : "",
+  ].filter(Boolean).join(" ");
   return `
-    <div class="row">
-      <div>
-        <div class="id">${escape(r.run_id)}</div>
-        <div class="sub">${tags}${created ? `<span>${created}</span>` : ""}</div>
-      </div>
+    <div class="${rowClass}">
+      ${checkbox}
+      ${starBtn}
+      ${nameBlock}
       <div class="num"><span class="label">relations</span>${escape(String(r.n_relations ?? 0))}</div>
       <div class="num"><span class="label">sources</span>${escape(String(r.n_sources ?? 0))}</div>
       ${thirdStat}
       <div class="actions">
+        ${reviewLink}
+        ${labelLink}
         ${reportLink}
         ${validateBtn}
-        ${mtLink}
         <button class="danger" data-action="delete-run" data-run="${escape(r.run_id)}" title="Delete this run">Delete</button>
       </div>
     </div>
@@ -1187,7 +1731,7 @@ function initRelationsForm() {
   adapt?.addEventListener("change", syncAdaptive);
   syncAdaptive();
 
-  // Aggregate / Generalize blocks: when the master checkbox is off,
+  // Post-discovery pass blocks: when the master checkbox is off,
   // grey out the per-pass min-cluster input so it's clear the value
   // won't be used.
   function bindPostPass(checkboxId, blockId, fieldIds) {
@@ -1209,8 +1753,6 @@ function initRelationsForm() {
   }
   bindPostPass("rel-aggregate", "rel-aggregate-block",
                ["rel-aggregate-min-cluster"]);
-  bindPostPass("rel-generalize", "rel-generalize-block",
-               ["rel-generalize-min-cluster"]);
   bindPostPass("rel-validate", "rel-validate-block",
                ["rel-validate-layer", "rel-validate-limit",
                 "rel-validate-sample-rows", "rel-validate-timeout",
@@ -1236,13 +1778,11 @@ function collectRelParams() {
   const errorTypes = [...(state.relationsErrorTypes || [])].join(",") || null;
   const adaptive = check("rel-adaptive");
   // Post-discovery passes. Default ON to match the CLI; user opts out
-  // by un-checking. We send explicit booleans so the backend can map
-  // them to ``--no-aggregate`` / ``--no-generalize`` cleanly.
+  // by un-checking. We send an explicit boolean so the backend can
+  // map it to ``--no-aggregate`` cleanly.
   const aggEl = document.getElementById("rel-aggregate");
-  const genEl = document.getElementById("rel-generalize");
   const valEl = document.getElementById("rel-validate");
   const aggregate = aggEl ? aggEl.checked : true;
-  const generalize = genEl ? genEl.checked : true;
   const validate = valEl ? valEl.checked : true;
   const params = {
     csv,
@@ -1263,8 +1803,6 @@ function collectRelParams() {
     base_seed: adaptive ? num("rel-base-seed") : null,
     aggregate: aggregate,
     aggregate_min_cluster: aggregate ? num("rel-aggregate-min-cluster") : null,
-    generalize: generalize,
-    generalize_min_cluster: generalize ? num("rel-generalize-min-cluster") : null,
     validate: validate,
     validate_layer: validate ? val("rel-validate-layer") : null,
     validate_limit: validate ? num("rel-validate-limit") : null,
@@ -1289,7 +1827,6 @@ function previewRelCommand() {
     gt_threshold: "--gt-threshold", base_seed: "--base-seed",
     stop_when: "--stop-when", epsilon_chao1: "--epsilon-chao1",
     aggregate_min_cluster: "--aggregate-min-cluster",
-    generalize_min_cluster: "--generalize-min-cluster",
   };
   const flags = [];
   for (const [k, v] of Object.entries(p)) {
@@ -1297,9 +1834,6 @@ function previewRelCommand() {
     else if (k === "include_raw" && v) flags.push("--include-raw");
     else if (k === "aggregate") {
       if (v === false) flags.push("--no-aggregate");
-    }
-    else if (k === "generalize") {
-      if (v === false) flags.push("--no-generalize");
     }
     else if (k in map) flags.push(`${map[k]} ${JSON.stringify(v)}`);
   }
@@ -1325,4 +1859,124 @@ async function onRelSubmit(e) {
   } catch (err) {
     toast(`launch failed: ${err.message}`, 4000);
   }
+}
+
+// ===== Step 2: Detect violations from approved relations =====
+//
+// Reuses the relations-discovery runs listed in the registry as the
+// pool of source runs the operator can pick from. The launcher posts
+// to ``kind: "relation_detection"``; the server resolves
+// ``discovery_run`` (absolute project-relative path) and shells out to
+// ``experiments.run_relation_detection``.
+
+async function populateDetectDiscoveryRuns() {
+  const sel = $("#rd-discovery-run");
+  if (!sel) return;
+  try {
+    const data = await api("/api/runs");
+    const runs = (data?.runs || []).filter((r) => r.kind === "relations");
+    if (!runs.length) {
+      sel.innerHTML = `<option value="">(no discovery runs available)</option>`;
+      return;
+    }
+    // Pre-fill with the URL ?prefill_discovery_run if provided (from
+    // the "Launch detection" link on the review page).
+    const url = new URLSearchParams(location.search);
+    const prefill = url.get("prefill_discovery_run") || "";
+    const opts = [`<option value="">(pick a discovery run)</option>`];
+    for (const r of runs) {
+      const label = `${r.run_id} · ${r.n_relations ?? 0} relations`;
+      const sel_ = r.run_id === prefill ? " selected" : "";
+      opts.push(`<option value="${escape(r.run_id)}"${sel_}>${escape(label)}</option>`);
+    }
+    sel.innerHTML = opts.join("");
+  } catch (err) {
+    sel.innerHTML = `<option value="">(failed to load: ${escape(err.message)})</option>`;
+  }
+}
+
+function collectRdParams() {
+  // Resolve discovery_run -> absolute project-relative path. The runs
+  // endpoint returns run_id (folder under outputs/); the backend's
+  // _path_within accepts either absolute or project-relative, so we
+  // hand it the relative path under outputs/.
+  const runId = ($("#rd-discovery-run")?.value || "").trim();
+  const params = {};
+  if (runId) params.discovery_run = `outputs/${runId}`;
+  const reviewFilter = $("#rd-review-filter")?.value;
+  if (reviewFilter) params.review_filter = reviewFilter;
+  const errorTypes = ($("#rd-error-types")?.value || "").trim();
+  if (errorTypes) params.error_types = errorTypes;
+  const model = ($("#rd-model")?.value || "").trim();
+  if (model) params.model = model;
+  const effort = ($("#rd-reasoning-effort")?.value || "").trim();
+  if (effort) params.reasoning_effort = effort;
+  const concurrency = $("#rd-concurrency")?.valueAsNumber;
+  if (Number.isFinite(concurrency)) params.concurrency = concurrency;
+  const minPr = $("#rd-min-pass-rate")?.valueAsNumber;
+  if (Number.isFinite(minPr)) params.violations_min_pass_rate = minPr;
+  const maxPr = $("#rd-max-pass-rate")?.valueAsNumber;
+  if (Number.isFinite(maxPr)) params.violations_max_pass_rate = maxPr;
+  const maxPerRule = $("#rd-max-per-rule")?.valueAsNumber;
+  if (Number.isFinite(maxPerRule)) params.violations_max_per_rule = maxPerRule;
+  const minConf = ($("#rd-min-confidence")?.value || "").trim();
+  if (minConf) params.violations_min_confidence = minConf;
+  if ($("#rd-no-llm-detect")?.checked) params.no_llm_detect = true;
+  if ($("#rd-no-synthesis")?.checked) params.no_synthesis = true;
+  return params;
+}
+
+function previewRdCmd() {
+  const p = collectRdParams();
+  const flags = [];
+  const positional = p.discovery_run ? [JSON.stringify(p.discovery_run)] : [];
+  delete p.discovery_run;
+  const map = {
+    review_filter: "--review-filter",
+    error_types: "--error-types",
+    model: "--model",
+    reasoning_effort: "--reasoning-effort",
+    concurrency: "--concurrency",
+    violations_min_pass_rate: "--violations-min-pass-rate",
+    violations_max_pass_rate: "--violations-max-pass-rate",
+    violations_max_per_rule: "--violations-max-per-rule",
+    violations_min_confidence: "--violations-min-confidence",
+  };
+  for (const [k, v] of Object.entries(p)) {
+    if (k === "no_llm_detect" && v) flags.push("--no-llm-detect");
+    else if (k === "no_synthesis" && v) flags.push("--no-synthesis");
+    else if (k in map) flags.push(`${map[k]} ${JSON.stringify(v)}`);
+  }
+  const el = $("#rd-cmd-preview");
+  if (!el) return;
+  el.hidden = false;
+  el.textContent = "python -m experiments.run_relation_detection \\\n    "
+    + [...positional, ...flags].join(" \\\n    ");
+}
+
+async function onRdSubmit(e) {
+  e.preventDefault();
+  const params = collectRdParams();
+  if (!params.discovery_run) {
+    toast("pick a discovery run first", 3000);
+    return;
+  }
+  try {
+    const job = await api("/api/launcher/jobs", {
+      method: "POST",
+      body: JSON.stringify({ kind: "relation_detection", params }),
+    });
+    toast(`relation detection launched: ${job.job_id}`);
+    showTab("jobs");
+    openJob(job.job_id);
+    refreshJobs();
+  } catch (err) {
+    toast(`launch failed: ${err.message}`, 4000);
+  }
+}
+
+function initRelationDetectionForm() {
+  populateDetectDiscoveryRuns();
+  $("#rd-show-cmd")?.addEventListener("click", previewRdCmd);
+  $("#rel-detect-form")?.addEventListener("submit", onRdSubmit);
 }

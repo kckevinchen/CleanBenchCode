@@ -167,3 +167,295 @@
   color: #000;
   padding: 0 2px;
 }
+
+/* ============================================================
+   Sub-tab toggle inside the Compare panel.
+   Run-vs-run | Benchmark-vs-external switcher at the top.
+   ============================================================ */
+.cmp-mode-switch {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  margin-bottom: 14px;
+}
+.cmp-mode {
+  background: var(--panel);
+  color: var(--muted);
+  border: none;
+  padding: 6px 14px;
+  font-size: 12px;
+  cursor: pointer;
+  border-right: 1px solid var(--border);
+}
+.cmp-mode:last-child { border-right: none; }
+.cmp-mode:hover { color: var(--text); background: var(--panel-2); }
+.cmp-mode.active {
+  background: var(--accent);
+  color: #0b1620;
+  font-weight: 600;
+}
+.cmp-mode-panel.hidden { display: none; }
+
+/* ============================================================
+   External-compare panel: pickers, metrics, state badges, grid.
+   ============================================================ */
+.ext-pickers {
+  display: flex;
+  align-items: end;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.ext-pickers label { display: flex; flex-direction: column; gap: 4px; flex: 1 1 240px; }
+.ext-pickers label.checkbox {
+  flex: 0 0 auto;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  padding-bottom: 6px;
+}
+.ext-pickers label > span { font-size: 11.5px; color: var(--muted); }
+.ext-pickers select { padding: 6px 8px; }
+.ext-pickers button {
+  padding: 6px 14px;
+  height: 32px;
+  align-self: end;
+}
+
+/* Headline metrics row. */
+.ext-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px;
+  margin: 12px 0 16px;
+}
+.ext-metric {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+}
+.ext-metric-label {
+  font-size: 10.5px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+.ext-metric-value {
+  font-size: 20px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  margin-top: 2px;
+}
+
+/* State badges -- one colour per join state. Designed for a dark theme
+   (panel-2 background) so we use saturated foreground colours on dim
+   tinted backgrounds. */
+.ext-state-badge {
+  display: inline-block;
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 4px;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+  border: 1px solid currentColor;
+}
+.ext-state-fn        { background: #3a1a1a; color: #f87171; }
+.ext-state-fp        { background: #3a2a1a; color: #f59e0b; }
+.ext-state-tp        { background: #1a3a2a; color: #34d399; }
+.ext-state-clean     { background: #1f1f2a; color: #94a3b8; }
+.ext-state-amb       { background: #3a3a1a; color: #facc15; }
+.ext-state-mixed     { background: #2a1a3a; color: #c084fc; }
+.ext-state-unmatched { background: #1a2a3a; color: #60a5fa; }
+
+/* Filter row mirrors compare.compare-filters but with its own button
+   alignment because there are two buttons (Apply, Clear). */
+.ext-filters {
+  display: flex;
+  gap: 10px;
+  align-items: end;
+  flex-wrap: wrap;
+  margin: 6px 0 10px;
+}
+.ext-filters label { display: flex; flex-direction: column; gap: 4px; }
+.ext-filters label > span { font-size: 11px; color: var(--muted); }
+.ext-filters input, .ext-filters select { padding: 4px 6px; min-width: 200px; }
+.ext-filters button { padding: 4px 12px; }
+.ext-filters .ext-secondary {
+  background: var(--panel-2);
+  color: var(--muted);
+}
+
+/* Benchmark-label chips shown in the cell grid + drawer detail. */
+.ext-lab {
+  display: inline-block;
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 3px;
+  letter-spacing: 0.3px;
+  border: 1px solid currentColor;
+}
+.ext-lab-error     { color: #f87171; background: #3a1a1a; }
+.ext-lab-clean     { color: #34d399; background: #1a3a2a; }
+.ext-lab-ambiguous { color: #facc15; background: #3a3a1a; }
+
+/* Drawer additions for external-compare mode. */
+.ext-drawer-state {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.ext-drawer-state .muted { font-size: 11px; }
+
+.ext-edit-form {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+.ext-edit-row {
+  display: grid;
+  grid-template-columns: 130px 1fr;
+  gap: 10px;
+  margin-bottom: 8px;
+  align-items: start;
+}
+.ext-edit-key {
+  font-size: 11px;
+  color: var(--muted);
+  padding-top: 4px;
+}
+.ext-edit-val { display: flex; flex-wrap: wrap; gap: 10px 12px; align-items: center; }
+.ext-edit-val input[type="text"],
+.ext-edit-val textarea {
+  width: 100%;
+  padding: 4px 6px;
+  font-family: inherit;
+  font-size: 12px;
+}
+.ext-edit-val textarea { resize: vertical; }
+.ext-edit-val label { font-size: 11.5px; display: inline-flex; align-items: center; gap: 4px; }
+
+.ext-chips { gap: 4px 6px; }
+.ext-chip {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 6px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.ext-chip:has(input:checked) {
+  background: var(--accent);
+  color: #0b1620;
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+.ext-edit-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+}
+.ext-edit-save {
+  background: var(--accent);
+  color: #0b1620;
+  border: none;
+  padding: 5px 14px;
+  font-weight: 600;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.ext-edit-cancel {
+  background: var(--panel);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  padding: 5px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+/* External-compare table reuses .compare-table base. Subtle row-hover
+   tint stronger than the run-vs-run table so the busier grid is easier
+   to scan. */
+#ext-cells-table tr:hover td { background: rgba(255,255,255,0.04); }
+
+/* Inline quick-relabel segmented control in the bench-label column.
+   Three single-letter pills (E/C/A) replace the static label badge so
+   the operator can flip the label without opening the drawer. The
+   ``.active`` pill picks up the colour family from .ext-lab-*. */
+.ext-quick-relabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.ext-quick-btn {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  font-size: 11px;
+  font-weight: 700;
+  font-family: inherit;
+  border-radius: 4px;
+  cursor: pointer;
+  background: var(--panel);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  transition: filter 0.15s;
+}
+.ext-quick-btn:hover:not([disabled]) { filter: brightness(1.4); color: var(--text); }
+.ext-quick-btn[disabled] { opacity: 0.5; cursor: progress; }
+.ext-quick-btn.active.ext-quick-error     { background: #3a1a1a; color: #f87171; border-color: #f87171; }
+.ext-quick-btn.active.ext-quick-clean     { background: #1a3a2a; color: #34d399; border-color: #34d399; }
+.ext-quick-btn.active.ext-quick-ambiguous { background: #3a3a1a; color: #facc15; border-color: #facc15; }
+.ext-quick-status {
+  font-size: 10.5px;
+  min-width: 12px;
+  white-space: nowrap;
+}
+.ext-quick-status.ext-quick-ok  { color: #34d399; }
+.ext-quick-status.ext-quick-err { color: #f87171; }
+
+/* =====================================================================
+   "Canonicalize relabels" action bar
+   ===================================================================== */
+.ext-canon-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  margin: 8px 0 12px;
+  background: rgba(99, 102, 241, 0.06);
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  border-radius: 6px;
+}
+.ext-canon-bar button#ext-canon-run {
+  background: rgba(129, 140, 248, 0.18);
+  color: #c7d2fe;
+  border: 1px solid rgba(129, 140, 248, 0.55);
+  padding: 5px 12px;
+  border-radius: 5px;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 120ms ease;
+}
+.ext-canon-bar button#ext-canon-run:hover:not([disabled]) { filter: brightness(1.25); }
+.ext-canon-bar button#ext-canon-run[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.ext-canon-bar .ext-canon-spacer { flex: 1; }
+.ext-canon-status {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.ext-canon-ok  { color: #34d399; font-weight: 600; }
+.ext-canon-err { color: #f87171; font-weight: 600; }
+.cmp-drawer-section + .cmp-drawer-section { margin-top: 18px; }
+.cmp-drawer-section h4 { margin: 0 0 6px; font-size: 12.5px; }

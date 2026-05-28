@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Sequence
+from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -183,27 +183,38 @@ def _visible_whitespace(s: str) -> str:
     return s
 
 
-def _dedupe_columns(columns: Sequence[str]) -> List[str]:
-    """Return ``columns`` with duplicates suffixed ``.1``, ``.2``, ...
+def _drop_duplicate_columns(
+    columns: Sequence[str],
+) -> Tuple[List[str], List[int], List[str]]:
+    """Collapse duplicate column names by keeping only the FIRST occurrence.
 
-    Mirrors pandas' own default behaviour when the on-disk CSV has
-    repeated header labels. We apply it ourselves AFTER whitespace
-    stripping, because two columns that look distinct in the raw file
-    (e.g. ``"Numeric"`` and ``" Numeric"``) can collide after
-    normalisation and break every downstream helper that assumes
-    ``frame[col]`` returns a Series (they would instead get a
-    DataFrame).
+    Returns ``(unique_names, keep_indices, dropped_names)``:
+
+    * ``unique_names``: deduplicated list, preserving first-occurrence order.
+    * ``keep_indices``: positions in the input list to keep (one per name in
+      ``unique_names``); callers use this to project the matching DataFrame.
+    * ``dropped_names``: distinct duplicate labels that were collapsed,
+      sorted alphabetically (for logging).
+
+    Rationale: after whitespace-stripping headers, two columns that looked
+    distinct in the raw file (e.g. ``"Total"`` and ``"Total "``) can
+    collide. Suffixing them as ``Total`` / ``Total.1`` keeps both but
+    leaves the downstream pipeline guessing which is canonical. We prefer
+    to drop the later occurrence(s) outright so callers always see a
+    single, unambiguous column per name.
     """
-    seen: Dict[str, int] = {}
-    out: List[str] = []
-    for c in columns:
-        if c not in seen:
-            seen[c] = 0
-            out.append(c)
-        else:
-            seen[c] += 1
-            out.append(f"{c}.{seen[c]}")
-    return out
+    seen: set[str] = set()
+    unique_names: List[str] = []
+    keep_indices: List[int] = []
+    dropped: set[str] = set()
+    for i, c in enumerate(columns):
+        if c in seen:
+            dropped.add(c)
+            continue
+        seen.add(c)
+        unique_names.append(c)
+        keep_indices.append(i)
+    return unique_names, keep_indices, sorted(dropped)
 
 
 def load_csv(path: Path | str, **read_csv_kwargs) -> pd.DataFrame:
@@ -213,15 +224,33 @@ def load_csv(path: Path | str, **read_csv_kwargs) -> pd.DataFrame:
     logger.info("Loading CSV: %s", path)
     df = pd.read_csv(path, dtype=str, keep_default_na=False, **read_csv_kwargs)
     stripped = [c.strip() for c in df.columns]
-    deduped = _dedupe_columns(stripped)
-    if deduped != stripped:
-        dup_labels = sorted({s for s in stripped if stripped.count(s) > 1})
+    unique_names, keep_indices, dropped = _drop_duplicate_columns(stripped)
+    if dropped:
         logger.warning(
-            "Duplicate column header(s) %s in %s; renaming to disambiguate.",
-            dup_labels, path,
+            "Duplicate column header(s) %s in %s; keeping first occurrence "
+            "and dropping later duplicates.",
+            dropped, path,
         )
-    df.columns = deduped
-    return df
+        df = df.iloc[:, keep_indices].copy()
+    df.columns = unique_names
+
+    # Strip leading/trailing whitespace from every cell as a CSV
+    # preprocessing step. Rationale: leading/trailing whitespace is
+    # treated as a padding artefact of the CSV format, not a per-cell
+    # defect, so we normalise it once at load time rather than asking
+    # every downstream detector to handle it. Internal whitespace
+    # (REPEATED INTERNAL SPACES, embedded newlines/tabs) is PRESERVED
+    # verbatim, so detectors that DO care about it - `typo:whitespace`
+    # for "James   Smith", `inconsistency` for embedded line breaks -
+    # still see the signal.
+    stripped_df = df.map(lambda s: s.strip() if isinstance(s, str) else s)
+    n_trimmed = int(df.ne(stripped_df).to_numpy().sum())
+    if n_trimmed:
+        logger.info(
+            "Stripped leading/trailing whitespace from %d cell(s) in %s",
+            n_trimmed, path,
+        )
+    return stripped_df
 
 
 def iter_chunks(

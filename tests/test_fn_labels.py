@@ -652,3 +652,173 @@ class TestSourceCoverage:
         )
         assert meta["checked"] is True
         assert meta["fn_cells"] == 1
+
+
+class TestExportConflictsEndpoint:
+    """End-to-end check for ``GET /export/conflicts``.
+
+    The pre-export sanity check that surfaces (source, column,
+    original_value) triples whose label verdicts disagree across
+    rows. Returns the same materialised benchmark the export
+    endpoints emit, so what the UI shows is exactly what would
+    have been shipped in the JSONL.
+    """
+
+    @staticmethod
+    def _build_run_with_repeated_value(project: Path) -> str:
+        """Create a run dir whose ``a.csv`` has the same value
+        ``Apple`` in rows 1 + 2 (column ``fruit``) and a different
+        value ``Banana`` in row 3, together with two same-value
+        clusters on rows 1 + 2 plus one independent cluster on row
+        3. The CSV row numbering matches the labelling-UI's 0-based
+        ``row`` semantics (row 0 = first data row)."""
+        data_dir = project / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        (data_dir / "a.csv").write_text(
+            "fruit\nApple\nApple\nApple\nBanana\n", encoding="utf-8",
+        )
+
+        run_dir = project / "outputs" / "20260101T000001Z_conflicts"
+        run_dir.mkdir(parents=True)
+        summary = {
+            "config": {
+                "csv_paths": [str(data_dir / "a.csv")],
+                "sources": ["a.csv"],
+            },
+        }
+        (run_dir / "summary.json").write_text(json.dumps(summary))
+        clusters = [
+            {
+                "cluster_id": "c-row0", "source": "a.csv", "row": 0,
+                "columns": ["fruit"], "error_types": ["typo"],
+                "row_values": {"fruit": "Apple"},
+            },
+            {
+                "cluster_id": "c-row1", "source": "a.csv", "row": 1,
+                "columns": ["fruit"], "error_types": ["typo"],
+                "row_values": {"fruit": "Apple"},
+            },
+            {
+                "cluster_id": "c-row2", "source": "a.csv", "row": 2,
+                "columns": ["fruit"], "error_types": ["typo"],
+                "row_values": {"fruit": "Apple"},
+            },
+            {
+                "cluster_id": "c-row3", "source": "a.csv", "row": 3,
+                "columns": ["fruit"], "error_types": ["typo"],
+                "row_values": {"fruit": "Banana"},
+            },
+        ]
+        (run_dir / "clusters.json").write_text(json.dumps(clusters))
+        (run_dir / "issues.json").write_text("[]")
+        return run_dir.name
+
+    @pytest.fixture
+    def conflict_client(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td)
+            (project / "frontend" / "labeling").mkdir(parents=True)
+            run_id = self._build_run_with_repeated_value(project)
+            app = create_app(project, annotator="tester")
+            yield TestClient(app), run_id
+
+    def test_no_labels_means_no_conflicts(self, conflict_client) -> None:
+        client, run_id = conflict_client
+        r = client.get(f"/api/runs/{run_id}/export/conflicts")
+        assert r.status_code == 200
+        assert r.json() == {"conflicts": []}
+
+    def test_same_value_different_labels_surface_as_conflict(
+        self, conflict_client,
+    ) -> None:
+        client, run_id = conflict_client
+        # Row 0 "Apple" -> clean, row 1 "Apple" -> error: classic
+        # accidental-flip the operator should be warned about before
+        # exporting.
+        client.post(
+            f"/api/runs/{run_id}/labels",
+            json={
+                "target": "cluster", "target_id": "c-row0",
+                "source": "a.csv", "row": 0, "column": "fruit",
+                "status": "fp",
+            },
+        )
+        client.post(
+            f"/api/runs/{run_id}/labels",
+            json={
+                "target": "cluster", "target_id": "c-row1",
+                "source": "a.csv", "row": 1, "column": "fruit",
+                "status": "tp", "corrected_value": "Apples",
+            },
+        )
+        # Row 2 left unlabelled (no benchmark cell emitted), row 3
+        # "Banana" is a different value entirely.
+        r = client.get(f"/api/runs/{run_id}/export/conflicts")
+        assert r.status_code == 200
+        groups = r.json()["conflicts"]
+        assert len(groups) == 1
+        g = groups[0]
+        assert g["source"] == "a.csv"
+        assert g["column"] == "fruit"
+        assert g["original_value"] == "Apple"
+        assert sorted(g["labels"]) == ["clean", "error"]
+        rows = sorted(c["row"] for c in g["cells"])
+        assert rows == [0, 1]
+        # Cluster ids round-trip so the UI can navigate to the offender.
+        for c in g["cells"]:
+            assert c["cluster_ids"]
+
+    def test_consistent_labels_do_not_trigger_a_conflict(
+        self, conflict_client,
+    ) -> None:
+        client, run_id = conflict_client
+        # All three "Apple" rows agree -> no conflict on the triple.
+        for cid, row in (("c-row0", 0), ("c-row1", 1), ("c-row2", 2)):
+            client.post(
+                f"/api/runs/{run_id}/labels",
+                json={
+                    "target": "cluster", "target_id": cid,
+                    "source": "a.csv", "row": row, "column": "fruit",
+                    "status": "fp",
+                },
+            )
+        r = client.get(f"/api/runs/{run_id}/export/conflicts")
+        assert r.status_code == 200
+        assert r.json() == {"conflicts": []}
+
+    def test_exclusions_remove_cells_from_conflict_set(
+        self, conflict_client,
+    ) -> None:
+        client, run_id = conflict_client
+        # Build a conflict, then exclude the row that triggered it -
+        # the export endpoint applies the same exclusion filter so
+        # the conflict report and the JSONL stay aligned.
+        client.post(
+            f"/api/runs/{run_id}/labels",
+            json={
+                "target": "cluster", "target_id": "c-row0",
+                "source": "a.csv", "row": 0, "column": "fruit",
+                "status": "fp",
+            },
+        )
+        client.post(
+            f"/api/runs/{run_id}/labels",
+            json={
+                "target": "cluster", "target_id": "c-row1",
+                "source": "a.csv", "row": 1, "column": "fruit",
+                "status": "tp", "corrected_value": "Apples",
+            },
+        )
+        # Sanity-check the conflict exists before exclusion.
+        assert client.get(
+            f"/api/runs/{run_id}/export/conflicts"
+        ).json()["conflicts"]
+        # Exclude row 1 (the "error" half).
+        r = client.post(
+            f"/api/runs/{run_id}/exclusions",
+            json={"source": "a.csv", "scope": "rows", "rows": [1]},
+        )
+        assert r.status_code == 200, r.text
+        assert client.get(
+            f"/api/runs/{run_id}/export/conflicts"
+        ).json()["conflicts"] == []

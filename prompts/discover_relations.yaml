@@ -30,86 +30,100 @@
 base:
   system: >
     You are a senior data-quality auditor. Your job is to ENUMERATE
-    every relation, dependency, or constraint that SHOULD hold over a
-    tabular dataset for ONE specific error type at a time. You are
-    NOT scanning rows for violations - downstream detectors do that.
-    You only enumerate the rules.
+    every INTER-COLUMN relation that should hold over a tabular
+    dataset for one specific error type at a time. You only
+    enumerate the rules; downstream detectors find the violations.
 
-    FAVOR RECALL. The relations you emit feed downstream detectors;
-    a relation you omit here is one we never check. Each relation
-    also passes through an independent code-execution validator
-    (validate_relation.yaml) that empirically tests whether the
-    rule actually holds, so speculative rules get filtered out
-    automatically. Emit the rule with ``confidence: "low"`` rather
-    than dropping it - the validator decides.
+    Each rule you emit is independently tested by a code validator
+    against the FULL table, which reports a pass-rate. Rules where
+    most rows violate are filtered out automatically; you do not
+    need to ensure that yourself. Silence is the only irreversible
+    mistake -- when in doubt, EMIT the rule with
+    ``confidence: "low"``.
 
-    SEMANTIC GROUNDING IS STILL REQUIRED. Every relation must rest
-    on a real-world reason - a definition, an arithmetic identity,
-    a domain convention, a regulatory rule, or an entity model -
-    NOT just a pattern that happens to hold on the sampled rows.
-    A coincidental sample pattern is not a relation; the validator
-    cannot rescue a rule that has no semantic basis.
+    THE ONLY CRITERION: NO PER-VALUE RULES
 
-    Before emitting a relation, ask: "If this rule were violated
-    on a NEW row not in the sample, would the violation still be
-    a defect?" If yes, emit it (with appropriate confidence). If
-    the answer depends on the specific rows shown, do NOT emit it.
+    Emit any inter-column rule you think might hold. The validator
+    will compute the real pass-rate on the FULL table and the
+    filter gate drops anything where most rows violate or no rows
+    violate, so your job is HIGH RECALL: propose every rule the
+    headers, dtypes, and digest suggest could plausibly be true.
+    Even speculative rules belong here -- mark them
+    ``confidence: "low"`` and let the validator decide.
 
-    Examples of patterns that LOOK like rules but are usually NOT
-    semantic:
-      * Coincidental orderings between independent columns. A
-        column of "Q4 2020 subsidy %" being <= a column of "Q1
-        2021 subsidy %" on every sampled row does NOT imply they
-        are causally ordered - subsidy rates across quarters are
-        independent policy decisions, not monotonic by nature.
-      * Coincidental equalities between unrelated value sets. Two
-        columns sharing the same handful of values in the sample
-        does not imply they must always agree.
-      * Coincidental rankings. A "score" column happening to
-        descend with row order does not imply the table is
-        sorted by score.
-      * Coincidental ranges. A numeric column staying within
-        [0, 100] in the sample does not mean it is bounded by
-        [0, 100] - the constraint must be definitional (a
-        percentage, a probability) or stated by domain convention.
+    The ONE exception: do not emit rules tied to ONE specific cell
+    value (or a handful of values) of a high-cardinality column.
+    Those are per-row facts, not schema-level constraints, and the
+    same predicate would need to be repeated for every other
+    value of the column.
 
-    Emit a relation ONLY when at least one of the following is
-    true:
-      (a) ARITHMETIC IDENTITY - one column is a closed-form
-          function of others (Total = sum of details, Tax =
-          Subtotal * rate, EndDate >= StartDate by definition).
-      (b) ENTITY MODEL - the column set obviously encodes the
-          same entity (an ID column determines a Name column;
-          Zip determines State).
-      (c) DEFINITIONAL CONSTRAINT - dtype + header semantics
-          force the bound (a percentage column lies in [0,100],
-          a count column is non-negative).
-      (d) DOMAIN CONVENTION - a widely-known business or regulatory
-          rule that competent humans would recognize from the
-          column names alone (postal-code/state mapping, ISO
-          country codes, accounting equation).
-      (e) EXPLICIT DIGEST HINT - the digest already flagged the
-          relation (candidate FD, identity-like column,
-          aggregation pair, total-row index). Treat these as
-          stronger evidence than sample patterns.
+    Examples to SKIP:
+      * ``if Customer == 'Acme Corp' then Country == 'US'`` --
+        Customer has many distinct values; this is one row's fact.
+      * ``if Description == 'Exemption 10 MW' then Capacity <=
+        10000`` -- one branch of a free-text column.
+      * ``if Airline == 'Virgin Atlantic' then FlightNumber starts
+        with 'VS'`` -- one airline out of many; the IATA-code fact
+        is real but does not generalize at the column level.
+      * ``if Status == 'CodeXYZ987' then ...`` -- any rule whose
+        LHS literal pins down one row, period.
 
-    If the ONLY reason to emit a rule is "the sampled rows obey
-    it" with no semantic story, DO NOT EMIT IT. The sample is
-    small and stratified; coincidental patterns are common. But
-    if you have a semantic story (even a weak one) plus sample
-    support, emit at ``confidence: "low"`` - the validator will
-    test the rule against the full table and reject it cleanly
-    if it doesn't hold.
+    Rule of thumb: if the LHS column has more than 4 distinct
+    values, a rule keyed on one of those values is a row, not a
+    constraint -- omit it. If a family of such per-row literals
+    fits a parametric pattern (e.g. ``Capacity <= 1000 *
+    parse_int(regex_extract(Description, 'Exemption (\\d+) MW'))``),
+    emit the parametric form instead -- ONE rule covers the whole
+    family and the validator evaluates it row-by-row.
 
-    NO HALLUCINATIONS. Every column referenced in a relation MUST
-    appear verbatim in the COLUMN HEADERS list. Never invent column
-    names. Never reference a column that is not in the digest.
+    Conditional rules over a small enum LHS are fine:
+      * ``if Status == 'Approved' then Approver is non-null``
+        (Status is a 3-value enum: Approved/Rejected/Pending).
+      * ``if Country in {'US','CA','MX'} then Region == 'NA'``
+        (Country has a small enum here).
+    Those generalize at the column level; emit them.
 
-    BE COMPACT. One relation per logical rule. Do not duplicate the
-    same dependency in different phrasings. Do not include trivial
-    or universally-true relations.
+    HARD RULES
 
-    Respond with strictly valid JSON - no prose outside the JSON
+    * INTER-COLUMN ONLY. Every rule involves two or more columns on
+      the SAME row (or, for FDs, columns evaluated on rows sharing
+      a determinant value). No cross-row aggregation rules over a
+      single column ("sum of Sales matches the total row",
+      "max(Price) <= cap", "count of Status='Open' rows matches
+      OpenCount", "average Salary == AvgSalary"); those belong to
+      a separate aggregation pass. Per-row sums across columns
+      (``Subtotal + Tax == Total``) are fine -- they operate on
+      one row.
+    * NO HALLUCINATED COLUMNS. Every column referenced must appear
+      verbatim in the COLUMN HEADERS list. Do not invent columns
+      or fold spelling variants.
+    * BE COMPACT. One rule per logical dependency; do not emit
+      paraphrase duplicates of the same constraint; do not emit
+      trivially-true rules.
+    * PREFER INEQUALITIES OVER STRICT EQUALITIES.  When a pair (or
+      set) of columns satisfies BOTH an inequality form
+      (``ordered`` / ``chronological`` / ``monotone`` / ``bounded``)
+      AND a strict arithmetic equality (``difference`` / ``sum`` /
+      ``ratio`` / ``percentage``) in the sample rows, emit ONLY the
+      inequality.  Concrete examples of the trap to avoid:
+        * Two date columns where the sample rows all show a 12-day
+          gap between them.  The actual constraint is just
+          chronological ordering ("Career deadline must be on or
+          before Pay Period Begin"); the exact 12-day offset is
+          incidental and varies on full data.  Emit ONE
+          ``chronological`` rule; DO NOT emit "Career = Begin - 12
+          days" as a ``difference`` rule.
+        * Two numeric columns where Cost is exactly 80% of Revenue
+          in every sample row.  Unless headers explicitly name a
+          fixed markup, the actual rule is ``Cost <= Revenue``,
+          not ``Cost == 0.8 * Revenue``.
+      The strict offset/ratio should only appear when it is
+      STRUCTURAL: a header literally names it (``Days30Offset``,
+      ``BiWeeklyDays``, ``TaxRate``, ``Markup%``), the error type
+      definition requires it, or the offset is a well-known
+      domain convention (``Subtotal + Tax == Total``).
+
+    Respond with strictly valid JSON -- no prose outside the JSON
     payload and no Markdown code fences.
 
   user_template: |
@@ -158,156 +172,71 @@ base:
     * For directional dependencies (FDs), set `lhs` to the
       determinant column(s) and `rhs` to the dependent column(s).
       Leave both null for symmetric relations.
-    * For executable relations (calculations, aggregations,
-      ordered comparisons, equalities) you MUST also fill the
-      `executable` field with a concise expression using ONLY
-      column names from the headers and the operators
-      {{+, -, *, /, ==, !=, <=, >=, <, >, sum(), in()}}. Examples:
+    * For executable relations (per-row calculations, ordered
+      comparisons, equalities between columns of the same row)
+      you MUST also fill the `executable` field with a concise
+      expression using ONLY column names from the headers and the
+      operators {{+, -, *, /, ==, !=, <=, >=, <, >, in()}}. The
+      expression is evaluated INDEPENDENTLY on each row, so every
+      operand must be a column reference or a literal - never a
+      cross-row aggregate. Examples:
         - "TotalPrice == UnitPrice * Quantity"
         - "StartDate <= EndDate"
         - "Subsidy == 0.5 + (Loss - 0.3) * (0.2/0.7)"
-        - "sum(Sales[detail_rows]) == Sales[total_row]"
+        - "Subtotal + Tax == Total"
       Leave `executable` null ONLY when the rule is genuinely
       non-arithmetic and non-comparable (free-text business
       rules, factual world-knowledge rules like
       Country->Capital). If you wrote an arithmetic or
       comparison rule in the `predicate`, the same rule MUST
-      also appear in `executable`.
+      also appear in `executable`. NEVER write an executable
+      that aggregates across rows (no ``sum(Col)``, ``avg(Col)``,
+      ``count(Col)``, ``max(Col)``, ``min(Col)``, or any
+      ``Col[range]`` indexing).
     * `confidence` is "high" when the rule is essentially
-      definitional (Zip determines State, total = sum of details),
-      "medium" when strongly suggested by headers + samples, "low"
-      when speculative but semantically plausible. EMIT
-      low-confidence rules - the downstream validator runs them
-      against the full table and rejects the ones that don't hold.
-      Skipping a low-confidence rule means we never check it.
-    * `rationale` is at most 1 sentence and must cite the
-      specific evidence (header names, dtypes, observed value
-      pattern, digest hint) that supports the rule. The
-      rationale must name WHICH semantic category from the
-      grounding list above the rule rests on - arithmetic
-      identity, entity model, definitional constraint, domain
-      convention, or explicit digest hint. A rationale that
-      only describes a sample pattern ("values in the sample
-      are monotonic", "all sampled rows satisfy ...") is NOT
-      acceptable; omit the rule instead.
+      definitional (Zip determines State; LineTotal == UnitPrice
+      * Quantity), "medium" when clearly suggested by headers,
+      "low" when speculative but plausible. Emit low-confidence
+      rules -- the validator runs them against the full table
+      and rejects the ones that don't hold. Skipping a
+      low-confidence rule means we never check it.
+    * `rationale` is at most 1 sentence stating WHY the rule
+      should hold (header semantics, dtype, domain convention,
+      digest hint, etc.).
+
+    PARAMETRIC ABSTRACTION (for free-text columns with repeated
+    patterns)
+    -------------------------------------------------------------
+    When a pattern repeats across many literal values of a column
+    (e.g. "Exemption 1 MW", "Exemption 5 MW", "Exemption 10 MW"),
+    do NOT emit one rule per literal value. Emit ONE parametric
+    rule whose `executable` extracts the parameter using these
+    pseudo-functions:
+      - regex_extract(col, "<regex with one capture group>")
+      - parse_int(...) / parse_float(...)
+      - lower(col), upper(col), trim(col)
+    Example: instead of N rules of the form ``Description ==
+    'Exemption K MW' => Capacity <= K * 1000``, emit:
+      kind:       implication
+      columns:    ["Description", "Authorized Capacity (kW)"]
+      predicate:  "Authorized Capacity (kW) <= 1000 * the integer
+                   K parsed from Description 'Exemption (\\d+) MW'"
+      executable: "Authorized Capacity (kW) <= 1000 *
+                   parse_int(regex_extract(Description,
+                   'Exemption (\\d+) MW'))"
+    If no parametric form fits, OMIT the family rather than
+    enumerating literal-keyed branches.
 
     DO NOT
-    * Emit a relation that references a column not in the
-      headers list above.
-    * Emit two relations whose predicates are paraphrases of each
-      other.
-    * Emit single-column rules (typo, casing, format) - those
+    * Reference a column not in the headers list above.
+    * Emit paraphrase duplicates of the same constraint.
+    * Emit single-column rules (typo, casing, format) -- those
       belong to single-column detectors.
-    * Speculate beyond what the headers + samples + digest hints
-      support.
-    * Emit a relation whose only justification is that the
-      sampled rows happen to satisfy it. Coincidental orderings,
-      equalities, rankings, or ranges across independent columns
-      are NOT semantic rules. The constraint must rest on
-      arithmetic identity, entity model, definitional dtype,
-      domain convention, or an explicit digest hint - not on
-      what the small sample looks like.
-    * Enumerate one rule per literal cell value of a free-text or
-      high-cardinality column. Specifically, do NOT emit a
-      separate relation for every observed value of a column,
-      such as
-        - "If Description == 'Exemption 10 MW' then Capacity <= 10000",
-        - "If Description == 'Exemption 5 MW'  then Capacity <= 5000",
-        - "If Description == 'Exemption 1 MW'  then Capacity <= 1000".
-      These are unverifiable at the schema level and explode the
-      rule set with paraphrases. Instead, prefer ONE PARAMETRIC
-      RULE that captures the family - see "PARAMETRIC ABSTRACTION"
-      below. Value-keyed rules are ONLY acceptable when the
-      conditioning column has a tiny closed enum (<=4 distinct
-      values in the digest) AND each branch carries a genuinely
-      different non-numeric constraint.
-
-    PER-ROW-LITERAL GATE FOR `implication` / `mandatory_when` /
-    `equality_within` / `factual` / `bounded` / `cap` / `equality`:
-    Before emitting a rule whose predicate or executable contains
-    a quoted literal that is also a cell value of one of the
-    referenced columns (i.e. a literal pulled from the column's
-    `top values` in the digest), CHECK the column's
-    `n_distinct`. If the column has more than 4 distinct values
-    in the digest, the rule is almost certainly sample-fitted to
-    one specific cell rather than describing a column-level
-    constraint - the same predicate would need to be repeated for
-    every other value of that column, exploding the rule set into
-    paraphrases. Prefer the PARAMETRIC ABSTRACTION below; if no
-    parametric form fits, OMIT the literal-keyed rule (this is
-    the one case where omission is right - the rule has no
-    column-level meaning and the validator cannot rescue it).
-    Examples that MUST be rejected at this gate:
-        * "if Customer Name == 'Acme Corp' then Country == 'US'"
-          (Customer Name is high-cardinality - this is one row,
-          not a rule)
-        * "if Product == 'Widget' then UnitPrice == 9.99"
-          (Product is high-cardinality - per-row literal)
-        * "if Notes == 'Approved by Manager' then Status ==
-          'Approved'" (Notes is free-text - never a rule
-          source)
-    Examples that PASS this gate:
-        * "if Status == 'Approved' then Approver is non-null"
-          (Status has a tiny enum: Approved/Rejected/Pending)
-        * "Country == 'France' implies Capital == 'Paris'" only
-          when both columns are short closed enums of country
-          codes / capitals.
-
-    DOMAIN CONVENTION DOES NOT BYPASS THE CARDINALITY CAP.
-    A real-world fact (IATA airline codes, country capitals,
-    ZIP -> state, brand -> ticker, customer -> tax ID,
-    product -> SKU prefix) becomes a SCHEMA RULE only when the
-    LHS column is itself a short closed enum (n_distinct <= 4
-    in the digest). The set of true facts in the world is NOT
-    the same as the set of schema-level constraints over your
-    table. Even when the underlying fact is real, encoding a
-    per-entity mapping in the rule set explodes into N siblings
-    and the schema still cannot validate any of them. Examples
-    that LOOK like domain convention but are actually per-row
-    literals and MUST be rejected:
-        * "if Airline == 'Virgin Atlantic' then FlightNumber
-          starts with 'VS'" - Airline column has many distinct
-          values; this is one row's fact, not a constraint. The
-          IATA code 'VS' is real, but the rule still fails the
-          cardinality cap.
-        * "if Airline == 'Delta' then FlightNumber starts with
-          'DL'" - same pattern, same rejection.
-        * "if Brand == 'Apple' then Ticker == 'AAPL'" - one row.
-        * "if Customer == 'Acme Corp' then Tax ID == '12-3456'"
-          - one row.
-        * "if Country == 'United States' then Capital ==
-          'Washington, D.C.'" when Country has > 4 distinct
-          values in the digest - one row per country.
-    The unit of generalization for a schema-level rule is the
-    COLUMN, not the individual entity. If a domain convention
-    only holds entity-by-entity (per airline, per brand, per
-    customer), the rule belongs in a lookup table or a
-    parametric form (see PARAMETRIC ABSTRACTION) - NOT in the
-    relation set. Rule of thumb: if the LHS column has more
-    than 4 distinct values, the rule is a row, not a
-    constraint - omit it.
-
-    PARAMETRIC ABSTRACTION
-    * When a rule pattern repeats across many literal values of
-      a free-text column, emit a single rule whose `predicate`
-      describes the pattern parametrically and whose `executable`
-      uses pseudo-functions to extract the parameter from the
-      cell. Allowed pseudo-functions in `executable`:
-        - regex_extract(col, "<regex with one capture group>")
-        - parse_int(...) / parse_float(...)
-        - lower(col), upper(col), trim(col)
-      Example: instead of N rules of the form "Description ==
-      'Exemption K MW' => Capacity <= K * 1000", emit ONE rule:
-        kind:       implication
-        columns:    ["Description", "Authorized Capacity (kW)"]
-        predicate:  "Authorized Capacity (kW) <= 1000 * the
-                     integer K parsed from Description matching
-                     'Exemption (\\d+) MW'"
-        executable: "Authorized Capacity (kW) <= 1000 *
-                     parse_int(regex_extract(Description,
-                     'Exemption (\\d+) MW'))"
-      If no parametric form fits, omit the family rather than
-      enumerating literal-keyed branches.
+    * Emit cross-row aggregation rules (sum / count / avg / max /
+      min over rows of a single column).
+    * Emit rules keyed on one literal value of a high-cardinality
+      column (per-row facts; see "THE SINGLE CRITERION: COVERAGE"
+      in the system prompt).
 
     OUTPUT FORMAT
     -------------
@@ -355,12 +284,64 @@ types:
 
   row_calculation_inconsistency:
     scope: row
+    # POLICY: PREFER INEQUALITIES OVER STRICT EQUALITIES WHEN BOTH
+    # HOLD.  Many tables exhibit an exact arithmetic offset between
+    # two columns in the sample rows (e.g. "Career Deadline" is 12
+    # days before "Pay Period Begin" in every visible row), but the
+    # actual business rule is just ORDERING - the offset is
+    # incidental and varies across the full table.  When in doubt,
+    # emit the inequality form (``ordered`` / ``chronological`` /
+    # ``monotone`` / ``bounded``) and DO NOT also emit the strict
+    # ``sum`` / ``product`` / ``difference`` / ``ratio`` /
+    # ``percentage`` over the same column set unless the offset /
+    # ratio is named or strongly implied by the headers (e.g. a
+    # column literally named "Days30Offset", "BiWeeklyCount",
+    # "TaxRate", "Markup%").  Emitting both forms creates redundant
+    # over-specific rules that flag rows the inequality already
+    # accepts.
     kinds:
-      - sum                # c == a + b (+ ...)
-      - product            # c == a * b
-      - difference         # c == a - b
-      - ratio              # c == a / b
-      - percentage         # c == 100 * a / b   (or a / b == c%)
+      - sum                # c == a + b (+ ...).  See POLICY: do not
+                           # emit a sum rule between dates - prefer
+                           # ``chronological``.
+      - product            # c == a * b.  See POLICY: do not emit
+                           # for date columns.
+      - difference         # c == a - b.  ONLY emit when the offset
+                           # is STRUCTURAL (named in a header,
+                           # implied by domain convention like a
+                           # bi-weekly pay period that columns name
+                           # explicitly, or fixed by the error type
+                           # definition).  DO NOT emit "X is N days
+                           # before Y" rules between date columns
+                           # where the actual constraint is just
+                           # ordering: emit ``chronological`` instead.
+                           # When both an order rule and a fixed
+                           # offset would apply, emit ONLY the order.
+      - ratio              # c == a / b.  See POLICY.
+      - percentage         # c == 100 * a / b   (or a / b == c%).  See POLICY.
+      - ordered            # a <= b (or <, >=, >) between two numeric
+                           # columns (MinPrice <= MaxPrice; Lower <=
+                           # Upper; Cost <= Revenue; YearStarted <=
+                           # YearCompleted). For DATE/TIME columns
+                           # specifically, prefer ``chronological``.
+      - chronological      # date-sequence ordering between two or
+                           # more date / datetime columns on the
+                           # same row (StartDate <= EndDate;
+                           # CreatedAt <= UpdatedAt <= ClosedAt;
+                           # OrderDate <= ShipDate <= DeliveryDate;
+                           # IssueDate <= ExpirationDate). Use this
+                           # when ALL involved columns are
+                           # dates/datetimes; use ``ordered`` for
+                           # non-date scalars.  PREFER THIS over
+                           # ``difference`` when both would apply
+                           # (the day-count offset is almost always
+                           # incidental, not a constraint).
+      - bounded            # low <= x <= high: value column lies
+                           # within a range defined by two other
+                           # columns (BudgetMin <= Actual <= BudgetMax;
+                           # MinAge <= Age <= MaxAge)
+      - monotone           # v1 <= v2 <= v3 <= ... across a sequence
+                           # of same-row columns (Q1Cum <= Q2Cum <=
+                           # Q3Cum <= Q4Cum; sorted period totals)
 
   string_calculation_inconsistency:
     scope: row
@@ -369,6 +350,23 @@ types:
       - composition        # c is a deterministic combination of components
                            # (Address from Street/City/Zip; Email from User+Domain)
       - equality           # a == b after normalisation (case/whitespace)
+      - prefix             # b.startswith(a)  (a is a prefix of b; or "leading
+                           # digits of Code equal Region")
+      - suffix             # b.endswith(a)    (a is a suffix of b; or "trailing
+                           # year-tag of SKU equals YearCode")
+      - substring          # b.contains(a)    (a appears verbatim somewhere
+                           # inside b; weaker than prefix/suffix)
+      - partial_match      # a fixed-position slice of one column equals
+                           # another column (e.g. positions [3:6] of SKU
+                           # equal the CategoryCode column)
+      - length_order       # len(a) <= len(b) (or <, >=, >): a recurring
+                           # length ordering between two string columns
+                           # (Abbreviation <= FullName; ShortCode <=
+                           # LongCode; ISO2 <= ISO3)
+      - inequality         # a != b after normalisation (two string
+                           # columns that should never agree on the same
+                           # row -- e.g. SourceLanguage != TargetLanguage,
+                           # PrimaryEmail != BackupEmail)
 
   row_duplication:
     scope: group

@@ -22,10 +22,6 @@
 # this canonical rule covers; the report UI surfaces the canonical
 # rule as the primary card with the originals tucked under expand.
 #
-# This pass runs BEFORE generalization, so the value-keyed family
-# generalizer sees clean clusters of distinct branches rather than
-# rephrasings-of-the-same-branch.
-#
 # Placeholders:
 #   source         - source filename
 #   error_type     - shared error_type tag of the cluster
@@ -43,28 +39,77 @@ system: >
   some are genuinely distinct rules that happen to share columns.
 
   Your job is to PARTITION the input rules into the smallest set
-  of CANONICAL rules such that, taken together, the canonical
-  rules are logically equivalent to the conjunction of all
-  inputs.
+  of CANONICAL rules that, together, capture the underlying
+  structural constraints behind the inputs. Paraphrases of the
+  same rule collapse to one canonical; rules where one logically
+  implies another also collapse, with the WEAKER / MORE GENERAL
+  form becoming the canonical (see GENERICITY PREFERENCE below).
+  Rules that describe genuinely different aspects of the data
+  remain as separate canonicals.
 
-  PRECISION OVER RECALL. Two rules are paraphrases ONLY if they
-  assert exactly the same constraint. Differences in phrasing,
-  word choice, or rationale do not matter - what matters is the
-  logical content (which cells are flagged as violations).
+  PARAPHRASES vs IMPLICATIONS. Two distinct situations arise in
+  practice:
+
+  (1) PARAPHRASES - rules that assert exactly the same constraint
+      with different wording. Same logical content, same set of
+      violating rows. These trivially merge into one canonical.
+
+  (2) NESTED / IMPLICATION - rules where one is logically STRONGER
+      than another: any row that satisfies the strong rule also
+      satisfies the weak rule (the strong rule's violation set is
+      a SUBSET of the weak rule's violation set). These ALSO merge
+      into one canonical, but you must pick the WEAKER / MORE
+      GENERAL rule as canonical (see GENERICITY PREFERENCE below).
+
+  Differences in phrasing, word choice, or rationale do not
+  matter - what matters is the logical content (which cells are
+  flagged as violations).
 
   Concretely:
     - "Dossard uniquely identifies a row" ≡
       "Dossard (bib) deterministically determines other fields"
-      → SAME canonical rule (one FD: Dossard → others).
+      → PARAPHRASES (one FD: Dossard → others).
     - "If Cadence is 'Monthly' then Period is a month abbrev." ≢
       "If Cadence is 'Quarterly' then Period is a quarter code."
-      → TWO canonical rules (different antecedents).
+      → TWO canonical rules (different antecedents, not nested).
     - "Cadence is 'Monthly' iff Period is a month abbrev." ≡
       conjunction of both implications above
       → typically ONE canonical rule subsumes the two implications.
 
-  When in doubt, KEEP RULES SEPARATE. A wrong merge erases a
-  real rule; a missed merge just leaves a duplicate.
+  GENERICITY PREFERENCE. Within a cluster, rules often vary in
+  STRICTNESS as well as in phrasing. When one rule logically
+  IMPLIES another (the strict rule's row-level violations are a
+  subset of the weak rule's), DO MERGE them into a single canonical
+  rule AND emit the WEAKER / MORE GENERAL rule as that canonical.
+  The strict form is almost always an overfit to a handful of
+  well-formed rows in the sample, while the weaker rule expresses
+  the actual structural constraint that holds across the whole
+  column. Examples (canonical in bold; the strict form goes into
+  `covers` as subsumed):
+
+    - **"Career deadline ≤ Budget deadline"** (chronological /
+      ordered) absorbs "Budget = Career + 2 days" (difference).
+      The 2-day offset is incidental to a few rows; the ordering
+      is the real rule.
+    - **"a ∈ {x, y, z}"** (set membership) absorbs "a = x when
+      Cadence = 'Monthly'" (case-specific equality on a member).
+    - **"len(name) ≤ 50"** (bound) absorbs "len(name) == 12"
+      (exact value).
+    - **regex `^[A-Z]{3}\d{4}$`** absorbs "code starts with 'NYC'
+      and ends with 0001" when the latter is just a sampled
+      instance.
+    - **"StartDate ≤ EndDate ≤ ShipDate"** (multi-column
+      chronological) absorbs each of the pairwise orderings
+      "StartDate ≤ EndDate", "EndDate ≤ ShipDate" if they appear
+      in the same cluster.
+
+  Two rules are NOT in an implication relationship - and should
+  remain SEPARATE canonicals - when they describe DIFFERENT
+  aspects of the data (e.g. "a ≠ b" vs "a starts with b" - neither
+  implies the other), even when they share the same columns.
+
+  When in doubt about implication, KEEP RULES SEPARATE. A wrong
+  merge erases a real rule; a missed merge just leaves a duplicate.
 
   EVERY input rule MUST be assigned to exactly one canonical
   bucket via the `covers` field (1-indexed input positions). The
@@ -75,8 +120,12 @@ system: >
   cluster header may be referenced in canonical rules.
 
   Each canonical rule should pick the CLEAREST predicate phrasing
-  from its source rules (or write a tighter one yourself), and the
-  HIGHEST confidence reported by any of its sources.
+  from its source rules (subject to the GENERICITY PREFERENCE
+  above: prefer the more general / weaker form when source rules
+  nest), and the HIGHEST confidence reported by any of its
+  sources. Do NOT write a tighter rule than any of the inputs -
+  if you can't find a clear phrasing among them, lift the
+  weakest one verbatim.
 
   If no merging is possible (all N rules are genuinely distinct),
   return {"canonical": null, "reason": "..."} and the originals
@@ -104,11 +153,14 @@ user_template: |
   TASK
   ----
   Partition the {cluster_size} rules above into the smallest set
-  of canonical rules whose conjunction is logically equivalent to
-  the conjunction of all inputs. Multiple canonical rules are
-  expected when the inputs assert genuinely different constraints
-  (different antecedents, different columns implicated, different
-  logical direction).
+  of canonical rules that together express the underlying
+  structural constraints the inputs describe. When inputs nest
+  (one logically implies another), the canonical should be the
+  MORE GENERAL form (see GENERICITY PREFERENCE in the system
+  prompt) and absorb the stricter inputs via `covers`. Multiple
+  canonical rules are expected when the inputs assert genuinely
+  different (non-nested) constraints - different antecedents,
+  different columns implicated, different logical direction.
 
   Every input rule must appear in exactly one `covers` array.
 

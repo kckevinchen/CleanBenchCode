@@ -1,4 +1,4 @@
-"""Tests for ``src.core.relation_validator``.
+"""Tests for ``src.core.relations.validator``.
 
 Cover:
 
@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.core.relation_validator import (
+from src.core.relations.validator import (
     CodeValidationError,
     RelationVerification,
     _coerce_to_bool_series,
@@ -570,7 +570,7 @@ class TestValidateOneAdaptive:
 
     def test_kmax_one_returns_first_run(self) -> None:
         from src.adaptive.scoped_gt import ArmConfig
-        from src.core.relation_validator import validate_one_adaptive
+        from src.core.relations.validator import validate_one_adaptive
 
         llm = _StubLLMClient([
             json.dumps({
@@ -593,7 +593,7 @@ class TestValidateOneAdaptive:
 
     def test_unverifiable_short_circuits(self) -> None:
         from src.adaptive.scoped_gt import ArmConfig
-        from src.core.relation_validator import validate_one_adaptive
+        from src.core.relations.validator import validate_one_adaptive
 
         llm = _StubLLMClient([
             json.dumps({"verifiable": False, "reason": "needs external info"}),
@@ -614,7 +614,7 @@ class TestValidateOneAdaptive:
 
     def test_unions_violations_across_runs(self) -> None:
         from src.adaptive.scoped_gt import ArmConfig
-        from src.core.relation_validator import validate_one_adaptive
+        from src.core.relations.validator import validate_one_adaptive
 
         # Run 1 flags rows {0,1}; run 2 flags rows {1,2}; run 3 flags {2,3};
         # union should contain {0,1,2,3}.

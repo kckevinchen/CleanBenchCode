@@ -1,10 +1,10 @@
-"""Tests for ``src.core.multi_table_priors``."""
+"""Tests for ``src.core.multi_table.priors``."""
 
 from __future__ import annotations
 
 import pandas as pd
 
-from src.core.multi_table_priors import (
+from src.core.multi_table.priors import (
     AttributeAgreementCandidate,
     CompositeFKCandidate,
     ContainmentCandidate,
