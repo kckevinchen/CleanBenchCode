@@ -8,7 +8,9 @@ is referenced only as a string annotation under ``TYPE_CHECKING``).
 
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional
 
 from ._helpers import _scalar
@@ -19,6 +21,44 @@ if TYPE_CHECKING:
     from .app import RunContext
 
 logger = logging.getLogger(__name__)
+
+
+def _load_drafts_for_column(
+    run_dir: Path, source: str, column: str,
+) -> List[Dict[str, Any]]:
+    """Return the latest LLM ``draft_clusters`` for a (source, column).
+
+    Reads ``<run_dir>/column_cluster_drafts.jsonl`` and applies
+    latest-wins (the file is append-only, so a later record for the same
+    (source, column) supersedes an earlier one). Returns an empty list
+    when the run has no draft file or no draft for this pair. Each draft
+    dict carries ``{values, canonical, agreement, kind}`` -- the shape
+    persisted by ``experiments.run_column_clustering``.
+
+    Shared by the column-cluster router (surface drafts as queue items)
+    and the core label endpoint (lazily promote a draft to a real record
+    on the operator's first verdict).
+    """
+    drafts_path = run_dir / "column_cluster_drafts.jsonl"
+    if not drafts_path.exists():
+        return []
+    found: Optional[List[Dict[str, Any]]] = None
+    try:
+        with drafts_path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:  # noqa: BLE001
+                    continue
+                if rec.get("source") == source and rec.get("column") == column:
+                    found = rec.get("draft_clusters") or []
+    except OSError as exc:
+        logger.warning("_load_drafts_for_column: read failed: %s", exc)
+        return []
+    return found or []
 
 
 def _make_value_resolver(ctx: "RunContext"):
