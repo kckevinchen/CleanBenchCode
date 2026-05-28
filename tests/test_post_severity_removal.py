@@ -38,7 +38,7 @@ from src.core.report_builder import (
     build_summary,
     flatten_issues,
 )
-from src.labeling.app import _cluster_summary
+from src.labeling.routers.clusters import _cluster_summary
 
 
 # ---------------------------------------------------------------------------
