@@ -17,7 +17,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from src.labeling.app import _has_whitespace_anomaly, create_app
+from src.labeling.app import create_app
+from src.labeling.routers.propagation import _has_whitespace_anomaly
 
 
 def _build_run(tmp_path: Path) -> tuple[Path, str]:
