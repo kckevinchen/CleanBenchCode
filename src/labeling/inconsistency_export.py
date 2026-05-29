@@ -33,6 +33,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 
+from src.core.data_loader import load_csv
 from src.core.llm_client import LLMClient
 from src.labeling.correction_suggester import (
     INTERESTING_STATUSES,
@@ -86,7 +87,7 @@ def build_cell_groups(
             continue
         if s not in csv_cache:
             try:
-                df = pd.read_csv(path, dtype=str, keep_default_na=False)
+                df = load_csv(path)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "Failed to load CSV %s: %s; skipping.", path, exc,

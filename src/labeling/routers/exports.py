@@ -65,6 +65,20 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
         # original_value) key space so any divergent labels across
         # the typo and inconsistency pipelines surface here too.
         cells.extend(_materialize_inconsistency_cells_for_export(ctx))
+        # A cell can be flagged by both the cluster pipeline and the
+        # inconsistency pipeline; the benchmark must carry one record
+        # per (source, row, column). Keep the first (cluster-pipeline)
+        # occurrence; only dedup well-keyed per-cell records.
+        _seen_cells: set = set()
+        _deduped = []
+        for _c in cells:
+            _key = (_c.source, _c.row, _c.column)
+            if _c.row is not None and _c.column:
+                if _key in _seen_cells:
+                    continue
+                _seen_cells.add(_key)
+            _deduped.append(_c)
+        cells = _deduped
         cells = _apply_exclusions_to_cells(ctx, cells)
         conflicts = find_label_conflicts(cells)
         return {"conflicts": conflicts}
