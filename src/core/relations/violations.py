@@ -45,7 +45,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import pandas as pd
 
-from .validator import _exec_check_code, _run_check_with_timeout
+from ._check_runner import run_check_subprocess
 
 logger = logging.getLogger(__name__)
 
@@ -476,10 +476,11 @@ def compile_code_violations(
             _log(species_key, source, OUTCOME_NEEDS_REVIEW, reason)
             continue
 
-        # outcome == OUTCOME_COMPILE: re-execute the sandboxed check.
+        # outcome == OUTCOME_COMPILE: re-execute the sandboxed check in a
+        # killable, resource-capped subprocess (a runaway rule must not be
+        # able to hang the detector).
         try:
-            fn = _exec_check_code(v["code"])
-            mask = _run_check_with_timeout(fn, df, timeout_seconds)
+            mask = run_check_subprocess(v["code"], df, timeout_seconds)
         except Exception as exc:  # noqa: BLE001
             # The validator scored the rule fine but our re-run
             # crashed. Don't lose recall: surface for human review.
