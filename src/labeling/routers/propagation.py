@@ -595,6 +595,18 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
                     ]
                     if col not in ccols:
                         continue
+                    # Never overwrite a human verdict: if the operator
+                    # already ruled this phone-column cluster
+                    # tp/fp/partial/unsure, leave it (only unruled /
+                    # skip clusters are eligible for the trivial skip).
+                    _lab = latest.get(cid)
+                    if (_lab is not None
+                            and _lab.target == LabelTarget.CLUSTER
+                            and _lab.status in (
+                                LabelStatus.TP, LabelStatus.FP,
+                                LabelStatus.PARTIAL, LabelStatus.UNSURE,
+                            )):
+                        continue
                     seen_cluster_ids.add(cid)
                     col_clusters.append({
                         "target_id": cid,
@@ -767,7 +779,7 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
             if not cid:
                 continue
             cr = c.get("row")
-            if not isinstance(cr, int):
+            if not isinstance(cr, int) or not (0 <= cr < len(frame)):
                 continue
             cols = list(c.get("columns") or [])
             # Restrict to clusters that actually flag this column.

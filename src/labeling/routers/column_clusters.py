@@ -88,7 +88,7 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
         old PK / free-text guard can pass a lower value.
         """
         ctx = cache.get(run_id)
-        store = cache.get(run_id).column_cluster_store
+        store = ctx.column_cluster_store
         latest = store.latest_by_column()
 
         # Build a (source, column) -> n_draft_clusters index from
@@ -447,7 +447,7 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
             drafts (matches the legacy behavior).
         """
         ctx = cache.get(run_id)
-        store = cache.get(run_id).column_cluster_store
+        store = ctx.column_cluster_store
         latest_records = store.latest_by_column()
         label_index = ctx.store.latest_by_target()
 

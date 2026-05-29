@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 from fastapi import Body, FastAPI, HTTPException, Query
 
 from .. import correction_suggester
+from ...core.llm_client import LLMClient
 from ..schema import Label, LabelStatus, LabelTarget
 from ._context import RouterContext
 

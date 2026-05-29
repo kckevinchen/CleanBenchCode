@@ -31,6 +31,7 @@ from ..export import (
     write_benchmark,
     write_benchmark_by_error_type,
 )
+from ..schema import ExclusionScope
 from ._context import RouterContext
 
 

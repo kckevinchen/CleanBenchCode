@@ -27,7 +27,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.core.data_loader import load_csv
 from src.core.llm_client import LLMClient
-from src.core.value_cluster_proposer import ValueClusterProposer
+from src.core.value_cluster.proposer import ValueClusterProposer
 from experiments.run_column_clustering import _is_candidate, _value_counts
 
 
