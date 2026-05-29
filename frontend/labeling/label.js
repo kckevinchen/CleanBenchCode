@@ -2901,6 +2901,41 @@ function bumpCellStateLocal(source, row, col, status, extras = {}) {
 
 // ----------------------------------------------------------- queue
 
+// Sidebar queue summary: how many items the current filter combination
+// yields, plus a one-click "clear" when any facet is active (otherwise
+// you'd open each dropdown to reset it). Refreshed on every refreshQueue.
+function updateQueueSummary() {
+  const el = document.getElementById("queue-summary");
+  if (!el) return;
+  const n = state.queue.length;
+  const f = state.filters || {};
+  const active =
+    (f.source || []).length + (f.status || []).length +
+    (f.error_type || []).length + (f.column_status || []).length;
+  el.innerHTML =
+    `<span class="qs-count">${n} item${n === 1 ? "" : "s"}</span>`
+    + (active
+        ? ` <span class="qs-filtered" title="${active} active filter(s)">filtered</span>`
+          + ` <button type="button" id="qs-clear" class="qs-clear">clear</button>`
+        : "");
+  if (active) {
+    document.getElementById("qs-clear")?.addEventListener("click", clearAllFilters);
+  }
+}
+
+function clearAllFilters() {
+  for (const id of ["filter-source", "filter-status",
+                    "filter-error-type", "filter-column-status"]) {
+    _multiFilters.get(document.getElementById(id))?.setSelected([]);
+  }
+  state.filters = { source: [], status: [], error_type: [], column_status: [] };
+  // Mirror the side-effects the per-filter onChange handlers fire.
+  updateSourceXlsxActions();
+  renderLabelingEffort();
+  renderColumnAuditPanel();
+  refreshQueue({ keepSelection: false });
+}
+
 async function refreshQueue({ keepSelection }) {
   const qs = new URLSearchParams();
   // Filters are arrays (multi-select). The backend's /clusters
@@ -3172,6 +3207,7 @@ async function refreshQueue({ keepSelection }) {
   }
 
   state.queue = queueItems;
+  updateQueueSummary();
 
   const listEl = $("#queue");
   listEl.innerHTML = "";
@@ -5603,6 +5639,13 @@ async function renderCsv(cluster) {
     // so it survives the next ``_trimMap`` pass.
     _touchKey(state.csvCache, cacheKey);
   } else {
+    // Cache miss -> a real network fetch is coming. Show a loading state
+    // instead of leaving the previous source's grid (or a blank gap) on
+    // screen; the rebuild below replaces it. Only on the fetch path:
+    // soft-repaints and cache hits stay instant.
+    viewer.innerHTML =
+      `<div class="csv-loading-state"><span class="csv-spinner" aria-hidden="true"></span>`
+      + `<span>Loading ${escape(source)}…</span></div>`;
     try {
       data = await api(`${API}/sources/${encodeURIComponent(source)}?start=${start}&limit=${limit}`);
       state.csvCache.set(cacheKey, data);

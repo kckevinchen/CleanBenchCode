@@ -20,7 +20,7 @@
   <!-- UI/UX refinement layer: loaded last so its rules win by source order.
        Restyles existing markup only (no DOM/JS changes); drop this one line
        to revert to the base look. -->
-  <link rel="stylesheet" href="./refresh.css?v=2" />
+  <link rel="stylesheet" href="./refresh.css?v=4" />
 </head>
 <body>
   <header>
@@ -88,6 +88,9 @@
         <div class="multi-filter" id="filter-error-type" data-empty-label="(any)"></div>
       </div>
     </div>
+    <!-- Filtered-queue summary: item count + one-click clear-all when any
+         facet is active. Populated by updateQueueSummary() in label.js. -->
+    <div class="queue-summary" id="queue-summary"></div>
     <div class="queue" id="queue">
       <!-- Loading skeleton shown until label.js renders the queue (it
            replaces #queue's contents on first render). Pure decoration. -->
@@ -363,7 +366,7 @@
     </div>
   </div>
 
-  <script type="module" src="./label.js?v=6"></script>
+  <script type="module" src="./label.js?v=8"></script>
   <!-- Header export dropdown behaviour (outside-click / Esc to close).
        Standalone module so it stays out of label.js; CSP-safe ('self'). -->
   <script type="module" src="./header_menu.js?v=1"></script>

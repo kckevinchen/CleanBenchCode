@@ -480,3 +480,66 @@ header .actions .export-menu-body .export-single a {
 @media (prefers-reduced-motion: reduce) {
   .sk { animation: none; }
 }
+
+/* -------- CSV viewer: loading state during a slice fetch -------- */
+/* Shown only on a real network fetch (cache miss / source switch); the
+   grid rebuild replaces it. Soft-repaints and cache hits stay instant. */
+
+.csv-loading-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 40vh;
+  color: var(--muted);
+  font-size: 13px;
+}
+.csv-spinner {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border: 2.5px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: csv-spin 0.7s linear infinite;
+}
+@keyframes csv-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .csv-spinner { animation: none; } }
+
+/* -------- sidebar queue summary (filtered count + clear) -------- */
+
+.queue-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11.5px;
+  color: var(--muted);
+  min-height: 30px;          /* stable height even before first render */
+}
+.queue-summary:empty { display: none; }
+.qs-count { font-weight: 600; color: var(--text); }
+.qs-filtered {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.qs-clear {
+  margin-left: auto;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 9px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  transition: background var(--t-fast), border-color var(--t-fast);
+}
+.qs-clear:hover { background: var(--elev); border-color: var(--border-strong); }
