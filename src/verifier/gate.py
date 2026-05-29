@@ -64,7 +64,9 @@ _COLUMN_PATTERNS: dict[EntityKind, re.Pattern[str]] = {
         r")\b",
         re.IGNORECASE,
     ),
-    EntityKind.PHONE: re.compile(r"\bphone|fax|telephone|mobile|cell\b", re.IGNORECASE),
+    EntityKind.PHONE: re.compile(
+        r"\b(?:phone|fax|telephone|mobile|cell)\b", re.IGNORECASE
+    ),
     EntityKind.URL: re.compile(r"\b(?:url|website|web[\s_-]?site|homepage|link)\b", re.IGNORECASE),
     EntityKind.PERSON: re.compile(
         # Conservative: only obvious person-name columns. We do not

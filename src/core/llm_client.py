@@ -351,13 +351,26 @@ class LLMClient:
 
     @staticmethod
     def _extract_output_text(result: Any) -> str:
-        if hasattr(result, "output_text") and result.output_text:
+        if getattr(result, "output_text", None):
             return result.output_text
-        if hasattr(result, "output") and result.output:
-            first = result.output[0]
-            if hasattr(first, "content") and first.content:
-                return first.content[0].text
-            return str(result.output)
+        output = getattr(result, "output", None)
+        if output:
+            # Responses output is a list of items; for reasoning models
+            # output[0] is typically a *reasoning* item (no ``.content``)
+            # followed by the message item. Find the first content part
+            # that actually carries text rather than assuming position 0.
+            for item in output:
+                content = getattr(item, "content", None)
+                if not content:
+                    continue
+                for part in content:
+                    text = getattr(part, "text", None)
+                    if isinstance(text, str) and text:
+                        return text
+            # Output present but no text part (refusal / reasoning-only):
+            # return empty so the caller treats it as an unparseable
+            # response instead of the list's repr string.
+            return ""
         return str(result)
 
     # ------------------------------------------------------------------

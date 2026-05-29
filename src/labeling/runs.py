@@ -895,19 +895,25 @@ class JobManager:
         )
         log_fh.flush()
 
-        proc = subprocess.Popen(
-            [self.python_executable, *argv],
-            cwd=str(self.project_root),
-            stdout=log_fh,
-            stderr=subprocess.STDOUT,
-            # New process group so SIGTERM on cancel reaches children.
-            preexec_fn=os.setsid if hasattr(os, "setsid") else None,
-            env={
-                **os.environ,
-                "PYTHONUNBUFFERED": "1",
-                "PYTHONIOENCODING": "utf-8",
-            },
-        )
+        try:
+            proc = subprocess.Popen(
+                [self.python_executable, *argv],
+                cwd=str(self.project_root),
+                stdout=log_fh,
+                stderr=subprocess.STDOUT,
+                # New process group so SIGTERM on cancel reaches children.
+                preexec_fn=os.setsid if hasattr(os, "setsid") else None,
+                env={
+                    **os.environ,
+                    "PYTHONUNBUFFERED": "1",
+                    "PYTHONIOENCODING": "utf-8",
+                },
+            )
+        except Exception:
+            # Popen can fail (bad interpreter, fork/ENOMEM) before the
+            # reaper thread that owns closing log_fh ever starts.
+            log_fh.close()
+            raise
 
         job = Job(
             job_id=job_id,
@@ -1142,6 +1148,7 @@ class JobManager:
             raise KeyError(job_id)
         size = 0
         text = ""
+        next_offset = offset
         try:
             with job.log_path.open("rb") as fh:
                 fh.seek(0, 2)
@@ -1151,12 +1158,17 @@ class JobManager:
                 fh.seek(offset)
                 data = fh.read(max_bytes)
                 text = data.decode("utf-8", errors="replace")
+                # Advance by the RAW bytes consumed, not the re-encoded
+                # text: errors="replace" turns each invalid byte into a
+                # 3-byte U+FFFD, so len(text.encode()) != len(data) and
+                # the incremental tail would skip/dupe bytes.
+                next_offset = min(size, offset + len(data))
         except FileNotFoundError:
             pass
         return {
             "job_id": job_id,
             "offset": offset,
-            "next_offset": min(size, offset + len(text.encode("utf-8"))),
+            "next_offset": next_offset,
             "size": size,
             "text": text,
             "status": job.status,

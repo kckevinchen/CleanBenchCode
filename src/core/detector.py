@@ -82,6 +82,38 @@ class ChunkReport:
 # ---------------------------------------------------------------------------
 
 
+def _is_clean_sentinel(payload: Dict[str, Any]) -> bool:
+    """Whether a bare object affirmatively reports "no issues found".
+
+    A real single-issue object *describes* a defect (carries row / column
+    / explanation / ... fields); a sentinel like ``{"status": "clean"}``
+    or ``{"no_issues_found": true}`` reports the *absence* of one and must
+    not be coerced into a phantom single-issue cluster. Any object that is
+    not clearly such a sentinel is preserved (so this stays a no-op for
+    the other ``parse_llm_json`` consumers, e.g. row-dup verdicts).
+    """
+    if any(
+        k in payload
+        for k in (
+            "row", "rows", "row_index", "column", "columns", "cell",
+            "value", "explanation", "error_type", "fix", "corrected_value",
+        )
+    ):
+        return False
+    if str(payload.get("status", "")).strip().lower() in (
+        "clean", "ok", "okay", "pass", "passed", "none", "no_issues", "no_issue",
+    ):
+        return True
+    for key in (
+        "no_issues_found", "no_issues", "clean", "is_clean", "ok",
+        "no_errors", "all_clean",
+    ):
+        v = payload.get(key)
+        if v is True or (isinstance(v, str) and v.strip().lower() in ("true", "yes")):
+            return True
+    return payload.get("issues_found") == 0 or payload.get("error_count") == 0
+
+
 def _coerce_issues(payload: Any) -> List[Dict[str, Any]]:
     """Normalise the model's JSON response into a list of issue dicts."""
     if isinstance(payload, list):
@@ -90,6 +122,12 @@ def _coerce_issues(payload: Any) -> List[Dict[str, Any]]:
         for key in ("issues", "errors", "findings", "results"):
             if key in payload and isinstance(payload[key], list):
                 return [item for item in payload[key] if isinstance(item, dict)]
+        # A bare object that affirmatively says "no issues" is a sentinel,
+        # not a finding, so it must not become a phantom cluster. Anything
+        # else (including a single issue dict the model returned unwrapped)
+        # is preserved.
+        if _is_clean_sentinel(payload):
+            return []
         return [payload]
     return []
 

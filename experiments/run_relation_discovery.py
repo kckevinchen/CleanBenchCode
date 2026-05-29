@@ -1050,6 +1050,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.dry_run:
         # Render first (source, error_type) prompt and exit.
         first_source = next(iter(source_frames))
+        if not error_types:
+            # Multi-table-only run: the single-relation types were routed
+            # to the multi_table pass (error_types emptied), so there is
+            # no relation-discovery prompt to preview here.
+            print(f"# source     : {first_source}")
+            print(
+                "# (multi-table-only run: no single-relation discovery "
+                "prompt to preview; the multi_table pass renders its own)"
+            )
+            return 0
         first_type = error_types[0]
         print(f"# source     : {first_source}")
         print(f"# error_type : {first_type.key}")

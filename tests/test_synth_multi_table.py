@@ -153,3 +153,18 @@ class TestCrossSheetRenameHeader:
         # Sibling untouched.
         sibling = rec.params["sibling_sheet"]
         assert rec.original_value in new_frames[sibling].columns
+
+
+def test_unit_flip_skips_unchanged_zero_cells():
+    """Regression: a 0-valued cell * ratio is unchanged and must NOT be
+    recorded as ground-truth (an undetectable false-negative)."""
+    a = pd.DataFrame({"k": ["a", "b"], "amount": [0.0, 30.0]})
+    b = pd.DataFrame({"k": ["a", "b"], "amount": [0.0, 30.0]})
+    frames = {"a.csv": a, "b.csv": b}
+    result = CrossSheetUnitFlip().try_inject(frames, rng=random.Random(0))
+    assert result is not None
+    new_frames, records = result
+    rows = {r.row for r in records}
+    assert 0 not in rows, "row 0 (amount 0.0) is unchanged; must not be recorded"
+    assert records, "row 1 (amount 30.0) should still be injected"
+    assert float(new_frames["a.csv"].at[0, "amount"]) == 0.0

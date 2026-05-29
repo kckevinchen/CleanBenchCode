@@ -310,3 +310,19 @@ class TestPerTypeCleaningDetectorRun:
         # ordering is by (chunk_idx, type_idx), the sequence of error_type
         # values across the 6 reports must be ['typo','casing']*3.
         assert [r.error_type for r in reports] == ["typo", "casing"] * 3
+
+
+def test_coerce_issues_clean_sentinel_object_yields_no_issues():
+    """Regression: an LLM 'nothing wrong' object must NOT become a
+    phantom single-issue cluster."""
+    assert _coerce_issues({"status": "clean"}) == []
+    assert _coerce_issues({"no_issues_found": True}) == []
+    assert _coerce_issues({"ok": True, "summary": "looks fine"}) == []
+    issues, err = parse_llm_json('{"status": "clean"}')
+    assert issues == []
+
+
+def test_coerce_issues_bare_single_issue_object_is_kept():
+    """A bare object that carries issue-like fields IS a real issue."""
+    payload = {"row": 3, "column": "Name", "explanation": "typo"}
+    assert _coerce_issues(payload) == [payload]

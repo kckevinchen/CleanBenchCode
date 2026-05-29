@@ -176,6 +176,11 @@ class CrossSheetUnitFlip(WorkbookInjector):
             if pd.isna(v):
                 continue
             new_val = v * ratio
+            # Skip no-op flips (e.g. v == 0, or a ratio that leaves the
+            # rendered value unchanged): recording them as ground-truth
+            # would inject undetectable false-negatives into the benchmark.
+            if new_val == v or str(new_val) == str(old):
+                continue
             out[sheet_a].at[row, col] = new_val
             records.append(InjectionRecord(
                 source=sheet_a,

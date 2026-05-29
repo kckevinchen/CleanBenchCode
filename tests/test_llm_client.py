@@ -497,3 +497,21 @@ class TestProbeAvailability:
         c._clients[0].chat.completions.create.side_effect = RuntimeError("flaky")
         c.probe_availability(["gpt-foo", "gpt-bar"])
         assert c._clients[0].chat.completions.create.call_count == 2
+
+
+def test_extract_output_text_skips_reasoning_item():
+    """Regression: Responses output[0] is often a reasoning item with no
+    .content; _extract_output_text must find the message item's text
+    rather than IndexError or return the output list's repr."""
+    from types import SimpleNamespace
+    reasoning = SimpleNamespace(content=None)
+    message = SimpleNamespace(content=[SimpleNamespace(text="the answer")])
+    result = SimpleNamespace(output_text="", output=[reasoning, message])
+    assert LLMClient._extract_output_text(result) == "the answer"
+
+
+def test_extract_output_text_empty_on_reasoning_only():
+    from types import SimpleNamespace
+    reasoning = SimpleNamespace(content=None)
+    result = SimpleNamespace(output_text="", output=[reasoning])
+    assert LLMClient._extract_output_text(result) == ""

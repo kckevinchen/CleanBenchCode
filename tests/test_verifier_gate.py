@@ -123,3 +123,15 @@ def test_filter_eligible_uses_value_lookup():
 def test_default_error_types_include_typo():
     assert "typo" in DEFAULT_ERROR_TYPES
     assert "inconsistency" in DEFAULT_ERROR_TYPES
+
+
+def test_phone_column_pattern_does_not_overmatch():
+    """Regression: PHONE pattern must wrap its alternatives in (?:...) so
+    the \\b word-boundaries bind every alternative, not just the
+    first/last. Previously matched 'automobile'/'faxed'/'cellular'."""
+    from src.verifier.gate import EntityKind, _COLUMN_PATTERNS
+    pat = _COLUMN_PATTERNS[EntityKind.PHONE]
+    for good in ("phone", "Fax", "telephone", "mobile", "cell number"):
+        assert pat.search(good), f"should match: {good!r}"
+    for bad in ("automobile", "faxed", "telephoned", "cellophane", "cellular"):
+        assert not pat.search(bad), f"should NOT match: {bad!r}"

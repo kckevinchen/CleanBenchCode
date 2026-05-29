@@ -34,8 +34,8 @@ class WhitespaceInjector(Injector):
         elif op == "nbsp":
             # Replace one inner space with NBSP if there is one;
             # otherwise prepend an NBSP.
-            if " " in value[1:-1] if len(value) > 2 else False:
-                pos = value.index(" ")
+            if len(value) > 2 and " " in value[1:-1]:
+                pos = value.index(" ", 1, len(value) - 1)
                 new = value[:pos] + "\u00A0" + value[pos + 1 :]
             else:
                 new = "\u00A0" + value
