@@ -3211,6 +3211,22 @@ async function refreshQueue({ keepSelection }) {
 
   const listEl = $("#queue");
   listEl.innerHTML = "";
+  // Friendly empty state: a filtered-to-nothing queue used to render
+  // blank. Show why, with a one-click clear when filters caused it. The
+  // group-render loop below is a no-op for an empty queue, so this stays;
+  // the browse-mode tail still runs (center pane stays usable).
+  if (!state.queue.length) {
+    const f = state.filters || {};
+    const nFilters =
+      (f.source || []).length + (f.status || []).length +
+      (f.error_type || []).length + (f.column_status || []).length;
+    listEl.innerHTML = nFilters
+      ? `<div class="queue-empty">No items match the current filters.`
+        + `<button type="button" id="qe-clear" class="qs-clear">Clear filters</button></div>`
+      : `<div class="queue-empty">No labelling items in this run.`
+        + `<span class="qe-hint">Browse the CSV on the right to mark FN cells.</span></div>`;
+    document.getElementById("qe-clear")?.addEventListener("click", clearAllFilters);
+  }
   // Per-source workbook lookup so the queue row can show the parent
   // table when multiple CSVs of the same workbook are interleaved.
   const wbBySource = {};
