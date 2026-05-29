@@ -385,11 +385,12 @@ def _build_column_digest(
     n_non_empty = int(len(non_empty))
     n_distinct = int(non_empty.nunique()) if n_non_empty else 0
     dtype_kind = _classify_dtype(s)
+    # value_counts once; reused for top_values and rare_values below.
+    vc = non_empty.value_counts() if n_non_empty else None
 
     top_values: List[Tuple[str, int]] = []
     sample_values: List[str] = []
     if n_non_empty:
-        vc = non_empty.value_counts()
         top_values = [(str(idx), int(cnt)) for idx, cnt in vc.head(top_k).items()]
         # Distinct samples (in encounter order) are useful when the
         # column is high-cardinality and ``top_values`` carries no
@@ -436,7 +437,6 @@ def _build_column_digest(
     # masks the diversity of the rest.
     rare_values: List[str] = []
     if n_non_empty:
-        vc = non_empty.value_counts()
         singletons = [str(v) for v, c in vc.items() if c == 1]
         rare_values = singletons[-3:]  # arbitrary 3 from the tail
 

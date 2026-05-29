@@ -71,6 +71,7 @@ RESPONSES_API_MODELS = {
     "o3",
     "o3-mini",
 }
+_RESPONSES_API_MODELS_LOWER = {m.lower() for m in RESPONSES_API_MODELS}
 
 # Canonical "GPT-5 family" used as the default detection target when the
 # caller asks for a family sweep instead of a single model. Order is the
@@ -477,9 +478,7 @@ class LLMClient:
         picked_model = rotated_pool[0]
         pool_idx_in_use = 0
 
-        use_responses_api = picked_model.lower() in {
-            m.lower() for m in RESPONSES_API_MODELS
-        }
+        use_responses_api = picked_model.lower() in _RESPONSES_API_MODELS_LOWER
         last_error: Optional[str] = None
         transient_attempts = 0
         # Hard ceiling on total iterations so a pathological mix of
@@ -503,9 +502,7 @@ class LLMClient:
                 pool_idx_in_use += 1
                 if pool_idx_in_use < len(rotated_pool):
                     picked_model = rotated_pool[pool_idx_in_use]
-                    use_responses_api = picked_model.lower() in {
-                        m.lower() for m in RESPONSES_API_MODELS
-                    }
+                    use_responses_api = picked_model.lower() in _RESPONSES_API_MODELS_LOWER
                     last_error = (
                         f"All endpoints 404 for previous model; "
                         f"rotating to {picked_model!r}"
@@ -625,7 +622,7 @@ class LLMClient:
         """
         matrix: Dict[str, Dict[str, str]] = {ep: {} for ep in self.endpoints}
         for model in models:
-            use_responses_api = model.lower() in {m.lower() for m in RESPONSES_API_MODELS}
+            use_responses_api = model.lower() in _RESPONSES_API_MODELS_LOWER
             for endpoint, client in zip(self.endpoints, self._clients):
                 try:
                     self._do_call(
