@@ -1,34 +1,29 @@
 """Append-only JSONL store for human reviews of discovered relations.
 
-One file, ``<run_dir>/relation_reviews.jsonl``, one review record per
-line. Modelled after :mod:`src.labeling.store` (cell/cluster labels):
-all writes are O_APPEND + ``fsync``, the in-memory index is rebuilt on
-each reload, and the *latest* entry per ``relation_id`` wins.
+One file, ``<run_dir>/relation_reviews.jsonl``, keyed by ``relation_id``
+with latest-wins. See :mod:`src.labeling._jsonl_store` for the shared
+IO/index/self-healing.
 
-Three decisions are supported:
+Four decisions are supported:
 
 * ``approved``  - reviewer agrees with a discovery-emitted relation
 * ``rejected``  - reviewer rejects a discovery-emitted relation
 * ``added``     - reviewer authored a brand-new relation that was not
                   emitted by the LLM. ``relation`` carries the full
                   snapshot.
-
-A ``cleared`` decision is also persisted to undo a prior approve/reject
-without losing history.
+* ``cleared``   - undo a prior approve/reject without losing history.
 """
 
 from __future__ import annotations
 
-import json
-import os
-import threading
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
-from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
+
+from ._jsonl_store import JsonlStore
 
 
 class ReviewDecision(str, Enum):
@@ -76,33 +71,13 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-class RelationReviewStore:
-    def __init__(self, path: Path) -> None:
-        self.path = Path(path)
-        self._lock = threading.Lock()
-        self._records: List[ReviewRecord] = []
-        self._latest: Dict[str, ReviewRecord] = {}  # relation_id -> latest
-        self.reload()
+class RelationReviewStore(JsonlStore[ReviewRecord, str]):
+    model = ReviewRecord
 
-    # ------------------------------------------------------------------ IO
+    def _key(self, record: ReviewRecord) -> str:
+        return record.relation_id
 
-    def reload(self) -> None:
-        with self._lock:
-            self._records = []
-            self._latest = {}
-            if not self.path.exists():
-                return
-            with self.path.open("r", encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        record = ReviewRecord.model_validate_json(line)
-                    except Exception:  # noqa: BLE001 - skip malformed lines
-                        continue
-                    self._records.append(record)
-                    self._latest[record.relation_id] = record
+    # -------------------------------------------------------------- writes
 
     def append(self, payload: ReviewIn) -> ReviewRecord:
         record = ReviewRecord(
@@ -110,41 +85,22 @@ class RelationReviewStore:
             created_at=_now_utc(),
             **payload.model_dump(),
         )
-        line = record.model_dump_json() + "\n"
-        with self._lock:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            fd = os.open(
-                self.path,
-                os.O_WRONLY | os.O_CREAT | os.O_APPEND,
-                0o644,
-            )
-            try:
-                os.write(fd, line.encode("utf-8"))
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-            self._records.append(record)
-            self._latest[record.relation_id] = record
-        return record
+        return self._append(record)
 
     # -------------------------------------------------------------- queries
 
     def all(self) -> List[ReviewRecord]:
-        with self._lock:
-            return list(self._records)
+        return self._all()
 
     def latest_by_relation(self) -> Dict[str, ReviewRecord]:
-        with self._lock:
-            return dict(self._latest)
+        return self._latest_map()
 
     def latest_for(self, relation_id: str) -> Optional[ReviewRecord]:
-        with self._lock:
-            return self._latest.get(relation_id)
+        return self._latest_get(relation_id)
 
     def added_relations(self) -> List[ReviewRecord]:
         """User-authored relations whose latest decision is ``added``."""
-        with self._lock:
-            return [
-                r for r in self._latest.values()
-                if r.decision == ReviewDecision.ADDED
-            ]
+        return [
+            r for r in self._latest_map().values()
+            if r.decision == ReviewDecision.ADDED
+        ]
