@@ -234,3 +234,37 @@ class TestCellTargetId:
         # The signature accepts ints; explicitly coerced inside.
         tid = cell_target_id("file.csv", 5, "c")
         assert "\x005\x00" in tid
+
+
+def test_reloads_on_out_of_band_write(tmp_path: Path) -> None:
+    """Review batch 7: an external writer (offline CLI / second worker)
+    appending to the same labels.jsonl must become visible to a cached
+    store on the next read -- without an explicit reload() and without
+    rebuilding the enclosing RunContext."""
+    path = tmp_path / "labels.jsonl"
+    s1 = LabelStore(path)
+    s1.append(_label("t1"))
+    assert set(s1.latest_by_target()) == {"t1"}
+
+    # Out-of-band append via a *separate* store instance bound to the
+    # same file (simulates a second process / offline CLI writing).
+    s2 = LabelStore(path)
+    s2.append(_label("t2", annotator="other"))
+
+    # s1 never wrote t2, but must pick it up on its next read.
+    latest = s1.latest_by_target()
+    assert set(latest) == {"t1", "t2"}
+    assert latest["t2"].annotator == "other"
+    assert s1.latest_for("t2") is not None
+
+
+def test_own_writes_do_not_lose_in_memory_state(tmp_path: Path) -> None:
+    """The (mtime,size) signature is refreshed on our own appends, so a
+    self-write never spuriously discards in-memory state on the next read."""
+    path = tmp_path / "labels.jsonl"
+    s = LabelStore(path)
+    s.append(_label("t1", note="first"))
+    s.append(_label("t1", status=LabelStatus.FP, note="override"))
+    latest = s.latest_by_target()
+    assert latest["t1"].note == "override"
+    assert latest["t1"].status == LabelStatus.FP
