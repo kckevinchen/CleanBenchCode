@@ -17,6 +17,10 @@
        label page needs both the CSV grid (for cluster items) and the
        side-by-side panel layout (for multi-table findings). -->
   <link rel="stylesheet" href="./mt_label.css?v=2" />
+  <!-- UI/UX refinement layer: loaded last so its rules win by source order.
+       Restyles existing markup only (no DOM/JS changes); drop this one line
+       to revert to the base look. -->
+  <link rel="stylesheet" href="./refresh.css?v=1" />
 </head>
 <body>
   <header>

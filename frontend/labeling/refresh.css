@@ -1,0 +1,352 @@
+/* ===========================================================================
+   refresh.css — UI/UX refinement layer for the labelling workbench.
+
+   Loaded AFTER styles.css (and mt_label.css), so equal-specificity rules
+   here win by source order; a few rules raise specificity intentionally to
+   override the base. This file ONLY restyles existing markup — no DOM or JS
+   changes — so it is safe to drop the <link> to revert entirely.
+
+   Goals (per the UX pass): more depth + visual hierarchy, a clearer verdict
+   control, more legible queue/detail surfaces, calmer header, and small
+   motion/feedback affordances. Colours reuse the existing token palette.
+   =========================================================================== */
+
+:root {
+  --radius: 10px;
+  --radius-sm: 7px;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.28);
+  --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.38);
+  --t-fast: 120ms ease;
+  --t-med: 200ms cubic-bezier(0.2, 0.7, 0.2, 1);
+  /* A surface one step brighter than --panel-2 for "raised card" elements,
+     so the detail-pane cards lift off the pane instead of reading flat. */
+  --elev: #1c2a47;
+  --border-strong: #34507f;     /* hover / focus border accent */
+  --accent-soft: color-mix(in srgb, var(--accent) 14%, var(--panel));
+}
+
+/* -------- global: motion, selection, scrollbars -------- */
+
+a,
+button,
+.queue .row,
+.queue .group-header,
+.multi-filter-option,
+.field input,
+.field textarea,
+.detail .det-row,
+.detail .before-after .ba-row {
+  transition:
+    background var(--t-fast),
+    border-color var(--t-fast),
+    color var(--t-fast),
+    box-shadow var(--t-fast),
+    transform var(--t-fast);
+}
+
+::selection {
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+/* Quiet, themed scrollbars so the dark panes don't get stock light bars. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #2a3c61 transparent;
+}
+::-webkit-scrollbar {
+  width: 11px;
+  height: 11px;
+}
+::-webkit-scrollbar-thumb {
+  background: #28395c;
+  border-radius: 8px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #35507f;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Honour reduced-motion: drop the transforms/transitions we just added. */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* -------- panes: subtle separation between the three columns -------- */
+
+.sidebar {
+  box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.025);
+}
+.detail {
+  box-shadow: inset 1px 0 0 rgba(255, 255, 255, 0.025);
+}
+
+/* -------- header: consistent, calmer action row -------- */
+
+/* Unify the export / nav ANCHORS into the same quiet pill so the dense row
+   stops looking like a pile of mismatched links. The two .hdr-btn CTAs keep
+   their green tint on purpose (below) — they spend LLM calls / mutate labels,
+   so they should stand apart from the read-only export links. */
+header .actions a {
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  transition: background var(--t-fast), border-color var(--t-fast);
+}
+header .actions a:hover {
+  background: var(--elev);
+  border-color: var(--border-strong);
+  text-decoration: none;
+}
+/* The "← Runs" back link is navigation, not an export action — let it read
+   as a plain link so the export cluster stands apart from it. */
+header .actions a[href="./"] {
+  border-color: transparent;
+  background: transparent;
+}
+header .actions a[href="./"]:hover {
+  background: var(--panel-2);
+  border-color: var(--border);
+}
+/* The two "do work" buttons keep their tinted call-to-action feel but get
+   the shared radius + a lift on hover. */
+header .actions .hdr-btn {
+  font-weight: 600;
+}
+header .actions .hdr-btn:hover {
+  border-color: rgba(34, 197, 94, 0.75);
+}
+header .actions .export-single {
+  border-radius: var(--radius-sm);
+}
+header h1 .muted {
+  font-weight: 500;
+}
+
+/* -------- sidebar filters -------- */
+
+.filters {
+  border-bottom: 1px solid var(--border);
+}
+.filter-cell > span {
+  letter-spacing: 0.4px;
+}
+
+/* -------- queue: clearer hover + a verdict-aware active row -------- */
+
+.queue .row {
+  border-left: 3px solid transparent;   /* reserve the active marker's gutter */
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+.queue .row:hover {
+  background: var(--panel-2);
+  border-left-color: var(--border-strong);
+}
+.queue .row.active {
+  background: var(--accent-soft);
+  border-left: 3px solid var(--accent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+/* Status dot: a touch larger with a faint ring so it stays legible on the
+   tinted active row. */
+.queue .row .dot {
+  width: 9px;
+  height: 9px;
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.28);
+}
+.queue .group-header {
+  transition: background var(--t-fast);
+}
+
+/* -------- centre: CSV header reads as a real toolbar -------- */
+
+.csv-head {
+  align-items: center;
+}
+/* The source filename is the anchor of the centre pane — promote it from
+   muted grey to primary text so you always know which CSV you're on. */
+#csv-source.muted {
+  color: var(--text);
+  font-weight: 600;
+}
+.add-cluster-btn {
+  border-radius: var(--radius-sm);
+}
+
+/* -------- detail pane: hierarchy + card elevation -------- */
+
+/* A hairline + a small accent tick under each block heading gives the pane
+   real visual structure instead of a flat run of uppercase greys. */
+.detail .block > h2 {
+  padding-bottom: 6px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.detail .block > h2::before {
+  content: "";
+  display: inline-block;
+  width: 3px;
+  height: 11px;
+  margin-right: 7px;
+  vertical-align: -1px;
+  border-radius: 2px;
+  background: var(--accent);
+  opacity: 0.85;
+}
+/* Don't tick the very first heading (the cluster-id title) or the
+   web-verify heading (which has its own flex layout). */
+.detail > .block:first-child > h2::before,
+.detail .block.web-verify > h2::before {
+  display: none;
+}
+
+/* Lift the per-detection / before-after / web-verify cards off the pane. */
+.detail .det-row,
+.detail .before-after .ba-row,
+.detail .block.web-verify {
+  background: var(--elev);
+  box-shadow: var(--shadow-1);
+}
+.detail .det-row:hover,
+.detail .before-after .ba-row:hover {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-2);
+}
+
+/* -------- verdict buttons: the centrepiece control -------- */
+
+.detail .buttons {
+  gap: 8px;
+  margin-top: 10px;
+}
+.detail .buttons button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 52px;
+  padding: 8px 2px;
+  border-width: 1.5px;
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 11px;
+  font-weight: 700;
+  /* keep "partial"/"unsure" on one line in the narrow 5-col grid */
+  white-space: nowrap;
+}
+.detail .buttons button kbd {
+  min-width: 16px;
+  padding: 0 4px;
+  text-align: center;
+  font-size: 10px;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.06);
+  border-color: var(--border);
+  border-bottom-width: 1px;
+  color: inherit;
+  opacity: 0.7;
+}
+.detail .buttons button:hover {
+  transform: translateY(-1px);
+  background: var(--elev);
+  box-shadow: var(--shadow-1);
+  filter: none;          /* override base brightness() so colours stay true */
+}
+.detail .buttons button:active {
+  transform: translateY(0);
+}
+/* Filled, dark-text active state per verdict, plus a clear ring + lift so
+   the current choice is unmistakable. */
+.detail .buttons button.active {
+  color: #07121f;
+  box-shadow: var(--shadow-1);
+}
+.detail .buttons button.active.tp { background: var(--tp); border-color: var(--tp); }
+.detail .buttons button.active.fp { background: var(--fp); border-color: var(--fp); }
+.detail .buttons button.active.partial { background: var(--partial); border-color: var(--partial); }
+.detail .buttons button.active.unsure { background: var(--unsure); border-color: var(--unsure); }
+.detail .buttons button.active.skip { background: var(--skip); border-color: var(--skip); }
+.detail .buttons button.active kbd {
+  background: rgba(0, 0, 0, 0.18);
+  border-color: rgba(0, 0, 0, 0.28);
+  color: inherit;
+  opacity: 0.9;
+}
+
+/* -------- fields: friendlier inputs + accent focus ring -------- */
+
+.field input,
+.field textarea {
+  border-radius: var(--radius-sm);
+  padding: 7px 9px;
+}
+.field input:focus,
+.field textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+/* -------- footer: shortcut "chips" -------- */
+
+footer.shortcuts {
+  gap: 8px;
+}
+footer.shortcuts > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+/* The trailing "click any cell…" hint isn't a key chord — keep it plain. */
+footer.shortcuts > span.muted {
+  background: transparent;
+  border-color: transparent;
+  padding-left: 0;
+}
+footer.shortcuts kbd {
+  margin: 0;
+}
+
+/* -------- modals + toast: real elevation -------- */
+
+.cc-modal-backdrop {
+  background: rgba(5, 9, 18, 0.55);
+  backdrop-filter: blur(2px);
+}
+.cc-modal-panel {
+  border-radius: 12px;
+  box-shadow: var(--shadow-2);
+}
+.toast {
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-2);
+}
+
+/* -------- empty / placeholder states -------- */
+
+/* Centre the "select a cluster…" prompt in the detail pane instead of
+   pinning a small grey line to the top — reads as a deliberate empty state. */
+.detail > .placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 38vh;
+  font-size: 13px;
+  line-height: 1.6;
+}
