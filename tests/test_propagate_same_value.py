@@ -79,17 +79,16 @@ def test_propagate_writes_fn_for_uncovered_same_value_rows(tmp_path: Path):
         body = r.json()
         # Anchor row=1 with value "AcmeCo" matches rows 0, 3, 5, 7.
         assert body["matched"] == 4
-        # Row 5 is covered by cluster c001 (no verdict yet, but the
-        # cluster covers it so we don't pre-empt the operator's call).
-        # Wait: only TP/FP/PARTIAL/UNSURE clusters block. An UNLABELLED
-        # cluster does NOT block - the operator hasn't ruled, so we
-        # are free to FN siblings whose only "coverage" is a still-
-        # untouched cluster.
-        assert body["propagated"] == 4
-        assert body["skipped_covered"] == 0
+        # Row 5 is the anchor of cluster c001 - the LLM already flagged
+        # it, so it is NOT a false negative even though c001 is still
+        # unlabelled. Propagation skips it (covered by a cluster) and the
+        # operator rules on c001 directly. Rows 0, 3, 7 are flagged by no
+        # cluster -> genuine FN candidates.
+        assert body["propagated"] == 3
+        assert body["skipped_covered"] == 1    # row 5 (cluster c001)
         assert body["skipped_existing"] == 0
         rows_written = sorted(c["row"] for c in body["cells"])
-        assert rows_written == [0, 3, 5, 7]
+        assert rows_written == [0, 3, 7]
 
 
 def test_propagate_skips_rows_already_covered_by_labelled_cluster(tmp_path: Path):
@@ -123,6 +122,78 @@ def test_propagate_skips_rows_already_covered_by_labelled_cluster(tmp_path: Path
         assert sorted(c["row"] for c in body["cells"]) == [0, 3, 7]
 
 
+def test_propagate_skips_clusters_own_detection_rows(tmp_path: Path):
+    """Regression: a multi-row cluster's OWN same-value siblings (carried
+    in ``detections[].affected_rows``, not just the anchor ``row``) must be
+    treated as covered once the cluster is labelled, NOT auto-FN'd.
+
+    This is the bug that produced cluster-own FN cells in runs labelled
+    before the ``affected_rows`` coverage landed: the operator marks a
+    typo cluster TP and every other row the SAME cluster already flagged
+    gets a redundant FN cell label. Coverage previously only added the
+    anchor row, so the cluster's other detection rows leaked through.
+    """
+    project = tmp_path / "ws"
+    (project / "frontend" / "labeling").mkdir(parents=True)
+    data_dir = project / "data"
+    data_dir.mkdir()
+    csv = data_dir / "c.csv"
+    # "AcmeCo" typo in rows 0..3; one clean row.
+    csv.write_text(
+        "id,contractor\n0,AcmeCo\n1,AcmeCo\n2,AcmeCo\n3,AcmeCo\n4,Beta\n",
+        encoding="utf-8",
+    )
+    outputs = project / "outputs"
+    outputs.mkdir()
+    run_id = "20260529T000000Z_ownrows"
+    rd = outputs / run_id
+    rd.mkdir()
+    (rd / "summary.json").write_text(json.dumps({"config": {"csv_paths": [str(csv)]}}))
+    # ONE cluster anchored at row 0 whose single detection flags ALL four
+    # AcmeCo rows — i.e. the cluster already covers rows 0,1,2,3.
+    (rd / "clusters.json").write_text(json.dumps([{
+        "cluster_id": "c.csv__r00000-c000", "source": "c.csv",
+        "row": 0, "columns": ["contractor"],
+        "row_values": {"id": "0", "contractor": "AcmeCo"},
+        "error_types": ["typo"], "error_type_categories": [], "evidence_count": 1,
+        "detections": [{"columns": ["contractor"], "affected_rows": [0, 1, 2, 3]}],
+    }]))
+    (rd / "issues.json").write_text("[]")
+
+    app = create_app(project, annotator="t")
+    with TestClient(app) as client:
+        # Label the cluster TP first (mirrors the UI: /labels is awaited
+        # before /propagate-same-value).
+        r = client.post(f"/api/runs/{run_id}/labels", json={
+            "target": "cluster", "target_id": "c.csv__r00000-c000",
+            "source": "c.csv", "row": 0, "column": "contractor",
+            "columns": ["contractor"], "status": "tp",
+            "corrected_value": "Acme Corp",
+        })
+        assert r.status_code == 200, r.text
+
+        r = client.post(f"/api/runs/{run_id}/labels/propagate-same-value", json={
+            "source": "c.csv", "row": 0, "column": "contractor",
+            "corrected_value": "Acme Corp",
+        })
+        body = r.json()
+        # Rows 1,2,3 match the anchor value but are ALL inside the
+        # cluster's own detection coverage -> skipped, never FN'd.
+        assert body["matched"] == 3
+        assert body["skipped_covered"] == 3
+        assert body["propagated"] == 0, (
+            "the cluster's own detection rows were FN'd (coverage regression): "
+            f"{body['cells']}"
+        )
+
+        # And the per-cell state must show no FN on those rows.
+        cells = client.get(
+            f"/api/runs/{run_id}/sources/c.csv/cells"
+        ).json()["cells"]
+        fn_rows = {c["row"] for c in cells if c.get("state") == "fn"}
+        assert fn_rows == set(), f"unexpected FN cells on cluster-own rows: {fn_rows}"
+
+
 def test_propagate_skips_existing_cell_label(tmp_path: Path):
     """A cell that already carries an explicit cell label (from a prior
     FN action) must be left alone - clobbering an annotator's prior
@@ -148,10 +219,12 @@ def test_propagate_skips_existing_cell_label(tmp_path: Path):
             "corrected_value": "Acme Corp",
         })
         body = r.json()
-        assert body["skipped_existing"] == 1    # row 3
-        # Rows 0, 5, 7 still get propagated.
-        assert body["propagated"] == 3
-        assert 3 not in {c["row"] for c in body["cells"]}
+        assert body["skipped_existing"] == 1    # row 3 (prior cell label)
+        assert body["skipped_covered"] == 1     # row 5 (cluster c001)
+        # Only rows 0 and 7 (flagged by no cluster, no prior label) get FN'd.
+        assert body["propagated"] == 2
+        written = {c["row"] for c in body["cells"]}
+        assert 3 not in written and 5 not in written
 
 
 def test_propagate_requires_corrected_value(tmp_path: Path):
@@ -206,11 +279,15 @@ def test_propagated_cells_show_up_in_cell_state(tmp_path: Path):
             f"/api/runs/{run_id}/sources/contracts.csv/cells"
         ).json()["cells"]
         by_key = {(c["row"], c["column"]): c for c in cells}
-        for r in (0, 3, 5, 7):
+        # Rows 0, 3, 7 are genuine FN candidates (no cluster flagged them).
+        for r in (0, 3, 7):
             entry = by_key.get((r, "contractor"))
             assert entry is not None, f"row {r} missing from cell state"
             assert entry["state"] == "fn"
             assert entry["corrected_value"] == "Acme Corp"
+        # Row 5 is cluster c001's anchor - the LLM flagged it, so it must
+        # NOT have been auto-FN'd.
+        assert by_key.get((5, "contractor"), {}).get("state") != "fn"
 
 
 # ---------------------------------------------------------------------

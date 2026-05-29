@@ -76,9 +76,10 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
         the original cluster as TP (or PARTIAL), this endpoint walks
         the column and writes an FN cell label - with the SAME
         ``corrected_value`` - for every other row that holds an
-        identical value, *unless* that cell is already covered by an
-        annotator action (cluster-level verdict OR an existing cell
-        label) so we never silently overwrite prior decisions.
+        identical value, *unless* that cell is already flagged by ANY
+        cluster (the LLM caught it -> not a false negative) or already
+        carries an explicit cell label, so we never double-label an
+        LLM-found cell or silently overwrite a prior decision.
 
         Required keys: ``source``, ``row``, ``column``, ``corrected_value``.
         Optional: ``note``, ``annotator``, ``error_types``.
@@ -125,60 +126,42 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
         # of "this value equals that value" matches what gets written.
         target_value = _scalar(frame.iat[row, frame.columns.get_loc(column)])
 
-        # Skip cells that already have an annotator decision so we
-        # never overwrite prior TPs/FPs/FNs from this or any other
-        # annotator. Two cover-states:
-        #   (a) a cluster verdict (tp/fp/partial/unsure) flags the
-        #       cell - the LLM caught it, the operator already ruled.
-        #   (b) an explicit cell label exists at (source, row, col) -
-        #       could be a prior FN with a different correction.
-        latest = ctx.store.latest_by_target()
+        # A same-value cell is an FN candidate only if NO cluster already
+        # flagged it. Build the covered set from EVERY cluster on this
+        # source (its anchor row + each detection's ``affected_rows``),
+        # regardless of whether the operator has verdicted it yet:
+        #   * the LLM flagged those cells, so they are NOT false
+        #     negatives -- the operator will rule on the owning cluster;
+        #   * auto-FN'ing a still-unlabelled sibling cluster's cell would
+        #     pre-empt that cluster and double-label a cell the LLM found.
+        # (Previously only clusters carrying an active verdict blocked
+        # propagation, which wrongly FN'd same-value cells belonging to
+        # unlabelled sibling clusters -- and, before detection coverage
+        # existed, a cluster's OWN multi-row siblings.) Existing explicit
+        # cell labels are honoured separately below so we never clobber a
+        # prior annotator decision.
         covered: set = set()
         for c in ctx.clusters:
             if c.get("source") != source:
                 continue
-            r = c.get("row")
-            if not isinstance(r, int):
-                continue
-            cid = c.get("cluster_id", "")
-            lab = latest.get(cid)
-            # Only a cluster carrying an ACTIVE verdict
-            # (tp/fp/partial/unsure) counts as coverage that blocks
-            # propagation: the operator has ruled on it, so auto-FN'ing
-            # its same-value siblings would clobber that decision. An
-            # UNLABELLED cluster means the operator hasn't ruled yet,
-            # and a SKIP is a deferred (non-)decision -- in both cases
-            # we are free to propagate the FN to the sibling cell (the
-            # operator can still verdict the cluster itself later).
-            if not (
-                lab is not None
-                and lab.target == LabelTarget.CLUSTER
-                and lab.status in (
-                    LabelStatus.TP, LabelStatus.FP,
-                    LabelStatus.PARTIAL, LabelStatus.UNSURE,
-                )
-            ):
-                continue
             cluster_cols = list(c.get("columns") or [])
-            for col in cluster_cols:
-                covered.add((r, col))
-            # Detections inside the cluster may flag many more rows
-            # than the cluster's anchor row (typo clusters often carry
-            # a single anchor row=N but a detection whose
-            # ``affected_rows`` lists every row holding the same bad
-            # value). Those rows ARE covered by the LLM finding -
-            # auto-FN'ing them would double-count what the cluster
-            # verdict already settles. Treat each detection's
-            # ``affected_rows`` x ``columns`` as covered, falling
-            # back to the cluster's columns when the detection omits
-            # its own column list.
+            r = c.get("row")
+            if isinstance(r, int):
+                for col in cluster_cols:
+                    covered.add((r, col))
+            # Detections often list every row holding the same bad value
+            # (the anchor is just one of them); cover them all, falling
+            # back to the cluster's columns when a detection omits its own.
             for det in (c.get("detections") or ()):
                 det_cols = list(det.get("columns") or cluster_cols)
                 for ar in (det.get("affected_rows") or ()):
-                    if not isinstance(ar, int):
-                        continue
-                    for col in det_cols:
-                        covered.add((ar, col))
+                    if isinstance(ar, int):
+                        for col in det_cols:
+                            covered.add((ar, col))
+
+        # Existing explicit cell labels at (source, row, col) - e.g. a
+        # prior FN with its own correction - must also be left untouched.
+        latest = ctx.store.latest_by_target()
         cell_labels: set = set()
         for tid, lab in latest.items():
             if lab.target != LabelTarget.CELL or lab.source != source:
