@@ -79,6 +79,10 @@ def build_detection_argv(payload: Dict[str, Any]) -> List[str]:
     _append_if(argv, "--scopes", payload.get("scopes"))
     _append_if(argv, "--synthesis-effort", payload.get("synthesis_effort"))
     _append_if(argv, "--output-dir", payload.get("output_dir"))
+    # Parent-assigned deterministic run dir name (see JobManager._mint_run_id).
+    # The child writes outputs/<run_name>/ verbatim, so the launcher knows
+    # the run_id up front and never has to infer it post-hoc.
+    _append_if(argv, "--run-name", payload.get("run_name"))
 
     if payload.get("no_synthesis"):
         argv.append("--no-synthesis")

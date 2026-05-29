@@ -642,6 +642,34 @@ class Job:
         )
 
 
+def _mint_run_id(model_spec: Optional[str]) -> str:
+    """Assign a unique run-id *before* launch so the launcher never has to
+    *infer* which ``outputs/`` dir a detection job created.
+
+    The child honours this via ``--run-name`` and writes its artifacts to
+    ``outputs/<run_id>/`` verbatim, so the launcher records the correct
+    run_id up front. This fixes two bugs in the old post-hoc inference
+    (``_resolve_run_id``): under concurrent launches it cross-wired jobs
+    to each other's dirs, and -- because the auto-name was only
+    second-resolution (``%Y%m%dT%H%M%SZ``) -- two same-model launches in
+    the same second would mint the *same* dir name and clobber each other.
+
+    ``model``/``mode``/``created`` in the dashboard come from the run's
+    ``summary.json`` (see ``_parse_run_dir``), never from this string, so
+    the model tag here is purely cosmetic for on-disk browsing; the random
+    suffix is what guarantees uniqueness. The tag mirrors
+    ``run_cleaning_detection._run_id_tag_for_model_spec`` (comma-list
+    family -> ``gpt5-family``) for readability, but the two paths are
+    independent -- the CLI's own tag is used only when no ``--run-name``
+    is passed.
+    """
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    parts = [p.strip() for p in str(model_spec or "").split(",") if p.strip()]
+    tag = "gpt5-family" if len(parts) > 1 else (parts[0] if parts else "model")
+    tag = re.sub(r"[^A-Za-z0-9._-]+", "-", tag).strip("-_.") or "model"
+    return f"{ts}_{tag}_{uuid.uuid4().hex[:8]}"
+
+
 class JobManager:
     """Spawn + track child processes for detection and report builds."""
 
@@ -693,7 +721,12 @@ class JobManager:
                     raise ValueError(
                         f"invalid multi_table_from: {exc}"
                     ) from exc
-        return self._launch("detection", build_detection_argv(payload))
+        payload["run_name"] = _mint_run_id(payload.get("model"))
+        return self._launch(
+            "detection",
+            build_detection_argv(payload),
+            run_id=payload["run_name"],
+        )
 
     def launch_report(self, run_id: str) -> Job:
         run_dir = self.project_root / "outputs" / run_id
@@ -739,8 +772,11 @@ class JobManager:
             path_keys=_RELATION_DETECTION_PATH_KEYS,
             glob_keys=(),
         )
+        payload["run_name"] = _mint_run_id(payload.get("model"))
         return self._launch(
-            "relation_detection", build_relation_detection_argv(payload),
+            "relation_detection",
+            build_relation_detection_argv(payload),
+            run_id=payload["run_name"],
         )
 
     def launch_relation_report(self, run_id: str) -> Job:
@@ -880,7 +916,15 @@ class JobManager:
     def launch_curate_pbi(self, payload: Dict[str, Any]) -> Job:
         return self.launch_curate(payload)
 
-    def _launch(self, kind: str, argv: List[str]) -> Job:
+    def _launch(
+        self, kind: str, argv: List[str], *, run_id: Optional[str] = None,
+    ) -> Job:
+        # ``run_id`` is set for the kinds that *create* a new output dir
+        # (detection / relation_detection) -- the launcher assigns it up
+        # front (``_mint_run_id``) and passes it to the child via
+        # ``--run-name``, so it is known and correct immediately rather
+        # than inferred after the job exits. ``None`` for kinds that
+        # operate on an existing run (report, web_verify, ...).
         job_id = uuid.uuid4().hex[:12]
         log_path = self.log_dir / f"{job_id}.log"
 
@@ -921,6 +965,7 @@ class JobManager:
             argv=list(argv),
             log_path=log_path,
             started_at=datetime.now(timezone.utc).isoformat(),
+            run_id=run_id,
             pid=proc.pid,
             existing_run_ids=list(existing),
             _proc=proc,
@@ -976,6 +1021,17 @@ class JobManager:
             logger.warning("failed to persist job %s: %s", job.job_id, exc)
 
     def _resolve_run_id(self, job: Job) -> None:
+        """Legacy fallback: infer the output dir for a detection job that
+        has no ``run_id`` yet.
+
+        New jobs get a deterministic ``run_id`` at launch (``_mint_run_id``
+        -> ``--run-name``), so this returns immediately for them. It now
+        only fires for jobs persisted by an older build (``run_id`` still
+        ``None`` when recovered after a restart). The registry-diff +
+        mtime guess below is inherently racy under concurrency -- which is
+        exactly why launch-time assignment replaced it -- but it stays as
+        a best-effort recovery path for those historical jobs.
+        """
         if job.kind != "detection" or job.run_id:
             return
         try:
