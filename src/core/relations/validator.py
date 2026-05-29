@@ -109,7 +109,10 @@ _SAFE_BUILTINS: Dict[str, Any] = {
         # the runtime-string-attr escape pattern.
         "abs", "all", "any", "bin", "bool", "callable", "chr",
         "complex", "dict", "divmod", "enumerate", "filter", "float",
-        "format", "frozenset", "hash", "hasattr", "hex",
+        # NOTE: ``format`` is intentionally omitted -- str.format /
+        # format() drive attribute/index traversal from a format-spec
+        # string the AST never inspects (a sandbox-escape vector).
+        "frozenset", "hash", "hasattr", "hex",
         "id", "int", "isinstance", "issubclass", "iter", "len",
         "list", "map", "max", "min", "next", "object",
         "oct", "ord", "pow",
@@ -152,6 +155,34 @@ def _validate_code_ast(code: str) -> None:
         if isinstance(node, ast.Name) and node.id in _FORBIDDEN_NAMES:
             raise CodeValidationError(
                 f"reference to forbidden name: {node.id!r}"
+            )
+        # The dunder-attribute check above only sees attribute access
+        # written as syntax (``x.__class__``). The class-graph-walk
+        # escape instead smuggles dunder names through a *string* that is
+        # resolved at runtime by str.format / format_map / %-formatting
+        # (the field/key spec the AST sees only as a Constant). Close
+        # that by (a) rejecting those formatting calls and (b) rejecting
+        # any string literal carrying a ``__`` dunder name.
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if "__" in node.value:
+                raise CodeValidationError(
+                    "double-underscore in a string literal is not allowed "
+                    "in check() (format-string / getattr-by-name escape)"
+                )
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if node.func.attr in ("format", "format_map"):
+                raise CodeValidationError(
+                    f"str.{node.func.attr}() is not allowed in check() "
+                    "(format-spec attribute-traversal escape)"
+                )
+        if (
+            isinstance(node, ast.BinOp)
+            and isinstance(node.op, ast.Mod)
+            and isinstance(node.left, ast.Constant)
+            and isinstance(node.left.value, str)
+        ):
+            raise CodeValidationError(
+                "%-formatting on a string literal is not allowed in check()"
             )
 
 

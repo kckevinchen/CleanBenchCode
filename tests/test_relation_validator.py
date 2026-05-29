@@ -656,3 +656,45 @@ class TestValidateOneAdaptive:
         assert violator_rows >= {0, 1, 2, 3}
         # Should have made multiple LLM calls.
         assert len(llm.calls) >= 3
+
+
+# ---------------------------------------------------------------------------
+# Sandbox-escape hardening (review batch 3): the AST guard must reject the
+# str.format / format_map / %-formatting class-graph-walk vectors where the
+# dunder names live in a runtime-resolved string, not an Attribute node.
+# ---------------------------------------------------------------------------
+
+
+def test_rejects_str_format_attribute_escape():
+    code = "def check(df):\n    return '{0.__class__}'.format(df) == ''\n"
+    with pytest.raises(CodeValidationError):
+        _validate_code_ast(code)
+
+
+def test_rejects_format_map_call():
+    # No dunder in the literal, so this exercises the .format_map rule itself.
+    code = "def check(df):\n    return '{a}'.format_map({'a': 1}) == ''\n"
+    with pytest.raises(CodeValidationError, match="format"):
+        _validate_code_ast(code)
+
+
+def test_rejects_percent_format_on_string_literal():
+    code = "def check(df):\n    return ('%(x)s' % {'x': 1}) == ''\n"
+    with pytest.raises(CodeValidationError):
+        _validate_code_ast(code)
+
+
+def test_rejects_dunder_in_string_literal():
+    code = "def check(df):\n    return df['c'].astype(str).str.contains('__class__')\n"
+    with pytest.raises(CodeValidationError, match="double-underscore"):
+        _validate_code_ast(code)
+
+
+def test_format_builtin_removed_from_sandbox():
+    from src.core.relations.validator import _SAFE_BUILTINS
+    assert "format" not in _SAFE_BUILTINS
+
+
+def test_legitimate_modulo_arithmetic_still_allowed():
+    # %-on-a-column (not a string literal) must remain valid.
+    _validate_code_ast("def check(df):\n    return df['n'] % 2 == 0\n")
