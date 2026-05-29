@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 def register(app: FastAPI, router_ctx: RouterContext) -> None:
     cache = router_ctx.cache
+    run_dir_or_404 = router_ctx.run_dir_or_404
 
     @app.get("/api/runs/{run_id}/web-verifications")
     def list_web_verifications(run_id: str) -> Dict[str, Any]:
@@ -105,7 +106,7 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
               ]
             }
         """
-        rd = _run_dir_or_404(run_id)
+        rd = run_dir_or_404(run_id)
         base = _column_verify_dir(rd)
         if not base.is_dir():
             return {"available": False, "items": []}
@@ -192,7 +193,7 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
             }
         """
         _validate_source_name(source)
-        rd = _run_dir_or_404(run_id)
+        rd = run_dir_or_404(run_id)
         path = _column_verify_path(rd, source, column)
         if not path.exists():
             return {
@@ -264,7 +265,7 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
         value-batch checkpoint). The labelling UI polls this endpoint
         while a column-audit job is running to drive a progress bar.
         """
-        rd = _run_dir_or_404(run_id)
+        rd = run_dir_or_404(run_id)
         path = _column_verify_dir(rd) / "_progress.json"
         if not path.exists():
             return {"available": False}

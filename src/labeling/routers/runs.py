@@ -237,6 +237,9 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
     annotator = router_ctx.annotator
     safe_run_dir = router_ctx.safe_run_dir
     run_dir_or_404 = router_ctx.run_dir_or_404
+    project_root = router_ctx.project_root
+    outputs_dir = router_ctx.outputs_dir
+    registry = router_ctx.registry
 
     @app.get("/api/runs")
     def list_runs() -> Dict[str, Any]:
