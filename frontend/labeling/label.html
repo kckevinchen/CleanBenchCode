@@ -20,26 +20,35 @@
   <!-- UI/UX refinement layer: loaded last so its rules win by source order.
        Restyles existing markup only (no DOM/JS changes); drop this one line
        to revert to the base look. -->
-  <link rel="stylesheet" href="./refresh.css?v=1" />
+  <link rel="stylesheet" href="./refresh.css?v=2" />
 </head>
 <body>
   <header>
     <div class="title">
       <h1><a href="./" style="color:inherit;">Data-cleaning workbench</a> <span class="muted">· label</span></h1>
-      <div class="meta" id="run-meta">loading…</div>
+      <div class="meta" id="run-meta"><span class="sk sk-meta" aria-label="loading run metadata"></span></div>
     </div>
     <div class="progress" id="progress"></div>
     <div class="actions">
       <a href="./">← Runs</a>
-      <a id="export-link" href="#" download>Export benchmark</a>
-      <a id="export-by-type-link" href="#" download title="One JSONL per error_type, bundled as a ZIP">Per-type benchmark</a>
-      <span class="export-single" title="Download just one error_type as JSONL">
-        <select id="export-single-type" aria-label="Select error type to export">
-          <option value="">(error type)</option>
-        </select>
-        <a id="export-single-link" href="#" download class="muted" aria-disabled="true">Download</a>
-      </span>
-      <a id="export-sources-link" href="#" download title="ZIP of source CSVs minus exclusions (whole-file, row, and column exclusions are stripped out)">Export source CSVs</a>
+      <!-- Export controls grouped into one dropdown to declutter the
+           header. All ids are preserved so label.js wires hrefs / the
+           conflict-guard by id exactly as before; header_menu.js handles
+           open/close (outside-click + Esc). -->
+      <details class="export-menu" id="export-menu">
+        <summary class="export-menu-summary" title="Download benchmark / source exports">Export</summary>
+        <div class="export-menu-body" role="menu">
+          <a id="export-link" href="#" download role="menuitem">Export benchmark</a>
+          <a id="export-by-type-link" href="#" download title="One JSONL per error_type, bundled as a ZIP" role="menuitem">Per-type benchmark</a>
+          <span class="export-single" title="Download just one error_type as JSONL">
+            <select id="export-single-type" aria-label="Select error type to export">
+              <option value="">(error type)</option>
+            </select>
+            <a id="export-single-link" href="#" download class="muted" aria-disabled="true">Download</a>
+          </span>
+          <a id="export-sources-link" href="#" download title="ZIP of source CSVs minus exclusions (whole-file, row, and column exclusions are stripped out)" role="menuitem">Export source CSVs</a>
+        </div>
+      </details>
       <button id="batch-corrections-btn" class="hdr-btn" type="button"
               title="Generate per-value corrections for every TP / unsure cluster in this run (LLM, K=3 self-consistency).">
         Generate all corrections
@@ -79,7 +88,19 @@
         <div class="multi-filter" id="filter-error-type" data-empty-label="(any)"></div>
       </div>
     </div>
-    <div class="queue" id="queue"></div>
+    <div class="queue" id="queue">
+      <!-- Loading skeleton shown until label.js renders the queue (it
+           replaces #queue's contents on first render). Pure decoration. -->
+      <div class="queue-skeleton" aria-hidden="true">
+        <div class="sk-row"><span class="sk sk-dot"></span><span class="sk-lines"><span class="sk sk-text l1"></span><span class="sk sk-text l2"></span></span></div>
+        <div class="sk-row"><span class="sk sk-dot"></span><span class="sk-lines"><span class="sk sk-text l1"></span><span class="sk sk-text l2"></span></span></div>
+        <div class="sk-row"><span class="sk sk-dot"></span><span class="sk-lines"><span class="sk sk-text l1"></span><span class="sk sk-text l2"></span></span></div>
+        <div class="sk-row"><span class="sk sk-dot"></span><span class="sk-lines"><span class="sk sk-text l1"></span><span class="sk sk-text l2"></span></span></div>
+        <div class="sk-row"><span class="sk sk-dot"></span><span class="sk-lines"><span class="sk sk-text l1"></span><span class="sk sk-text l2"></span></span></div>
+        <div class="sk-row"><span class="sk sk-dot"></span><span class="sk-lines"><span class="sk sk-text l1"></span><span class="sk sk-text l2"></span></span></div>
+        <div class="sk-row"><span class="sk sk-dot"></span><span class="sk-lines"><span class="sk sk-text l1"></span><span class="sk sk-text l2"></span></span></div>
+      </div>
+    </div>
   </aside>
 
   <main class="center" id="center">
@@ -343,6 +364,9 @@
   </div>
 
   <script type="module" src="./label.js?v=6"></script>
+  <!-- Header export dropdown behaviour (outside-click / Esc to close).
+       Standalone module so it stays out of label.js; CSP-safe ('self'). -->
+  <script type="module" src="./header_menu.js?v=1"></script>
 </body>
 </html>
 
