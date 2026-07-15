@@ -1,0 +1,71 @@
+2026-05-19 07:28:39,000 INFO demo_rft: Using endpoint https://dmxaz-test-aoai.openai.azure.com/ (auto-resolved).
+2026-05-19 07:28:39,017 INFO demo_rft: Calibrating grader on 20 eval rows.
+2026-05-19 07:28:39,925 INFO azure.identity._internal.decorators: AzureCliCredential.get_token_info succeeded
+2026-05-19 07:28:42,941 INFO httpx: HTTP Request: POST https://dmxaz-test-aoai.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:28:43,581 INFO httpx: HTTP Request: POST https://dmxaz-test-aoai-eu2.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 404 Not Found"
+2026-05-19 07:28:43,582 INFO src.core.llm_client: 404 from https://dmxaz-test-aoai-eu2.openai.azure.com/ for 'gpt-5.4': marked dead, skipping
+2026-05-19 07:28:49,977 INFO httpx: HTTP Request: POST https://yeyehe-aoai.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:28:50,595 INFO httpx: HTTP Request: POST https://sc-rf-ma30hqbc-eastus2.cognitiveservices.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 404 Not Found"
+2026-05-19 07:28:50,596 INFO src.core.llm_client: 404 from https://sc-rf-ma30hqbc-eastus2.cognitiveservices.azure.com/ for 'gpt-5.5': marked dead, skipping
+2026-05-19 07:28:51,627 INFO httpx: HTTP Request: POST https://sc-rf-m8udnqmj-swedencentral.cognitiveservices.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 404 Not Found"
+2026-05-19 07:28:51,628 INFO src.core.llm_client: 404 from https://sc-rf-m8udnqmj-swedencentral.cognitiveservices.azure.com/ for 'gpt-5.5': marked dead, skipping
+2026-05-19 07:28:52,084 INFO httpx: HTTP Request: POST https://sc-rf-ml1gih82-centralus.cognitiveservices.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 404 Not Found"
+2026-05-19 07:28:52,085 INFO src.core.llm_client: 404 from https://sc-rf-ml1gih82-centralus.cognitiveservices.azure.com/ for 'gpt-5.5': marked dead, skipping
+2026-05-19 07:28:53,316 INFO httpx: HTTP Request: POST https://sc-rf-mcfew454-francecentral.cognitiveservices.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 404 Not Found"
+2026-05-19 07:28:53,316 INFO src.core.llm_client: 404 from https://sc-rf-mcfew454-francecentral.cognitiveservices.azure.com/ for 'gpt-5.5': marked dead, skipping
+2026-05-19 07:28:53,895 INFO httpx: HTTP Request: POST https://sc-rf-mbvhbia4-northcentralus.cognitiveservices.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 404 Not Found"
+2026-05-19 07:28:53,896 INFO src.core.llm_client: 404 from https://sc-rf-mbvhbia4-northcentralus.cognitiveservices.azure.com/ for 'gpt-5.5': marked dead, skipping
+2026-05-19 07:28:54,363 INFO httpx: HTTP Request: POST https://sc-rf-mcfeobyx-northcentralus.cognitiveservices.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 404 Not Found"
+2026-05-19 07:28:54,364 INFO src.core.llm_client: 404 from https://sc-rf-mcfeobyx-northcentralus.cognitiveservices.azure.com/ for 'gpt-5.5': marked dead, skipping
+2026-05-19 07:28:55,522 INFO httpx: HTTP Request: POST https://sc-rf-mcnngi4g-norwayeast.cognitiveservices.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 404 Not Found"
+2026-05-19 07:28:55,523 INFO src.core.llm_client: 404 from https://sc-rf-mcnngi4g-norwayeast.cognitiveservices.azure.com/ for 'gpt-5.5': marked dead, skipping
+2026-05-19 07:29:03,354 INFO httpx: HTTP Request: POST https://sc-rf-ml1gf0z3-southcentralus.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:29:06,886 INFO httpx: HTTP Request: POST https://dmxaz-test-aoai.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:29:09,412 INFO httpx: HTTP Request: POST https://yeyehe-aoai.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:29:11,699 INFO httpx: HTTP Request: POST https://sc-rf-ml1gf0z3-southcentralus.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:29:14,613 INFO httpx: HTTP Request: POST https://dmxaz-test-aoai.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:29:22,953 INFO httpx: HTTP Request: POST https://yeyehe-aoai.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:29:31,265 INFO httpx: HTTP Request: POST https://sc-rf-ml1gf0z3-southcentralus.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:29:34,548 INFO httpx: HTTP Request: POST https://dmxaz-test-aoai.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:29:36,978 INFO httpx: HTTP Request: POST https://yeyehe-aoai.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:29:51,570 INFO httpx: HTTP Request: POST https://sc-rf-ml1gf0z3-southcentralus.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:29:54,177 INFO httpx: HTTP Request: POST https://dmxaz-test-aoai.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:29:57,057 INFO httpx: HTTP Request: POST https://yeyehe-aoai.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:30:05,168 INFO httpx: HTTP Request: POST https://sc-rf-ml1gf0z3-southcentralus.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:30:09,183 INFO httpx: HTTP Request: POST https://dmxaz-test-aoai.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:30:12,635 INFO httpx: HTTP Request: POST https://yeyehe-aoai.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:30:21,290 INFO httpx: HTTP Request: POST https://sc-rf-ml1gf0z3-southcentralus.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:30:24,011 INFO httpx: HTTP Request: POST https://dmxaz-test-aoai.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:30:26,614 INFO httpx: HTTP Request: POST https://yeyehe-aoai.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:30:35,730 INFO httpx: HTTP Request: POST https://sc-rf-ml1gf0z3-southcentralus.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:30:39,522 INFO httpx: HTTP Request: POST https://dmxaz-test-aoai.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:30:42,758 INFO httpx: HTTP Request: POST https://yeyehe-aoai.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:30:51,507 INFO httpx: HTTP Request: POST https://sc-rf-ml1gf0z3-southcentralus.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:30:55,207 INFO httpx: HTTP Request: POST https://dmxaz-test-aoai.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:31:01,297 INFO httpx: HTTP Request: POST https://yeyehe-aoai.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:31:08,860 INFO httpx: HTTP Request: POST https://sc-rf-ml1gf0z3-southcentralus.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:31:12,810 INFO httpx: HTTP Request: POST https://dmxaz-test-aoai.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:31:15,434 INFO httpx: HTTP Request: POST https://yeyehe-aoai.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:31:24,172 INFO httpx: HTTP Request: POST https://sc-rf-ml1gf0z3-southcentralus.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:31:27,939 INFO httpx: HTTP Request: POST https://dmxaz-test-aoai.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:31:34,852 INFO httpx: HTTP Request: POST https://yeyehe-aoai.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:31:43,861 INFO httpx: HTTP Request: POST https://sc-rf-ml1gf0z3-southcentralus.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:31:46,955 INFO httpx: HTTP Request: POST https://dmxaz-test-aoai.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:31:49,883 INFO httpx: HTTP Request: POST https://yeyehe-aoai.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:32:02,951 INFO httpx: HTTP Request: POST https://sc-rf-ml1gf0z3-southcentralus.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:32:06,633 INFO httpx: HTTP Request: POST https://dmxaz-test-aoai.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:32:18,445 INFO httpx: HTTP Request: POST https://yeyehe-aoai.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:32:26,119 INFO httpx: HTTP Request: POST https://sc-rf-ml1gf0z3-southcentralus.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:32:29,297 INFO httpx: HTTP Request: POST https://dmxaz-test-aoai.openai.azure.com/openai/responses?api-version=2025-03-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:32:29,299 INFO demo_rft: Wrote grader calibration report to outputs/typo_rft/grader_calibration_v1.json
+{
+  "grader_model": "gpt-5.2,gpt-5.4,gpt-5.5",
+  "n_rows_sampled": 20,
+  "n_correct_scored": 20,
+  "n_incorrect_scored": 20,
+  "n_parse_failures": 0,
+  "mean_score_correct": 5.0,
+  "mean_score_incorrect": 2.1,
+  "agreement_rate": 1.0,
+  "n_disagreements": 0
+}

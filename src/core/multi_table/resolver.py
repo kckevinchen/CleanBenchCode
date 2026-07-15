@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -451,6 +451,73 @@ def _validate_group(
     ), None
 
 
+def _infer_union_key(
+    group: ResolvedGroup,
+    frames: Mapping[str, pd.DataFrame],
+    *,
+    min_uniqueness: float = 0.85,
+    max_rows: int = 20000,
+) -> Tuple[str, ...]:
+    """Infer a primary key for a confirmed UNION whose LLM resolution
+    left ``primary_key`` empty.
+
+    Key-aligned paging needs *a* key to co-locate the same entity's rows
+    across sheets; without one, cross-sheet conflicts (e.g. a misspelled
+    author on the same title) land on different pages and are never
+    compared. The LLM occasionally omits the key under prompt-ensemble /
+    shuffle perturbation even when an obvious natural key exists, which
+    silently degrades recall.
+
+    Picks the single shared canonical column that is most uniquely valued
+    across the sheets it spans (a natural key like Title / ID). Returns
+    ``()`` when no shared column is unique enough - then the group really
+    is keyless and legacy paging is used.
+    """
+    if group.kind != "union" or not group.column_mapping:
+        return ()
+    # Never infer a positional/ordinal index (e.g. 'No.', a row number):
+    # pairing rows by it compares unrelated entities - the exact bad-key
+    # case the group guard exists to catch. Reuse its ordinal detectors
+    # (lazy import avoids a resolver<->group_guard import cycle).
+    from .group_guard import _ORDINAL_NAMES, _looks_ordinal, _norm_header
+
+    best: Optional[str] = None
+    best_score: Tuple[float, int] = (0.0, 0)
+    for canonical, entries in group.column_mapping.items():
+        if _norm_header(canonical) in _ORDINAL_NAMES:
+            continue
+        per_sheet = {e.sheet: e.column for e in entries}
+        if len(per_sheet) < 2:
+            continue
+        ratios: List[float] = []
+        ordinal = False
+        for sheet, col in per_sheet.items():
+            df = frames.get(sheet)
+            if df is None or col not in df.columns:
+                continue
+            if _norm_header(col) in _ORDINAL_NAMES or _looks_ordinal(
+                df[col].tolist()
+            ):
+                ordinal = True
+                break
+            ser = df[col].astype(str).str.strip()
+            ser = ser[ser != ""]
+            n = len(ser)
+            if n < 3:
+                continue
+            if n > max_rows:
+                ser = ser.iloc[:max_rows]
+                n = max_rows
+            ratios.append(ser.nunique() / n)
+        if ordinal or len(ratios) < 2:
+            continue
+        score = (min(ratios), len(ratios))
+        if min(ratios) >= min_uniqueness and score > best_score:
+            best_score = score
+            best = canonical
+    return (best,) if best else ()
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -582,6 +649,19 @@ def resolve_workbook(
         if group.group_id in seen_ids:
             continue
         seen_ids.add(group.group_id)
+        # Recall guard: a confirmed union with no key can't be row-paired,
+        # so cross-sheet conflicts are missed. The LLM sometimes omits an
+        # obvious natural key (esp. under adaptive perturbation); infer one
+        # deterministically from column uniqueness so detection stays robust.
+        if group.confirmed and group.kind == "union" and not group.primary_key:
+            inferred = _infer_union_key(group, frames)
+            if inferred:
+                logger.info(
+                    "Workbook %r group %s: LLM returned empty primary_key; "
+                    "inferred natural key %s from column uniqueness.",
+                    workbook, group.group_id, list(inferred),
+                )
+                group = replace(group, primary_key=inferred)
         out.groups.append(group)
 
     return out

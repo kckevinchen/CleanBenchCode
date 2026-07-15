@@ -11,15 +11,38 @@ from __future__ import annotations
 import html
 import json
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
 from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 
-from ..runs import _load_run_metadata, _save_run_metadata
+from ..runs import (
+    _add_folder,
+    _load_folders,
+    _load_run_metadata,
+    _remove_folder,
+    _save_run_metadata,
+    _update_folder,
+    dataset_label_from_config,
+)
 from ..schema import LabelStatus, LabelTarget
 from ._context import RouterContext
+
+# Mirror the cap enforced in ``..runs._save_run_metadata`` so the
+# "Copy of <name>" prefix we build here doesn't get silently truncated
+# in a surprising spot.
+_MAX_DISPLAY_NAME = 120
+
+
+def _looks_like_stamp(token: str) -> bool:
+    """True if ``token`` is a ``YYYYMMDDTHHMMSSZ`` run-id timestamp."""
+    try:
+        datetime.strptime(token, "%Y%m%dT%H%M%SZ")
+        return True
+    except ValueError:
+        return False
 
 
 def _count_multi_table_findings(run_dir: Path) -> int:
@@ -247,7 +270,135 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
             "project_root": str(project_root),
             "annotator": annotator,
             "runs": [r.to_dict() for r in registry.list()],
+            # Folder definitions ship alongside the runs so the dashboard
+            # can render the grouped view from a single fetch. Membership
+            # lives on each run's ``folder_id`` (see ``RunInfo``).
+            "folders": _load_folders(outputs_dir),
         }
+
+    # ---------------------------------------------------------------
+    # Virtual folders: group runs in the dashboard without moving any
+    # run directory on disk. Folder *definitions* live in
+    # ``outputs/folders.json``; per-run membership is a ``folder_id`` on
+    # each run's ``run_metadata.json`` sidecar. Deleting a folder simply
+    # orphans its members back into "Unfiled".
+    # ---------------------------------------------------------------
+
+    @app.get("/api/folders")
+    def list_folders() -> Dict[str, Any]:
+        return {"folders": _load_folders(outputs_dir)}
+
+    def _resolve_run_dirs(run_ids: Any) -> List[Path]:
+        """Validate every id, returning the dirs that actually exist.
+
+        Path-validates each id via ``safe_run_dir`` (which raises 400 on
+        traversal) and drops ids that no longer resolve to a run
+        directory. Performs NO writes, so callers validate the whole
+        batch up front and a bad (traversal) id fails the request before
+        anything is mutated -- the move is all-or-nothing.
+        """
+        if not isinstance(run_ids, list):
+            raise HTTPException(400, "run_ids must be a list")
+        dirs: List[Path] = []
+        for rid in run_ids:
+            if not isinstance(rid, str):
+                continue
+            run_dir = safe_run_dir(rid)  # raises 400 on traversal
+            if run_dir.is_dir():
+                dirs.append(run_dir)
+        return dirs
+
+    def _assign_runs_to_folder(run_ids: Any, folder_id: str) -> int:
+        """Write ``folder_id`` onto each existing run's sidecar.
+
+        Validation happens for the whole batch first (see
+        ``_resolve_run_dirs``) so a traversal id can't leave a partial
+        write behind. Returns the number of runs updated.
+        """
+        dirs = _resolve_run_dirs(run_ids)
+        for run_dir in dirs:
+            _save_run_metadata(run_dir, {"folder_id": folder_id})
+        return len(dirs)
+
+    @app.post("/api/folders")
+    def create_folder(payload: Dict[str, Any] = Body(default=None)) -> Dict[str, Any]:
+        """Create a folder and (optionally) file an initial set of runs.
+
+        Body: ``{"name": str, "run_ids": [str, ...]}`` - ``run_ids`` is
+        optional, so this also creates an empty folder. Returns the new
+        folder record plus the count of runs filed into it.
+        """
+        opts = payload or {}
+        name = opts.get("name")
+        if name is not None and not isinstance(name, str):
+            raise HTTPException(400, "name must be a string")
+        # Resolve membership BEFORE persisting the folder so a bad run_id
+        # (traversal -> 400) can't leave an orphaned empty folder on disk.
+        run_dirs = _resolve_run_dirs(opts.get("run_ids", []))
+        folder = _add_folder(outputs_dir, name or "")
+        for run_dir in run_dirs:
+            _save_run_metadata(run_dir, {"folder_id": folder["id"]})
+        return {"ok": True, "folder": folder, "moved": len(run_dirs)}
+
+    @app.patch("/api/folders/{folder_id}")
+    def update_folder(
+        folder_id: str, payload: Dict[str, Any] = Body(...)
+    ) -> Dict[str, Any]:
+        """Rename a folder and/or toggle its collapsed state.
+
+        Body keys: ``name`` (str) and/or ``collapsed`` (bool). Unknown
+        keys are ignored. 404 if the folder doesn't exist.
+        """
+        opts = payload or {}
+        name = opts.get("name")
+        if name is not None and not isinstance(name, str):
+            raise HTTPException(400, "name must be a string")
+        collapsed = opts.get("collapsed")
+        if collapsed is not None and not isinstance(collapsed, bool):
+            raise HTTPException(400, "collapsed must be a boolean")
+        folder = _update_folder(
+            outputs_dir, folder_id, name=name, collapsed=collapsed
+        )
+        if folder is None:
+            raise HTTPException(404, f"folder not found: {folder_id}")
+        return {"ok": True, "folder": folder}
+
+    @app.delete("/api/folders/{folder_id}")
+    def delete_folder(folder_id: str) -> Dict[str, Any]:
+        """Delete a folder definition; member runs fall back to Unfiled.
+
+        The run directories are untouched - we just clear ``folder_id``
+        from every member's sidecar so no run keeps a dangling pointer.
+        """
+        # Clear membership first so a crash between the two writes leaves
+        # runs orphaned (-> Unfiled on read) rather than pointing at a
+        # folder that's already gone (which also reads as Unfiled, so the
+        # order is belt-and-braces either way).
+        members = [r.run_id for r in registry.list() if r.folder_id == folder_id]
+        _assign_runs_to_folder(members, "")
+        removed = _remove_folder(outputs_dir, folder_id)
+        if not removed:
+            raise HTTPException(404, f"folder not found: {folder_id}")
+        return {"ok": True, "folder_id": folder_id, "unfiled": len(members)}
+
+    @app.post("/api/folders/assign")
+    def assign_folder(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+        """Move a set of runs into a folder (or out to Unfiled).
+
+        Body: ``{"run_ids": [str, ...], "folder_id": str|null}``. A null
+        or empty ``folder_id`` clears membership (Unfiled). A non-empty
+        ``folder_id`` must reference an existing folder (404 otherwise).
+        """
+        opts = payload or {}
+        folder_id = opts.get("folder_id") or ""
+        if not isinstance(folder_id, str):
+            raise HTTPException(400, "folder_id must be a string or null")
+        if folder_id:
+            known = {f["id"] for f in _load_folders(outputs_dir)}
+            if folder_id not in known:
+                raise HTTPException(404, f"folder not found: {folder_id}")
+        moved = _assign_runs_to_folder(opts.get("run_ids", []), folder_id)
+        return {"ok": True, "moved": moved, "folder_id": folder_id}
 
     @app.delete("/api/runs/{run_id}")
     def delete_run(run_id: str, force: bool = False) -> Dict[str, Any]:
@@ -273,6 +424,99 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
         import shutil
         shutil.rmtree(run_dir)
         return {"ok": True, "run_id": run_id}
+
+    @app.post("/api/runs/{run_id}/duplicate")
+    def duplicate_run(
+        run_id: str, payload: Dict[str, Any] = Body(default=None)
+    ) -> Dict[str, Any]:
+        """Copy an existing run directory into a fresh ``outputs/<id>/``.
+
+        The clone gets a new timestamp-prefixed run-id (so it sorts to
+        the top and never collides with the source's ``labels.jsonl``
+        key space) while reusing the source's model/dataset suffix. By
+        default the operator's existing labels are copied too; pass
+        ``{"reset_labels": true}`` to start the copy with a clean
+        labelling slate (drops every operator-authored store:
+        ``labels.jsonl``, the column-cluster label store
+        ``column_clusters.jsonl``, ``exclusions.jsonl`` and
+        ``cell_notes.jsonl`` -- but keeps the LLM-side
+        ``column_cluster_drafts.jsonl`` proposals, which are detection
+        output, not labels). The clone is always unstarred and its
+        ``display_name`` is set to ``"Copy of <name>"`` so the two are
+        easy to tell apart in the dashboard.
+        """
+        src_dir = run_dir_or_404(run_id)
+        opts = payload or {}
+        reset_labels = bool(opts.get("reset_labels", False))
+
+        # New run-id: replace the source's leading ``<timestamp>Z`` token
+        # with a fresh one so the clone is unique and sorts first. If the
+        # source id has no recognisable timestamp prefix we just prepend
+        # one. The suffix is reused verbatim - it is already a valid,
+        # path-safe directory-name component (it IS the source dir name).
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        parts = run_id.split("_", 1)
+        suffix = parts[1] if len(parts) == 2 and _looks_like_stamp(parts[0]) else run_id
+        new_id = f"{stamp}_{suffix}"
+        dest_dir = safe_run_dir(new_id)
+        # Guard against the (sub-second) chance the target already exists.
+        n = 1
+        while dest_dir.exists():
+            new_id = f"{stamp}_{suffix}_copy{n}"
+            dest_dir = safe_run_dir(new_id)
+            n += 1
+
+        # Don't copy the per-run cache/tmp sidecars; everything else
+        # (clusters, summary, report, raw responses, column-cluster
+        # stores, labels) is part of the run's labellable state.
+        def _ignore(_dir: str, names: List[str]) -> List[str]:
+            return [nm for nm in names if nm.endswith(".tmp")]
+
+        # A mid-copy failure (disk full, I/O error) must not leave a
+        # half-written run dir behind for the registry to list as a
+        # corrupt run -- clean up the partial copy and surface a 500.
+        try:
+            shutil.copytree(src_dir, dest_dir, ignore=_ignore)
+        except OSError as exc:
+            shutil.rmtree(dest_dir, ignore_errors=True)
+            raise HTTPException(500, f"duplicate copy failed: {exc}") from exc
+
+        if reset_labels:
+            # Drop every operator-authored store so the clone starts with
+            # a clean labelling slate. ``column_clusters.jsonl`` is the
+            # real column-cluster (inconsistency) verdict store; the LLM
+            # ``column_cluster_drafts.jsonl`` proposals are kept.
+            for rel in (
+                "labels.jsonl",
+                "column_clusters.jsonl",
+                "exclusions.jsonl",
+                "cell_notes.jsonl",
+            ):
+                p = dest_dir / rel
+                if p.exists():
+                    p.unlink()
+
+        # The clone is a separate working copy: never inherit the
+        # source's starred pin or folder membership (copytree carried the
+        # source's run_metadata.json over, so we must reset both
+        # explicitly), and label it so the two are obvious. The clone
+        # starts Unfiled - the operator files it where they want it.
+        src_meta = _load_run_metadata(src_dir)
+        base_name = src_meta.get("display_name") or run_id
+        _save_run_metadata(
+            dest_dir,
+            {
+                "display_name": f"Copy of {base_name}"[:_MAX_DISPLAY_NAME],
+                "starred": False,
+                "notes": src_meta.get("notes", ""),
+                "folder_id": "",
+            },
+        )
+
+        info = registry.get(new_id)
+        if info is None:
+            raise HTTPException(500, f"duplicate failed to materialise: {new_id}")
+        return {"ok": True, "run_id": new_id, "source_run_id": run_id, "run": info.to_dict()}
 
     @app.patch("/api/runs/{run_id}")
     def patch_run(run_id: str, payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
@@ -361,6 +605,9 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
             "run_id": run_id,
             "run_dir": str(ctx.run_dir),
             "annotator": annotator,
+            "dataset": dataset_label_from_config(
+                (ctx.summary or {}).get("config") or {}
+            ),
             "summary": ctx.summary,
             "sources": [
                 {

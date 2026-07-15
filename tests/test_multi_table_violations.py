@@ -339,3 +339,90 @@ class TestEndToEndStableOrder:
             "header_synonym", "header_synonym",
             "duplicate_row", "duplicate_row",
         ]
+
+
+class TestInferUnionKey:
+    """`_infer_union_key` recovers a natural key for a confirmed union
+    whose LLM resolution left ``primary_key`` empty (the recall bug)."""
+
+    def _book_frames(self):
+        # Two sheets sharing a unique 'Title' + a low-cardinality 'Genre'.
+        a = pd.DataFrame({
+            "Title": [f"Book {i}" for i in range(10)],
+            "Author": ["Jim Ottaviani"] + ["A"] * 9,
+            "Genre": ["fiction"] * 10,
+        })
+        b = pd.DataFrame({
+            "Title": [f"Book {i}" for i in range(10)],
+            "Author": ["Jim Ottoviani"] + ["A"] * 9,   # misspelled
+            "Genre": ["fiction"] * 10,
+        })
+        return {"a.csv": a, "b.csv": b}
+
+    def _group(self, pk=()):
+        return _union_group(
+            sheets=["a.csv", "b.csv"],
+            column_mapping={
+                "Title": [_entry("a.csv", "Title"), _entry("b.csv", "Title")],
+                "Author": [_entry("a.csv", "Author"), _entry("b.csv", "Author")],
+                "Genre": [_entry("a.csv", "Genre"), _entry("b.csv", "Genre")],
+            },
+            primary_key=pk,
+        )
+
+    def test_infers_unique_title(self) -> None:
+        from src.core.multi_table.resolver import _infer_union_key
+        key = _infer_union_key(self._group(), self._book_frames())
+        assert key == ("Title",)   # not Author (dup) or Genre (constant)
+
+    def test_skips_low_cardinality(self) -> None:
+        from src.core.multi_table.resolver import _infer_union_key
+        frames = self._book_frames()
+        # drop Title so no column is unique enough -> keyless.
+        g = _union_group(
+            sheets=["a.csv", "b.csv"],
+            column_mapping={
+                "Genre": [_entry("a.csv", "Genre"), _entry("b.csv", "Genre")],
+            },
+        )
+        assert _infer_union_key(g, frames) == ()
+
+    def test_single_sheet_column_ignored(self) -> None:
+        from src.core.multi_table.resolver import _infer_union_key
+        # A unique column present on only ONE sheet is not a cross-sheet key.
+        g = _union_group(
+            sheets=["a.csv", "b.csv"],
+            column_mapping={
+                "Title": [_entry("a.csv", "Title")],   # only one sheet
+            },
+        )
+        assert _infer_union_key(g, self._book_frames()) == ()
+
+    def test_join_group_not_inferred(self) -> None:
+        from src.core.multi_table.resolver import _infer_union_key
+        g = ResolvedGroup(
+            workbook="wb", group_id="j1", kind="join", confirmed=True,
+            rationale="", sheets=("a.csv", "b.csv"),
+            column_mapping={
+                "Title": (_entry("a.csv", "Title"), _entry("b.csv", "Title")),
+            },
+            primary_key=(),
+        )
+        assert _infer_union_key(g, self._book_frames()) == ()
+
+    def test_ordinal_index_not_inferred(self) -> None:
+        # A 100%-unique but POSITIONAL column ('No.' = row number) must
+        # NOT be picked - pairing by it compares unrelated rows.
+        from src.core.multi_table.resolver import _infer_union_key
+        a = pd.DataFrame({"No.": [str(i) for i in range(1, 11)],
+                          "Genre": ["fiction"] * 10})
+        b = pd.DataFrame({"No.": [str(i) for i in range(1, 11)],
+                          "Genre": ["fiction"] * 10})
+        g = _union_group(
+            sheets=["a.csv", "b.csv"],
+            column_mapping={
+                "No.": [_entry("a.csv", "No."), _entry("b.csv", "No.")],
+                "Genre": [_entry("a.csv", "Genre"), _entry("b.csv", "Genre")],
+            },
+        )
+        assert _infer_union_key(g, {"a.csv": a, "b.csv": b}) == ()

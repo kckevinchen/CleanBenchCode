@@ -1,0 +1,11 @@
+{
+  "flavours": [
+    "spelling",
+    "whitespace",
+    "punctuation"
+  ],
+  "output_shape": "JSON object {typos: [{value, correction, flavour, rationale}, ...]}; empty list means 'no typos'.",
+  "ambiguous_scoring_rule": "v3 carries an ``ambiguous_values`` list per column (the union of v2 cell-level ambiguous gold rows). Predictions on ambiguous values are removed from BOTH the predicted and gold sets before scoring -- credited neither true positive nor false positive.",
+  "correction_mismatch_rule": "A predicted (value, correction) pair where ``value`` matches gold but ``correction`` does not is counted as BOTH a false positive AND a false negative.",
+  "normalisation": "Match key uses case-folding + collapsed whitespace; otherwise verbatim."
+}

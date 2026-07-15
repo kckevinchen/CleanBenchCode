@@ -226,3 +226,147 @@ class TestStatsIncludeColumnClusters:
         assert s["overall"]["total"] == 0
         assert s["overall"]["unlabeled"] == 0
         assert s["fn"]["total"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Multi-table-only runs must populate the stats bar too
+# ---------------------------------------------------------------------------
+
+
+def _make_mt_run(project: Path, run_id: str = "20260101T000000Z_mtstats") -> Path:
+    """Run dir with NO cell/column clusters but three multi-table
+    findings (one spanning two sheets). Mirrors a multi-table-only run
+    (e.g. inter_table_inconsistency over a curated workbook corpus)."""
+    data_dir = project / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "a.csv").write_text("K\n1\n", encoding="utf-8")
+    outputs = project / "outputs"
+    outputs.mkdir(parents=True, exist_ok=True)
+    run_dir = outputs / run_id
+    run_dir.mkdir()
+    (run_dir / "summary.json").write_text(json.dumps({
+        "config": {"csv_paths": [str(data_dir / "a.csv")]}
+    }))
+    (run_dir / "clusters.json").write_text("[]")
+    (run_dir / "issues.json").write_text("[]")
+    # 3 distinct findings; vid1 spans two (sheet,row) rows.
+    rows = [
+        {"violation_id": "vid1", "kind": "attribute_conflict",
+         "workbook": "wb1", "group_id": "u1",
+         "sheet": "a.csv", "row": 0, "columns": ["x"], "values": {},
+         "linked": [{"sheet": "b.csv", "row": 0}]},
+        {"violation_id": "vid1", "kind": "attribute_conflict",
+         "workbook": "wb1", "group_id": "u1",
+         "sheet": "b.csv", "row": 0, "columns": ["x"], "values": {},
+         "linked": [{"sheet": "a.csv", "row": 0}]},
+        {"violation_id": "vid2", "kind": "duplicate_row",
+         "workbook": "wb1", "group_id": "u1",
+         "sheet": "a.csv", "row": 1, "columns": [], "values": {}, "linked": []},
+        {"violation_id": "vid3", "kind": "fk_orphan",
+         "workbook": "wb1", "group_id": "j1",
+         "sheet": "b.csv", "row": 2, "columns": [], "values": {}, "linked": []},
+    ]
+    (run_dir / "multi_table_violations.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8",
+    )
+    # Resolver output: one workbook with a confirmed union, a confirmed
+    # join, and an unconfirmed union candidate (filtered out by default).
+    groups = [{
+        "workbook": "wb1",
+        "sheets": ["a.csv", "b.csv"],
+        "groups": [
+            {"group_id": "u1", "kind": "union", "confirmed": True,
+             "sheets": ["a.csv", "b.csv"], "primary_key": ["K"],
+             "rationale": "same schema"},
+            {"group_id": "j1", "kind": "join", "confirmed": True,
+             "sheets": ["a.csv", "b.csv"], "primary_key": [],
+             "join": {"parent_sheet": "a.csv", "parent_columns": ["K"],
+                      "child_sheet": "b.csv", "child_columns": ["K"]},
+             "rationale": "fk"},
+            {"group_id": "u2", "kind": "union", "confirmed": False,
+             "sheets": ["a.csv", "b.csv"], "primary_key": ["K"],
+             "rationale": "maybe"},
+        ],
+    }]
+    (run_dir / "multi_table_groups.jsonl").write_text(
+        "\n".join(json.dumps(g) for g in groups) + "\n", encoding="utf-8",
+    )
+    return run_dir
+
+
+@pytest.fixture
+def mt_client_and_run():
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td)
+        (project / "frontend" / "labeling").mkdir(parents=True)
+        run_dir = _make_mt_run(project)
+        app = create_app(project, annotator="tester")
+        yield TestClient(app), run_dir.name
+
+
+class TestStatsIncludeMultiTable:
+    def test_overall_total_includes_mt_findings(self, mt_client_and_run) -> None:
+        client, run_id = mt_client_and_run
+        s = client.get(f"/api/runs/{run_id}/stats").json()
+        # 3 distinct violation_ids -> 3 unlabeled findings (NOT 0).
+        assert s["overall"]["total"] == 3
+        assert s["overall"]["unlabeled"] == 3
+
+    def test_mt_label_moves_the_counter(self, mt_client_and_run) -> None:
+        client, run_id = mt_client_and_run
+        r = client.post(
+            f"/api/runs/{run_id}/multi-table-labels",
+            json={"violation_id": "vid1",
+                  "status": "confirmed_inconsistency"},
+        )
+        assert r.status_code == 200, r.text
+        r = client.post(
+            f"/api/runs/{run_id}/multi-table-labels",
+            json={"violation_id": "vid2", "status": "not_a_violation"},
+        )
+        assert r.status_code == 200, r.text
+        s = client.get(f"/api/runs/{run_id}/stats").json()
+        assert s["overall"]["total"] == 3
+        assert s["overall"]["tp"] == 1      # confirmed_inconsistency
+        assert s["overall"]["fp"] == 1      # not_a_violation
+        assert s["overall"]["unlabeled"] == 1
+
+
+class TestMultiTableGroupsEndpoint:
+    def test_confirmed_only_by_default(self, mt_client_and_run) -> None:
+        client, run_id = mt_client_and_run
+        d = client.get(f"/api/runs/{run_id}/multi-table-groups").json()
+        t = d["totals"]
+        assert t["workbooks"] == 1
+        assert t["union"] == 1            # only the confirmed union
+        assert t["join"] == 1
+        assert t["groups"] == 2
+        assert t["unconfirmed"] == 1      # u2 filtered out, still counted
+        gids = {g["group_id"] for g in d["workbooks"][0]["groups"]}
+        assert gids == {"u1", "j1"}
+
+    def test_finding_counts_and_join_spec(self, mt_client_and_run) -> None:
+        client, run_id = mt_client_and_run
+        d = client.get(f"/api/runs/{run_id}/multi-table-groups").json()
+        groups = {g["group_id"]: g for g in d["workbooks"][0]["groups"]}
+        # u1 carries vid1 + vid2; j1 carries vid3.
+        assert groups["u1"]["n_findings"] == 2
+        assert groups["u1"]["kind"] == "union"
+        assert groups["u1"]["primary_key"] == ["K"]
+        assert groups["j1"]["n_findings"] == 1
+        assert groups["j1"]["kind"] == "join"
+        assert groups["j1"]["join"]["parent_sheet"] == "a.csv"
+        assert groups["j1"]["join"]["child_columns"] == ["K"]
+
+    def test_include_unconfirmed(self, mt_client_and_run) -> None:
+        client, run_id = mt_client_and_run
+        d = client.get(
+            f"/api/runs/{run_id}/multi-table-groups",
+            params={"include_unconfirmed": "true"},
+        ).json()
+        assert d["totals"]["union"] == 2   # confirmed u1 + candidate u2
+        gids = {g["group_id"] for g in d["workbooks"][0]["groups"]}
+        assert gids == {"u1", "j1", "u2"}
+        u2 = next(g for g in d["workbooks"][0]["groups"] if g["group_id"] == "u2")
+        assert u2["confirmed"] is False
+

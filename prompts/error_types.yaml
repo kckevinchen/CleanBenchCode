@@ -18,7 +18,8 @@
 # or --error-types on the CLI):
 #
 #   ---- Single-Column ----
-#   typo                              - isolated spelling mistake
+#   typo                              - per-cell spelling, whitespace, and
+#                                       punctuation-formatting error
 #   inconsistency                     - representational variation across rows
 #                                       of the same column (text / casing /
 #                                       pattern / punctuation / number_format)
@@ -191,28 +192,52 @@ types:
     name: "Typo"
     category: "Single-Column / Typo"
     description: >
-      A per-cell defect in a TEXT value, decidable from the cell +
-      column header alone. Four flavours:
+      A per-cell defect in a TEXT value. A value is a typo when you
+      can name the specific defect and give one defensible correction.
+      Spelling and word-boundary corrections must be clear from the
+      cell + column header alone. Punctuation-formatting corrections
+      may instead be grounded by a standard punctuation rule OR by a
+      clear dominant format in the same column. A punctuation-only
+      edit is a real defect even when no letters change. Three
+      flavours:
         * spelling    - 1-2 char distortion or obvious misspelling
-                        of a clearly-intended word.
-        * whitespace  - REPEATED INTERNAL spaces, or embedded tab /
-                        newline. (Leading/trailing whitespace has
+                        of a clearly-intended word; also an adjacent
+                        DUPLICATED word ("Global Trading Trading" ->
+                        "Global Trading").
+        * whitespace  - REPEATED INTERNAL spaces, embedded tab /
+                        newline, OR a wrong word-boundary space that
+                        changes tokenisation ("web site" ->
+                        "website"). (Leading/trailing whitespace has
                         already been stripped during CSV
                         preprocessing - ignore any pure leading or
                         trailing "␣" marker.)
-        * punctuation - stray, missing, or unbalanced punctuation
-                        inside the cell.
-        * casing      - wrong-case fragment inside an otherwise
-                        standard word (e.g. "28TH" -> "28th").
+        * punctuation - malformed, non-standard, or inconsistent
+                        punctuation formatting with a clear fix:
+                        stray / missing / repeated / unbalanced marks,
+                        the wrong punctuation glyph, incorrect spacing
+                        around punctuation, or a punctuation format
+                        that deviates from the column's clear dominant
+                        convention.
 
       Favour recall: if a cell looks like a likely typo, FLAG it -
       use ``confidence: "low"`` when the intended form is uncertain.
     example: |
       FLAG
       * "Misisipi", "Unietd States", "recieve", "Divison"  (spelling)
-      * "James   Smith"                                    (whitespace)
+      * "Adress", "Seperate", "Maintainance", "Occured"    (spelling)
+      * "Global Trading Trading", "Sales Sales Manager"    (spelling: duplicated word)
+      * "James   Smith"                                    (whitespace: repeated internal)
+      * "web site", "e mail", "data base"                  (whitespace: wrong word boundary)
       * "James Smith- Microsoft", "James Smith (microsoft" (punctuation)
-      * "28TH"                                             (casing)
+      * "St.. Louis"                                       (punctuation: doubled period)
+      * "Sales,Marketing" -> "Sales, Marketing"; "word ," -> "word,"
+        (punctuation: incorrect spacing around punctuation)
+      * "Acme(Holdings)" -> "Acme (Holdings)"; "A/ B" -> "A/B";
+        "Black&Decker" -> "Black & Decker"                 (punctuation formatting)
+      * "Dont" -> "Don't"; "2024-25***" -> "2024-25"
+        (punctuation: missing apostrophe / stray markers)
+      * "555 123-4567" -> "555-123-4567" when the latter is the
+        column's clear dominant phone format                    (punctuation formatting)
 
       DO NOT FLAG
       * Recognised abbreviations / acronyms / state or country
@@ -221,25 +246,73 @@ types:
       * Abbreviations used consistently across the column (e.g.
         every row in `Town Name` ends in "Plt" / "Twp" / "CSD"):
         that is the column's convention, not a misspelling.
+      * Truncated-looking values that end mid-word ("WESTERN
+        INDUSTRIAL SUPPLI", "GENERA"), end on a dangling separator
+        ("Acme Inc, "), or are a clean prefix of another value in
+        the column. Not verifiable as a typo from the cell alone.
+      * Intentional apostrophe-free names / idioms ("Farmers Market",
+        "Teachers College") when no standard rule or clear column
+        convention proves that an apostrophe is missing.
+      * PURE NUMERIC VALUES ARE OUT OF SCOPE. Never flag decimal
+        precision, trailing-zero, or thousands-separator presentation
+        differences as typos: "6", "6.0", and "6.00" are the same
+        number, as are "1000" and "1,000"; in a decimal-comma column,
+        "199,5" and "199,50" are likewise the same number. Do not pad or
+        remove zeros to match peer rows. Digit substitutions or magnitude
+        differences ("12.50" vs "12", "1919" vs "2019") are content
+        differences, not spelling defects; route anomalous quantities to
+        `numeric_outlier`.
+      * Punctuation formatting inside phone or date values remains in
+        scope when a standard rule or clear column convention gives one
+        correction. This exception does not include pure numbers.
       * " James Smith" / "James Smith " - leading/trailing spaces
         are pre-stripped; not a typo.
-      * "1/11/1919" in a `date_of_birth` column - not decidable
-        from cell + header alone.
       * Opaque / fixed-length codes (zip, FIPS, SKU, employee id,
-        ISBN, UUID, version, serial). A character difference is a
-        different code, not a misspelling.
-      * Cross-row casing / punctuation variation -> `inconsistency`.
+        ISBN, UUID, version, serial) and alphanumeric codes that
+        mix letters+digits ("XYZ1234", "PROD-A-12345"): a letter /
+        digit difference is a different code, not a misspelling.
+        Clearly malformed punctuation or a deviation from an explicit
+        dominant code format remains in scope as punctuation.
+      * Casing differences of ANY kind ("28TH", "mcdonald",
+        "iPHONE", "Van der veen", "V8 Pet") - casing in a tabular
+        column is a presentation convention and is NOT verifiable as
+        an error from a single cell; route casing variation to
+        `inconsistency`, never `typo`.
+      * Punctuation that is already well-formed and intentional (for
+        example punctuation inside a URL / email, decimal or thousands
+        separators, function-call syntax, or a standard abbreviation).
+        Do not rewrite valid punctuation merely to match personal
+        preference when there is no standard rule or clear column
+        convention.
       * Wrong-domain value (phone in a Name column) ->
         `semantic_incompatible`.
     notes: |
       Per-cell finding. `explanation` MUST start with the flavour
       label so downstream metrics can split recall by sub-type and
       optionally drop the trivial flavours (many baselines do not
-      predict whitespace / punctuation / casing typos):
+      predict whitespace / punctuation typos):
         * "typo:spelling - ..."
         * "typo:whitespace - ..."
         * "typo:punctuation - ..."
-        * "typo:casing - ..."
+
+      PUNCTUATION FORMATTING IS IN SCOPE. Audit every value for
+      malformed or non-standard punctuation and flag EVERY affected
+      cell as `typo:punctuation`, even when the correction changes
+      only punctuation or whitespace adjacent to punctuation. This
+      includes punctuation spacing, repeated / missing / stray /
+      unbalanced marks, quote or dash glyph normalisation, apostrophe
+      errors, footnote-like marker noise, and phone / date / code
+      punctuation that breaks a standard or the column's clear dominant
+      format. Do NOT route these cells away to
+      `inconsistency`. Cross-row context may establish the canonical
+      punctuation format, but emit one per-cell typo issue for each
+      affected row rather than one group-level finding.
+
+      PURE NUMERIC VALUES ARE NEVER TYPOS. Differences in displayed
+      decimal precision or numeric separators do not create a spelling
+      or punctuation defect: do not change "6" to "6.00", "6.00" to
+      "6", "1000" to "1,000", or "199,5" to "199,50". Stay silent on
+      pure numeric cells under the typo type.
 
       ABBREVIATIONS ARE NOT TYPOS. Standard abbreviations,
       acronyms, initialisms, state/country codes ("USA", "U.S.",
@@ -261,6 +334,30 @@ types:
       key swap - e.g. "Recieve", "Plnt" where "Plt"/"Plant" is the
       intended form, "Aev" instead of "Ave"), FLAG as typo even
       though it is short.
+
+      TRUNCATION IS NOT A TYPO. A value that looks cut off - ends
+      mid-word ("SUPPLI", "GENERA"), ends on a dangling separator
+      ("Acme Inc, "), or is a clean prefix of another value in the
+      column - is CLEAN. Truncation is often intentional at the
+      cell level (a field-width limit, a deliberate contraction)
+      and is not verifiable from the value alone. When >=25% of a
+      column's distinct values cluster within 1 char of the max
+      length and end mid-word, the whole column is fixed-width
+      truncated; omit every truncation-shaped value.
+
+      CODES NEED EXTRA CAUTION. For opaque fixed-length codes and
+      alphanumeric values that mix letters+digits in one token
+      ("XYZ1234", "PROD-A-12345"), never infer that one letter or
+      digit should replace another. Punctuation is different: flag a
+      clearly malformed separator ("PROD--A-12345") or a minority
+      format that violates the column's explicit dominant code pattern.
+      Leave equally valid code styles alone when no canonical format
+      is established.
+
+      WORD-BOUNDARY SPACING (typo:whitespace, "web site" ->
+      "website") applies only when the canonical one-word / two-word
+      form is unambiguous. If the column shows both the spaced and
+      fused forms as legitimate stylistic variants, treat as CLEAN.
 
   inconsistency:
     name: "Inconsistency"
@@ -404,59 +501,109 @@ types:
     name: "Numeric Outlier"
     category: "Single-Column / Distribution"
     description: >
-      Inside a NUMERIC column, a value sits far from the bulk of the
-      column's distribution AND looks like a data-entry mistake
-      (typo, wrong unit, stray digit) rather than a legitimately
-      large observation in a naturally heavy-tailed quantity.
+      Inside a NUMERIC column, a value is IMPLAUSIBLE / impossible as a
+      real measurement for that specific entity AND carries the positive
+      signature of a data-ENTRY mistake - an extra or missing digit
+      (~10x / ~100x off), a misplaced decimal, a wrong unit or scale, a
+      transposed digit, or a sign flip the row does not explain - rather
+      than a legitimately large or small observation in a naturally
+      heavy-tailed quantity.
 
-      Be deliberate: most extreme-looking numbers in real data
-      (death counts, sales spikes, populations, revenues) are real.
-      Flag implausible values at high confidence and large-gap but
-      plausible values at low confidence so the reviewer can
-      sanity-check them.
+      PRECISION-FIRST TYPE. This OVERRIDES the global "favor recall /
+      default to flagging" stance for numeric_outlier ONLY; here the
+      base rate is LOW and the default is NO-FLAG. This is NOT a
+      statistical-outlier detector. A large gap from the median / past
+      the IQR or Tukey fence, or being the column max/min, is NECESSARY
+      but NOT SUFFICIENT and NEVER justifies a flag on its own. Most
+      extreme numbers in real data (death counts, sales spikes,
+      populations, revenues, balances, sparse counts) are genuine.
+      Flag ONLY when you can name BOTH (a) why the value is implausible
+      and (b) the concrete entry mechanism. If you would write "could be
+      legitimate", "may be plausible", "worth verifying", "heavy-tailed",
+      "smooth tail", "large gap", or "far from the median", that is a
+      NO-FLAG signal: return ``{"issues": []}`` instead.
     example: |
-      DO flag:
-      * Salary $1,000,000 when peers cluster $50k-$120k and nothing
-        about the row explains it.
-      * Quantity 10,000 in a column otherwise containing 1-50.
-      * Year "20200" when other rows are 2000-2024 (extra digit).
-      * Age 250 in a person-level table.
+      DO flag (implausible AND a clear entry-mechanism signature):
+      * Salary 1,000,000 when peers cluster 50k-120k (~10x; likely
+        extra digits). A bare ~10x / ~100x jump off the peer scale is
+        itself sufficient implausibility - no entity label required.
+      * Quantity 10,000 in a column otherwise 1-50 (~100x off).
+      * Year "20200" among 4-digit years 2000-2024 (extra digit - in
+        scope even inside a year column; see TIME-SERIES note).
+      * Age 250 in a person-level table (impossible).
+      * 0.12 where peers cluster ~1.0 and a dropped leading digit fits
+        (misplaced decimal).
 
-      DO NOT flag (numerically extreme but semantically plausible):
-      * 15 deaths in an incidence column where most rows are 0-1
-        (heavy-tailed; outbreaks happen).
-      * $5M order in a revenue column - large customers exist.
-      * Population 8M for a capital city among 5k-50k towns.
+      DO NOT flag (numerically extreme but plausible - leave unflagged):
+      * 15 deaths where most rows are 0-1; a sparse 0/1 count column
+        where one row is 3, 6, or 9 (heavy-tailed reality; a bigger
+        count is not an entry error).
+      * A $5M order in a revenue column; an 8M-population capital among
+        small towns; a record sales month.
+      * The largest bank / district / company holding the column max,
+        or the smallest holding the min.
+      * A value whose only fault is being far past the IQR fence.
+      * A negative the row explains (Amendment -37500 with Original
+        37500 / Amended 0), or a naturally-signed column (betas,
+        returns, percent changes).
     notes: |
-      Only applies when the column reports a QUANTITY (count,
-      amount, percentage, currency, magnitude, duration, age).
-      Numeric-LOOKING columns whose digits encode something else -
-      zip / FIPS / SKU / phone / version / year / ID columns - are
-      out of scope; do not flag those.
+      Only applies when the column reports a QUANTITY (count, amount,
+      percentage, currency, magnitude, duration, age). Numeric-LOOKING
+      columns whose digits encode something else - zip / FIPS / SKU /
+      phone / version / year-as-identifier / ID / code - are out of
+      scope; do not flag those for being large or small.
 
-      Exclude TOTAL / SUMMARY rows before comparing (labels
-      matching /total|sum|grand[- ]?total|subtotal|average|avg|mean/
-      case-insensitive). Aggregates are designed to be larger than
-      detail rows.
+      TIME-SERIES CROSS-SECTIONS. When the column HEADER is itself a
+      year ("2016", "2002", "FY21") or a month ("September", "March"),
+      each row is a DIFFERENT entity (bank, district, company, state)
+      observed in that period, not repeated measurements of one thing.
+      Do NOT flag the row-wise max or min of such a column merely for
+      being extreme - the biggest entity legitimately owns the biggest
+      number. This suppresses ONLY the bare-gap case; a value with an
+      unmistakable entry signature is still in scope (e.g. a 5-digit
+      year among 4-digit ones, or a value ~100x off that SAME entity's
+      other periods).
+
+      Exclude TOTAL / SUMMARY rows before comparing - any label
+      matching /total|sum|grand[- ]?total|subtotal|average|avg|mean|
+      ytd|year[- ]?to[- ]?date|region|rollup/ case-insensitive,
+      including entity-prefixed forms ("Total : Kansas", "USA QST
+      Total") and a "Total" appearing in ANY column of the row, not
+      just the leftmost label. Aggregates are designed to be larger;
+      never flag the aggregate, and never flag a detail row merely for
+      being smaller than one.
+
+      ROW CONTEXT. Read the other columns in the same row first. If a
+      sibling column EXPLAINS the value - including arithmetically - it
+      is plausible: do NOT flag. E.g. an "Amendment" of -37500 with
+      Original=37500 / Amended=0 is a reversal; a Percent Change of -0.2
+      equals its own Amount Change / prior Amount (-5,000,000 /
+      25,000,000); a naturally-signed Beta / return / net change is
+      legitimate. A sign flip is a candidate ONLY when nothing in the
+      row accounts for it.
 
       WHAT TO FLAG
-      * Per-cell finding citing the peer summary plus a brief
-        plausibility note. E.g. "median ~75k, IQR ~30k; this row is
-        10M, far above peers, and the role 'Junior Analyst' makes
-        10M implausible."
-      * For multiple outliers in the same column, emit a single
-        group-level finding listing every outlier row in
-        ``affected_rows`` (never truncate).
-      * Confidence: ``high`` when the value is BOTH a large
-        statistical gap AND implausible for the entity; ``medium``
-        for clear gaps with some plausibility; ``low`` for
-        extreme-but-plausible values in heavy-tailed columns.
+      * Per-cell finding whose ``explanation`` states why the value is
+        implausible AND names the entry mechanism - NOT merely the
+        distribution. Bad: "above the IQR upper fence." Good: "peers
+        cluster 50k-120k; this row is 1,000,000 (~13x) with no row
+        context to explain it - stray trailing digits."
+      * For multiple genuine outliers in the same column, emit ONE
+        group-level finding listing every row in ``affected_rows``
+        (never truncate).
+      * Confidence: ``high`` when the value is impossible/clearly
+        implausible AND the digit/decimal/unit/scale/sign signature is
+        unmistakable; ``medium`` when the mechanism is likely but the
+        corrected value is uncertain. There is NO ``low`` rung here -
+        an extreme-but-plausible value, or a gap with no entry
+        signature, is ``{"issues": []}``, never a low-confidence flag
+        "to verify".
 
       WHAT NOT TO FLAG (siblings cover them)
       * Non-numeric values in the column -> `semantic_incompatible`.
-      * Format-only quirks (% vs decimal) -> `inconsistency`
+      * Format-only quirks (% vs decimal, commas) -> `inconsistency`
         (number_format).
-      * A row whose number violates an algebraic relation
+      * A number that violates an algebraic / cross-column relation
         (price*qty != total) -> `row_calculation_inconsistency`.
 
   # =====================================================================
@@ -467,11 +614,18 @@ types:
     name: "FD (Functional Dependency) Violation"
     category: "Multi-Column / Intra-Record"
     description: >
-      A violation of a strict, known functional dependency between
-      attributes: a "determinant" column's value implies a specific
-      dependent value, and the dependent column disagrees. Detected
-      either within a single row (using known real-world FDs) or
-      across rows that share the same determinant value.
+      A violation of a genuine functional dependency: a "determinant"
+      column whose value fixes a specific dependent value, where some
+      rows sharing the same determinant disagree on the dependent.
+      Detected across rows sharing a determinant value, or within a
+      single row when the dependency is well-known real-world knowledge.
+
+      A real functional dependency holds for essentially every row of
+      the table - the same determinant always maps to the same
+      dependent, and the rare rows that disagree are data-entry errors.
+      A column pair whose "dependent" legitimately varies for a fixed
+      determinant is NOT a functional dependency and must not be
+      flagged.
 
       Requires column_mode='all'.
     example: |
@@ -479,14 +633,37 @@ types:
       * Same ProductCode appears with two different Categories.
       * Same EmployeeID appears with two different Departments.
       * Country = "France" implies Capital = "Paris" (within-row FD).
+
+      NOT a functional dependency (do NOT flag): the same ProductID
+      appearing with different Revenue, Price, Quantity, Amount, Date,
+      or Score. Those are transactional measures that vary per row;
+      they are not attributes fixed by the id.
     notes: |
-      The DETERMINANT should be an identifier or code drawn from a
-      controlled real-world vocabulary (zip, country, product code,
-      employee id, ISBN). Person names are weak determinants because
-      of homonyms - prefer ``confidence: "low"`` for name-keyed FD
-      findings rather than skipping them outright. The DEPENDENT
-      must be a deterministic function of the determinant (not
-      free-text).
+      The DETERMINANT must be an identifier or code from a controlled
+      real-world vocabulary that names an entity (zip, country, product
+      code, employee id, ISBN, account number). Person names are weak
+      determinants because of homonyms - use ``confidence: "low"``.
+
+      The DEPENDENT must be a STABLE DESCRIPTIVE ATTRIBUTE of that
+      entity: a value that is fixed once the entity is known and is the
+      same on every row carrying that entity (state, category,
+      department, region, capital, currency, unit-of-measure). It must
+      NOT be a measure or a transactional fact. NEVER emit an FD whose
+      dependent is a quantity that varies by transaction or over time -
+      revenue, price, cost, amount, total, quantity, count, balance,
+      score, rate, percentage - or any date / timestamp. The same
+      product id carrying two different revenues is normal data, not an
+      error.
+
+      Only emit a dependency you expect to hold for ESSENTIALLY EVERY
+      ROW (the same determinant always carries the same dependent, with
+      at most a few erroneous rows). Do NOT emit speculative,
+      approximate, or "usually holds" dependencies (e.g. City -> Region,
+      ProductID -> Price): a dependency violated by a meaningful
+      fraction of rows is not a functional dependency, and those
+      "violations" are legitimate variation, not errors. If you are not
+      confident the dependent is genuinely fixed by the determinant, do
+      not emit the rule.
 
       WHAT TO FLAG
       * Across-row: group rows by the determinant value; flag groups
@@ -498,10 +675,10 @@ types:
             State=NY (row 17)"
       * Within-row: only when the FD is well-known real-world
         knowledge (Zip->State, Country->Capital).
-      * Confidence: ``high`` for strict known FDs violated;
-        ``medium`` for candidate FDs holding across the slice
-        except for a small disagreeing minority; ``low`` for soft /
-        approximate dependencies (City -> Region usually).
+      * Confidence: ``high`` for strict, well-known FDs (Zip->State,
+        Country->Capital, ProductCode->Category); ``medium`` for a
+        determinant->attribute pair the headers clearly imply is fixed
+        (EmployeeID->Department). Do not emit anything weaker than that.
 
       WHAT NOT TO FLAG (siblings cover them)
       * Numeric derivations -> `row_calculation_inconsistency`.
@@ -551,6 +728,14 @@ types:
         * OrderDate=2024-08-12, ShipDate=2024-08-10 (ship before
           order).
     notes: |
+      These relations are UNCOMMON. Most tables carry no cross-column
+      arithmetic or ordering rule at all - independent measures sitting
+      side by side (two prices, a count and an amount, unrelated dates)
+      are normal data, not a calculation. Treat this error type as rare:
+      only emit a relation that is NAMED or unambiguously implied by the
+      headers, and when no header pair clearly spells out a derivation or
+      ordering, emit NOTHING for this table rather than guessing.
+
       All columns involved in the relation must be true QUANTITIES
       (or ordered scalars: dates, ages, years, sequence positions).
       Identifier / code / version / phone columns are not addable
@@ -561,7 +746,10 @@ types:
       (subtotal+tax=total, price*qty=total, end-start=delta,
       Start <= End, Min <= Max, Lower <= Upper). Don't manufacture
       relations between columns that merely have similar magnitudes
-      or whose names sort the same way.
+      or whose names sort the same way. Do NOT emit speculative,
+      "might hold" arithmetic between two numeric columns just because
+      the sampled rows happen to line up - a coincidental fit on a
+      handful of sampled rows is not a schema-level rule.
 
       WHAT TO FLAG
       * Per-row finding: `columns` = every column involved in the
@@ -574,10 +762,13 @@ types:
         rule is start <= end, an exact tie is fine, but start > end
         by any amount is a violation.
       * Confidence: ``high`` when the relation is explicit in the
-        headers and the mismatch is well above rounding tolerance;
-        ``medium`` when the relation is strongly suggested but
-        ambiguous; ``low`` for speculative relations (still emit so
-        the reviewer can confirm).
+        headers and the mismatch is well above rounding tolerance
+        (LineTotal == UnitPrice * Quantity; Subtotal + Tax == Total;
+        Start <= End); ``medium`` when the headers clearly imply the
+        relation but the exact form is ambiguous. Do not emit anything
+        weaker than ``medium``: a relation you could only justify as
+        ``low``-confidence is speculative - skip it instead of emitting
+        it for review.
 
       WHAT NOT TO FLAG (siblings cover them)
       * String composition / partial-string -> `string_calculation_inconsistency`.
@@ -637,6 +828,14 @@ types:
           - PrimaryEmail="a@x.com", BackupEmail="a@x.com" (the backup
             should be different).
     notes: |
+      These relations are UNCOMMON. Most tables carry no cross-column
+      string-composition or partial-string rule at all - independent
+      text columns sitting side by side are normal data. Treat this
+      error type as rare: only emit a rule that is NAMED or
+      unambiguously implied by the headers, and when no header pair
+      clearly spells out a composition / containment / ordering rule,
+      emit NOTHING for this table rather than guessing.
+
       Composition rules must be strongly implied by the composed
       column's header (FullName <- First + " " + Last; Email <-
       User + "@" + Domain; Address <- Street + ", " + City + " " +
@@ -677,7 +876,9 @@ types:
       * Confidence: ``high`` when the rule is unambiguous and the
         mismatch is clear; ``medium`` when separator / order /
         wording have genuine flexibility ("Smith, Alice" vs "Alice
-        Smith"); ``low`` for speculative rules.
+        Smith"). Do not emit anything weaker than ``medium``: a rule
+        you could only justify as ``low``-confidence is speculative -
+        skip it instead of emitting it for review.
 
       WHAT NOT TO FLAG (siblings cover them)
       * Numeric derivations -> `row_calculation_inconsistency`.

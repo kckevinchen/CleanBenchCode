@@ -15,7 +15,9 @@ import pytest
 from src.labeling.correction_suggester import (
     ValueSuggestion,
     aggregate_samples,
+    build_cluster_index,
     cache_key,
+    load_column_cluster_records,
     parse_colclust_target_id,
     parse_llm_list,
     suggestions_to_payload,
@@ -180,3 +182,212 @@ def test_suggestions_to_payload_shape_and_hides_samples():
 
 def test_suggestions_to_payload_empty():
     assert suggestions_to_payload([]) == []
+
+
+# ---------------------------------------------------------------------------
+# build_cluster_index: operator-saved record merge (column_clusters.jsonl)
+# ---------------------------------------------------------------------------
+
+
+def _draft_doc(source, column, clusters):
+    return {"source": source, "column": column, "draft_clusters": clusters}
+
+
+def _record_doc(source, column, clusters, status="labeled"):
+    return {
+        "source": source,
+        "column": column,
+        "status": status,
+        "clusters": clusters,
+    }
+
+
+def test_build_cluster_index_resolves_operator_added_cluster():
+    # The LLM drafted nothing for this column (empty draft doc), but the
+    # operator hand-added a "missed inconsistency" cluster c1 and gave it a
+    # tp verdict. Without the record merge this column 404s in the suggester.
+    src, col = "permits.csv", "Engineer Phone"
+    drafts = {(src, col): _draft_doc(src, col, [])}
+    target_id = f"colclust\x00{src}\x00{col}\x00c1"
+    labels = {target_id: {"target_id": target_id, "status": "tp"}}
+    records = {
+        (src, col): _record_doc(src, col, [{
+            "cluster_id": "c1",
+            "kind": "numerical_format",
+            "canonical_value": "(651) 602-4712",
+            "llm_proposed_canonical": None,
+            "values": [
+                {"value": "651-602-4702", "count": 33},
+                {"value": "(651) 602-4712", "count": 32},
+                {"value": "(651) 602-4724", "count": 23},
+            ],
+        }]),
+    }
+
+    idx = build_cluster_index(drafts, labels, records=records)
+    ctxs = idx[(src, col)]
+    assert [c.local_id for c in ctxs] == ["c1"]
+    c1 = ctxs[0]
+    assert c1.target_id == target_id
+    assert c1.status == "tp"
+    assert c1.value_set == frozenset(
+        {"651-602-4702", "(651) 602-4712", "(651) 602-4724"}
+    )
+    # Operator's confirmed canonical comes off the record.
+    assert c1.confirmed_canonical == "(651) 602-4712"
+
+
+def test_build_cluster_index_without_records_skips_operator_cluster():
+    # Regression guard: the bug was that the suggester only read drafts.
+    src, col = "permits.csv", "Engineer Phone"
+    drafts = {(src, col): _draft_doc(src, col, [])}
+    idx = build_cluster_index(drafts, {})
+    assert (src, col) not in idx
+
+
+def test_build_cluster_index_labeled_record_overrides_draft():
+    # When a cluster id exists in BOTH a draft and a labelled record, the
+    # operator's edited record wins: it is the disjoint partition the
+    # workbench shows (``list_column_clusters``) and validates verdicts
+    # against (``post_label``). The draft's narrower value-set must NOT
+    # shadow the values the operator added.
+    src, col = "geo.csv", "State"
+    drafts = {(src, col): _draft_doc(src, col, [
+        {"kind": "casing", "canonical": None, "values": ["CA", "ca"]},
+    ])}
+    records = {(src, col): _record_doc(src, col, [{
+        "cluster_id": "c1",
+        "kind": "casing",
+        "canonical_value": "CA",
+        "values": [
+            {"value": "CA", "count": 5},
+            {"value": "ca", "count": 1},
+            {"value": "Ca", "count": 1},
+        ],
+    }])}
+
+    idx = build_cluster_index(drafts, {}, records=records)
+    ctxs = idx[(src, col)]
+    assert [c.local_id for c in ctxs] == ["c1"]
+    # The operator's edited 3-value record wins, not the draft's 2 values.
+    assert ctxs[0].value_set == frozenset({"CA", "ca", "Ca"})
+
+
+def test_build_cluster_index_labeled_record_replaces_all_drafts():
+    # Real-world repro (run 20260610T175821Z, column "Key#2 Phone"): the
+    # LLM drafted c1 (5 parenthesised phones), c2 and c3; the operator
+    # merged everything they cared about into a single 7-value c1 and saved
+    # a labelled record. The index must expose the operator's 7-value c1
+    # and drop the obsolete draft c2/c3 -- matching what the labelled
+    # column shows in the UI. Before the fix the draft's 5-value c1 shadowed
+    # the record, so the two dotted-format values got no suggestion.
+    src, col = "f.csv", "Key#2 Phone"
+    drafts = {(src, col): _draft_doc(src, col, [
+        {"kind": "pattern", "values": [
+            "(405) 213-1880", "(612) 465-7305", "(703) 203-5440",
+            "(703) 917-7524", "(757) 350-6138",
+        ]},
+        {"kind": "pattern", "values": ["202.863.9281 x820", "703-462-1538 x617"]},
+        {"kind": "pattern", "values": ["202.863.9281 x820", "914.262.6981"]},
+    ])}
+    records = {(src, col): _record_doc(src, col, [{
+        "cluster_id": "c1",
+        "kind": "text",
+        "canonical_value": "(405) 213-1880",
+        "values": [
+            {"value": "(405) 213-1880", "count": 1},
+            {"value": "(612) 465-7305", "count": 1},
+            {"value": "(703) 203-5440", "count": 1},
+            {"value": "(703) 917-7524", "count": 1},
+            {"value": "(757) 350-6138", "count": 1},
+            {"value": "202.863.9281 x820", "count": 1},
+            {"value": "914.262.6981", "count": 1},
+        ],
+    }])}
+
+    idx = build_cluster_index(drafts, {}, records=records)
+    ctxs = idx[(src, col)]
+    # Only the operator's c1 survives; draft c2/c3 are gone.
+    assert [c.local_id for c in ctxs] == ["c1"]
+    assert len(ctxs[0].value_set) == 7
+    assert "202.863.9281 x820" in ctxs[0].value_set
+    assert "914.262.6981" in ctxs[0].value_set
+
+
+def test_build_cluster_index_appends_record_only_ids_alongside_drafts():
+    # Drafts cover c1; the operator additionally added c2 by hand. Both
+    # should surface, each at its own local_id.
+    src, col = "geo.csv", "City"
+    drafts = {(src, col): _draft_doc(src, col, [
+        {"kind": "casing", "canonical": None, "values": ["NYC", "nyc"]},
+    ])}
+    records = {(src, col): _record_doc(src, col, [
+        {
+            "cluster_id": "c1",
+            "kind": "casing",
+            "canonical_value": "NYC",
+            "values": [
+                {"value": "NYC", "count": 3},
+                {"value": "nyc", "count": 1},
+            ],
+        },
+        {
+            "cluster_id": "c2",
+            "kind": "pattern",
+            "canonical_value": "Saint Paul",
+            "values": [
+                {"value": "Saint Paul", "count": 4},
+                {"value": "St. Paul", "count": 2},
+            ],
+        },
+    ])}
+
+    idx = build_cluster_index(drafts, {}, records=records)
+    by_id = {c.local_id: c for c in idx[(src, col)]}
+    assert set(by_id) == {"c1", "c2"}
+    # The labelled record defines both clusters; its c1 value-set happens
+    # to equal the draft's, and c2 is contributed by the record only.
+    assert by_id["c1"].value_set == frozenset({"NYC", "nyc"})
+    assert by_id["c2"].value_set == frozenset({"Saint Paul", "St. Paul"})
+
+
+def test_build_cluster_index_skips_degenerate_record_clusters():
+    # A record cluster with fewer than two values is dropped, matching the
+    # draft path's degenerate-cluster guard.
+    src, col = "geo.csv", "Zip"
+    records = {(src, col): _record_doc(src, col, [{
+        "cluster_id": "c1",
+        "kind": "pattern",
+        "values": [{"value": "55101", "count": 1}],
+    }])}
+    idx = build_cluster_index({}, {}, records=records)
+    assert (src, col) not in idx
+
+
+def test_load_column_cluster_records_latest_wins(tmp_path):
+    path = tmp_path / "column_clusters.jsonl"
+    src, col = "permits.csv", "Engineer Phone"
+    import json as _json
+    path.write_text(
+        _json.dumps(_record_doc(src, col, [{
+            "cluster_id": "c1", "kind": "pattern",
+            "values": [{"value": "a", "count": 1}, {"value": "b", "count": 1}],
+        }])) + "\n"
+        + _json.dumps(_record_doc(src, col, [{
+            "cluster_id": "c1", "kind": "pattern",
+            "values": [
+                {"value": "a", "count": 1},
+                {"value": "b", "count": 1},
+                {"value": "c", "count": 1},
+            ],
+        }])) + "\n",
+        encoding="utf-8",
+    )
+    recs = load_column_cluster_records(path)
+    # Latest line wins: the 3-value record, not the first 2-value one.
+    vals = recs[(src, col)]["clusters"][0]["values"]
+    assert len(vals) == 3
+
+
+def test_load_column_cluster_records_missing_file(tmp_path):
+    assert load_column_cluster_records(tmp_path / "nope.jsonl") == {}

@@ -36,6 +36,7 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
+from ._helpers import _has_whitespace_anomaly, _normalize_trivial
 from .schema import BenchmarkCell, LabelStatus, LabelTarget
 from .store import LabelStore
 
@@ -312,6 +313,20 @@ def materialize_label_benchmark(
                 # row-specific ``corrected_value`` is gated.
                 corrected_for_emit = corrected if emit_row == row else None
 
+                # Is this contribution the cell's OWN anchor (the
+                # cluster is literally anchored at this row) or a
+                # verdict fanned out from another cluster's
+                # ``affected_rows``? An own-anchor verdict is
+                # authoritative for the cell; a fanned-out verdict is
+                # only a default that any own-anchor verdict overrides.
+                # Without this, a TP cluster whose detection carries an
+                # over-broad ``affected_rows`` (e.g. an aggregate
+                # "examples: ..." detection spanning unrelated rows)
+                # would stamp "error" onto peer rows the operator
+                # explicitly labelled "clean" on their own cluster,
+                # manufacturing a phantom ``ambiguous`` conflict.
+                is_anchor = emit_row == row
+
                 existing = cells.get(key)
                 if existing is None:
                     cells[key] = {
@@ -329,17 +344,42 @@ def materialize_label_benchmark(
                         "cluster_ids": [cid] if cid else [],
                         "annotators": [label.annotator],
                         "note": label.note,
+                        "_anchor": is_anchor,
                     }
                     continue
 
                 # Conflict resolution.
                 if existing["label"] != verdict:
-                    existing["label"] = "ambiguous"
-                    existing["corrected_value"] = None
-                elif verdict == "error" and corrected_for_emit:
-                    existing["corrected_value"] = (
-                        existing["corrected_value"] or corrected_for_emit
-                    )
+                    existing_anchor = existing.get("_anchor", False)
+                    if is_anchor and not existing_anchor:
+                        # Authoritative own-row verdict supersedes a
+                        # verdict that was merely fanned out here.
+                        existing["label"] = verdict
+                        existing["corrected_value"] = (
+                            corrected_for_emit if verdict == "error" else None
+                        )
+                        existing["_anchor"] = True
+                        existing["note"] = label.note
+                    elif existing_anchor and not is_anchor:
+                        # Keep the authoritative own-row verdict; ignore
+                        # the incoming fan-out entirely.
+                        pass
+                    else:
+                        # Both own-anchor (two clusters on the same cell)
+                        # or both fan-outs: a genuine disagreement.
+                        existing["label"] = "ambiguous"
+                        existing["corrected_value"] = None
+                else:
+                    # Verdicts agree. Still record whether THIS
+                    # contribution is the cell's own anchor, so a later
+                    # disagreeing fan-out can't downgrade an
+                    # already-authoritative verdict to ``ambiguous``.
+                    if is_anchor:
+                        existing["_anchor"] = True
+                    if verdict == "error" and corrected_for_emit:
+                        existing["corrected_value"] = (
+                            existing["corrected_value"] or corrected_for_emit
+                        )
                 # LLM suggestion: keep the longest non-empty across the
                 # contributing clusters - same heuristic the auto-synthesis
                 # uses to pick the "richest" detection. ``None`` only sticks
@@ -369,9 +409,19 @@ def materialize_label_benchmark(
     for label in labels.values():
         if label.target != LabelTarget.CELL or label.status != LabelStatus.FN:
             continue
-        if label.row is None or not label.column or not label.source:
+        if label.row is None or not label.source:
             continue
-        key = _cell_key(label.source, int(label.row), label.column)
+        # A FN with an EMPTY column is a ROW-LEVEL finding: the only
+        # producer is the row-duplication trivial tagger, which writes
+        # ``column=""`` at every byte-identical (exact-duplicate) row the
+        # LLM missed. It exports as a ``row_duplication`` "error" record
+        # using the same sentinel ``column=""`` the cluster path uses for
+        # row_duplication verdicts, so the by-error-type bundle buckets
+        # it correctly. Cell-level FNs (whitespace tagger etc.) keep their
+        # real column and an empty ``error_types``.
+        fn_column = label.column or ""
+        is_row_level = fn_column == ""
+        key = _cell_key(label.source, int(label.row), fn_column)
         existing = cells.get(key)
         if existing is not None and existing["label"] == "error":
             # Already an error record; just merge annotator note/credit.
@@ -390,12 +440,15 @@ def materialize_label_benchmark(
         cells[key] = {
             "source": label.source,
             "row": int(label.row),
-            "column": label.column,
+            "column": fn_column,
             # FN cells were never enclosed in a cluster, so we have no
             # row_values snapshot. Fall back to the resolver (live CSV
             # value) so the exported record is still self-contained.
-            "original_value": _lookup_value(
-                label.source, int(label.row), label.column,
+            # Row-level findings have no single cell value, so they carry
+            # an empty ``original_value`` (matching the cluster path).
+            "original_value": (
+                "" if is_row_level
+                else _lookup_value(label.source, int(label.row), fn_column)
             ),
             "label": "error",
             "corrected_value": label.corrected_value,
@@ -404,12 +457,29 @@ def materialize_label_benchmark(
             # cells from TP/PARTIAL ones via the empty ``cluster_ids``
             # list.
             "llm_suggested_value": None,
-            "error_types": [],
+            "error_types": ["row_duplication"] if is_row_level else [],
             "detection_ids": [],
             "cluster_ids": [],
             "annotators": [label.annotator],
             "note": label.note,
         }
+
+    # Trivial whitespace cells have a DETERMINISTIC fix (collapse the
+    # whitespace), so a peer row must NEVER inherit a sibling's correction
+    # that fanned out via a multi-row cluster's ``affected_rows`` -- the
+    # ``llm_suggested`` fallback below would otherwise stamp e.g. row 1's
+    # "SIMPLY GUM - TPR" onto every peer ``DRY SODA  - TPR`` row. For a
+    # TRIVIAL-noted error cell that still has no own-anchor fix, recompute
+    # the correction from that cell's OWN value. Own-anchor fixes (operator
+    # or LLM) are non-empty here and are left untouched.
+    for payload in cells.values():
+        if payload.get("label") != "error" or payload.get("corrected_value"):
+            continue
+        if "TRIVIAL" not in (payload.get("note") or "").upper():
+            continue
+        ov = payload.get("original_value")
+        if isinstance(ov, str) and _has_whitespace_anomaly(ov):
+            payload["corrected_value"] = _normalize_trivial(ov)
 
     # Fill the corrected value for every TP cell that has no
     # operator-supplied correction by falling back to the LLM's
@@ -455,6 +525,8 @@ def materialize_label_benchmark(
                 continue
             payload["note"] = override
 
+    for payload in cells.values():
+        payload.pop("_anchor", None)
     return [BenchmarkCell(**payload) for payload in cells.values()]
 
 

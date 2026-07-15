@@ -1,0 +1,20 @@
+{
+  "name": "typo_grader",
+  "type": "score_model",
+  "model": "<GRADER_MODEL_NAME>",
+  "input": [
+    {
+      "role": "developer",
+      "content": "You are evaluating a data-quality model's JSON output against a gold label.\n\nA cell is a TYPO only when, judging from the cell value and column header alone, you can name the specific defect AND the intended correction is unambiguous. Three flavours qualify:\n  - spelling: a one- or two-character distortion of a word that     plausibly belongs in this column (e.g., 'Acomodate' ->     'Accommodate'; 'Pilot Mountatin' -> 'Pilot Mountain').\n  - whitespace: internal repeated spaces, embedded tab or newline     (e.g., 'New  York'). Leading/trailing whitespace is stripped     in preprocessing and must NOT be flagged.\n  - punctuation: missing comma+space between tokens, doubled     commas, stray hyphens (e.g., 'Address,State' ->     'Address, State'; '(575-) 894-8350' -> '(575) 894-8350').\nUse AMBIGUOUS when the cell looks suspicious but the rulebook cannot uniquely resolve it from cell + header alone:\n  - Truncated values whose full form you cannot recover     ('CLARION SAFETY SYSTE', 'Education in Unorganized Terr').\n  - Contraction-style abbreviations ('Twp', 'Gl Hearn Limited').\n  - Multiple equally plausible corrections.\nUse CLEAN for everything else, especially:\n  - Recognised proper nouns, brand names, person names.\n  - Fixed-length codes (zip, SKU, FIPS, ISBN, version strings).\n  - Pure numeric values -- never typos by our definition.\n  - Date-shaped strings -- never typos by our definition.\n  - Standard idioms with elided punctuation ('New Years Day').\nWhen in doubt, prefer AMBIGUOUS over TYPO.\n\nYou will receive:\n  - column:           CSV column header (JSON string).\n  - candidate_value:  cell value the model judged (JSON string).\n  - gold_label:       'typo' | 'clean' | 'ambiguous' (JSON string).\n  - gold_correction:  intended correction (JSON-encoded; may be null).\n  - model_output:     the model's JSON reply (raw text).\n\nParse model_output as JSON. Then score 0-5:\n  5: model.label == gold_label AND, when gold_label=='typo', model.correction equals gold_correction up to case and collapsed whitespace.\n  4: model.label == gold_label but, when gold_label=='typo', the correction is missing, partially wrong, or off by one character.\n  3: model.label is 'ambiguous' when gold is 'typo' or 'clean' (or vice versa) AND the rationale is consistent with the rulebook (e.g., model cites truncation when value is truncated).\n  2: model.label is the opposite of gold_label ('typo' vs 'clean').\n  1: JSON parses but required fields are missing or malformed.\n  0: output is empty or not valid JSON.\n\nRespond ONLY with two lines:\nScore: <0-5>\nReasoning: <one short sentence>"
+    },
+    {
+      "role": "user",
+      "content": "{\"column\": {{item.column}}, \"candidate_value\": {{item.candidate_value}}, \"gold_label\": {{item.gold_label}}, \"gold_correction\": {{item.gold_correction}}, \"model_output\": {{sample.output_text}}}"
+    }
+  ],
+  "pass_threshold": 4,
+  "range": [
+    0.0,
+    5.0
+  ]
+}

@@ -243,6 +243,271 @@ def test_sdk_citations_do_not_override_real_payload_evidence():
     assert v.evidence[0].quote == "Acme Corp is a global supplier"
 
 
+def test_distinct_entity_correction_downgrades_to_false_positive():
+    """A typo cluster whose web 'correction' is a DIFFERENT entity that
+    merely shares words (not a small edit of the suspect) must be
+    downgraded to false_positive. Reproduces the real failure where
+    "The Dougla Body: Orientations of Indianness and Blackness" was
+    "corrected" to the distinct book "Dougla Poetics: Orientations of
+    Indianness and Mixedness in Trinidad" with confirmed_error 0.9.
+    """
+    cluster = _cluster(columns=("Title",), error_types=("typo",))
+    payload = json.dumps({
+        "verdict": "confirmed_error",
+        "canonical_value": (
+            "Dougla Poetics: Orientations of Indianness and "
+            "Mixedness in Trinidad"
+        ),
+        "confidence": 0.9,
+        "evidence": [{
+            "url": "https://overdrive.example.com/dougla-poetics",
+            "title": "Dougla Poetics",
+            "quote": (
+                "Dougla Poetics: Orientations of Indianness and "
+                "Mixedness in Trinidad"
+            ),
+        }],
+        "reasoning": "Closest match is Dougla Poetics \u30103:0\u2020source\u3011.",
+    })
+    agent = StubAgentBackend(default=_verdict(
+        payload,
+        urls=[("https://overdrive.example.com/dougla-poetics", "Dougla Poetics")],
+    ))
+    verifier = Verifier(
+        agent=agent,
+        cell_lookup=_make_cell_lookup({
+            ("x.csv", 0, "Title"): (
+                "The Dougla Body: Orientations of Indianness and Blackness"
+            ),
+        }),
+        column_samples=_make_column_samples({}),
+        cfg=VerifierConfig(prompt_path=PROMPT_PATH, concurrency=1),
+    )
+    v = verifier.run([cluster])[0]
+    assert v.verdict == "false_positive"
+    assert v.canonical_value is None
+    assert v.canonical_record is None
+    # Heuristic override caps confidence at a moderate level.
+    assert v.confidence <= 0.5
+    assert v.parse_error and "distinct entity" in v.parse_error
+    # The agent's evidence/reasoning is preserved with an audit note.
+    assert "Automated review" in v.reasoning
+
+
+def test_small_edit_correction_is_not_downgraded():
+    """A genuine typo whose canonical is a small edit of the suspect
+    (e.g. "Carney Pt" -> "Carneys Point") must survive as
+    confirmed_error - the distinct-entity guard must NOT fire.
+    """
+    cluster = _cluster(
+        columns=("Employer",),
+        error_types=("typo",),
+        suggested_fix="Penns Grove-Carneys Point Reg Sch Dist",
+    )
+    payload = json.dumps({
+        "verdict": "confirmed_error",
+        "canonical_value": "Penns Grove-Carneys Point Reg Sch Dist",
+        "confidence": 0.9,
+        "evidence": [{
+            "url": "https://en.wikipedia.example/penns",
+            "title": "Penns Grove",
+            "quote": "Penns Grove-Carneys Point Reg Sch Dist",
+        }],
+        "reasoning": "Official name \u30103:0\u2020source\u3011.",
+    })
+    agent = StubAgentBackend(default=_verdict(
+        payload,
+        urls=[("https://en.wikipedia.example/penns", "Penns Grove")],
+    ))
+    verifier = Verifier(
+        agent=agent,
+        cell_lookup=_make_cell_lookup({
+            ("x.csv", 0, "Employer"): "Penns Grove-Carney Pt Reg Sch Dist",
+        }),
+        column_samples=_make_column_samples({}),
+        cfg=VerifierConfig(prompt_path=PROMPT_PATH, concurrency=1),
+    )
+    v = verifier.run([cluster])[0]
+    assert v.verdict == "confirmed_error"
+    assert v.canonical_value == "Penns Grove-Carneys Point Reg Sch Dist"
+    assert v.confidence == pytest.approx(0.9)
+
+
+def test_distinct_entity_guard_skips_expansive_error_types():
+    """For error types where a large rewrite is legitimate
+    (semantic_incompatible), the distinct-entity guard must NOT fire
+    even though suspect and canonical are wholly different strings.
+    """
+    cluster = _cluster(
+        columns=("Contact Name",),
+        error_types=("semantic_incompatible",),
+        suggested_fix="Jane Smith",
+    )
+    payload = json.dumps({
+        "verdict": "confirmed_error",
+        "canonical_value": "Jane Smith",
+        "confidence": 0.85,
+        "evidence": [{
+            "url": "https://dir.example/jane",
+            "title": "Directory",
+            "quote": "Jane Smith",
+        }],
+        "reasoning": "Column expects a person name \u30103:0\u2020source\u3011.",
+    })
+    agent = StubAgentBackend(default=_verdict(
+        payload, urls=[("https://dir.example/jane", "Directory")],
+    ))
+    verifier = Verifier(
+        agent=agent,
+        cell_lookup=_make_cell_lookup({
+            ("x.csv", 0, "Contact Name"): "555-2020",
+        }),
+        column_samples=_make_column_samples({}),
+        cfg=VerifierConfig(prompt_path=PROMPT_PATH, concurrency=1),
+    )
+    v = verifier.run([cluster])[0]
+    assert v.verdict == "confirmed_error"
+    assert v.canonical_value == "Jane Smith"
+
+
+def test_vacuous_correction_downgrades_to_ambiguous():
+    """A confirmed_error whose canonical only reorders / drops / reformats
+    the suspect's tokens (no spelling change) is self-contradictory and
+    must be downgraded to ambiguous. Reproduces the real failure where
+    "STOCKROOM - TOCKWOTTEN ST 271" was "confirmed" with canonical
+    "271 TOCKWOTTEN ST" - which keeps the flagged "TOCKWOTTEN" verbatim.
+    """
+    cluster = _cluster(columns=("Address",), error_types=("typo",))
+    payload = json.dumps({
+        "verdict": "confirmed_error",
+        "canonical_value": "271 TOCKWOTTEN ST",
+        "confidence": 0.8,
+        "evidence": [{
+            "url": "https://gis.example/271-tockwotton",
+            "title": "Providence GIS",
+            "quote": "271 Tockwotton Street, Providence, RI",
+        }],
+        "reasoning": "Authoritative source lists 271 Tockwotton St \u30103:2\u2020source\u3011.",
+    })
+    agent = StubAgentBackend(default=_verdict(
+        payload, urls=[("https://gis.example/271-tockwotton", "Providence GIS")],
+    ))
+    verifier = Verifier(
+        agent=agent,
+        cell_lookup=_make_cell_lookup({
+            ("x.csv", 0, "Address"): "STOCKROOM - TOCKWOTTEN ST 271",
+        }),
+        column_samples=_make_column_samples({}),
+        cfg=VerifierConfig(prompt_path=PROMPT_PATH, concurrency=1),
+    )
+    v = verifier.run([cluster])[0]
+    assert v.verdict == "ambiguous"
+    assert v.canonical_value is None
+    assert v.canonical_record is None
+    # Ambiguous confidence must stay within the calibration contract.
+    assert v.confidence <= 0.49
+    assert v.parse_error and "vacuous" in v.parse_error
+    assert "Automated review" in v.reasoning
+
+
+def test_verbatim_echo_canonical_downgrades_to_ambiguous():
+    """A confirmed_error whose canonical is byte-identical to the suspect
+    is a contradiction (nothing was corrected) -> ambiguous."""
+    cluster = _cluster(columns=("Name",), error_types=("typo",))
+    payload = json.dumps({
+        "verdict": "confirmed_error",
+        "canonical_value": "Acme Holdings",
+        "confidence": 0.75,
+        "evidence": [{
+            "url": "https://acme.example",
+            "title": "Acme",
+            "quote": "Acme Holdings",
+        }],
+        "reasoning": "Acme Holdings is the name \u30103:0\u2020source\u3011.",
+    })
+    agent = StubAgentBackend(default=_verdict(
+        payload, urls=[("https://acme.example", "Acme")],
+    ))
+    verifier = Verifier(
+        agent=agent,
+        cell_lookup=_make_cell_lookup({
+            ("x.csv", 0, "Name"): "Acme Holdings",
+        }),
+        column_samples=_make_column_samples({}),
+        cfg=VerifierConfig(prompt_path=PROMPT_PATH, concurrency=1),
+    )
+    v = verifier.run([cluster])[0]
+    assert v.verdict == "ambiguous"
+    assert v.canonical_value is None
+    assert v.parse_error and "vacuous" in v.parse_error
+
+
+def test_real_spelling_fix_not_treated_as_vacuous():
+    """A genuine single-token spelling correction (a letter actually
+    changes) must NOT be downgraded as vacuous - it survives as
+    confirmed_error."""
+    cluster = _cluster(columns=("City",), error_types=("typo",))
+    payload = json.dumps({
+        "verdict": "confirmed_error",
+        "canonical_value": "Providence RI",
+        "confidence": 0.88,
+        "evidence": [{
+            "url": "https://geo.example/providence",
+            "title": "Providence",
+            "quote": "Providence, RI",
+        }],
+        "reasoning": "Correct spelling is Providence \u30103:0\u2020source\u3011.",
+    })
+    agent = StubAgentBackend(default=_verdict(
+        payload, urls=[("https://geo.example/providence", "Providence")],
+    ))
+    verifier = Verifier(
+        agent=agent,
+        cell_lookup=_make_cell_lookup({
+            ("x.csv", 0, "City"): "Provdence RI",   # missing 'i'
+        }),
+        column_samples=_make_column_samples({}),
+        cfg=VerifierConfig(prompt_path=PROMPT_PATH, concurrency=1),
+    )
+    v = verifier.run([cluster])[0]
+    assert v.verdict == "confirmed_error"
+    assert v.canonical_value == "Providence RI"
+    assert v.confidence == pytest.approx(0.88)
+
+
+def test_vacuous_guard_skips_expansive_error_types():
+    """For expansive error types (numeric_outlier) the vacuous-correction
+    guard must NOT fire even on a pure token reorder."""
+    cluster = _cluster(
+        columns=("Reading",), error_types=("numeric_outlier",),
+    )
+    payload = json.dumps({
+        "verdict": "confirmed_error",
+        "canonical_value": "271 ST",
+        "confidence": 0.8,
+        "evidence": [{
+            "url": "https://x.example",
+            "title": "x",
+            "quote": "271 ST",
+        }],
+        "reasoning": "ok \u30103:0\u2020source\u3011.",
+    })
+    agent = StubAgentBackend(default=_verdict(
+        payload, urls=[("https://x.example", "x")],
+    ))
+    verifier = Verifier(
+        agent=agent,
+        cell_lookup=_make_cell_lookup({
+            ("x.csv", 0, "Reading"): "ST 271",
+        }),
+        column_samples=_make_column_samples({}),
+        cfg=VerifierConfig(prompt_path=PROMPT_PATH, concurrency=1),
+    )
+    v = verifier.run([cluster])[0]
+    assert v.verdict == "confirmed_error"
+    assert v.canonical_value == "271 ST"
+
+
 def test_false_positive_passes_through():
     cluster = _cluster()
     payload = json.dumps({

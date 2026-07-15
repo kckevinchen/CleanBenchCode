@@ -1068,3 +1068,292 @@ def _write_overlapping_drafts(run_dir: Path) -> None:
     ) as fh:
         fh.write(json.dumps(drafts) + "\n")
 
+
+class TestCorrectionsRouteSlashColumn:
+    """Regression: per-value correction endpoints must work for columns
+    whose NAME contains '/'.
+
+    The column-cluster ``target_id`` is ``colclust\\x00src\\x00col\\x00cN``;
+    for a column like ``Shipping State/Province`` it embeds a literal
+    '/'. Routing that id through a path SEGMENT
+    (``/clusters/{cluster_id}/corrections``) let the server decode the
+    ``%2F`` back to '/', which split the segment and 404'd the route
+    (Starlette "Not Found"). The endpoints now take ``cluster_id`` as a
+    QUERY param so the slash never participates in path matching.
+    """
+
+    @staticmethod
+    def _make_slash_run(project: Path) -> Path:
+        data_dir = project / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        csv_path = data_dir / "ship.csv"
+        pd.DataFrame(
+            [
+                {"City": "Phoenix", "State/Province": "Arizona"},
+                {"City": "Tucson", "State/Province": "AZ"},
+                {"City": "Mesa", "State/Province": "AZ"},
+            ]
+        ).to_csv(csv_path, index=False)
+        outputs = project / "outputs"
+        outputs.mkdir(parents=True, exist_ok=True)
+        run_dir = outputs / "20260101T000000Z_slash"
+        run_dir.mkdir()
+        run_dir.joinpath("summary.json").write_text(json.dumps({
+            "config": {
+                "csv_paths": [str(csv_path)],
+                "sources": ["ship.csv"],
+            },
+        }))
+        run_dir.joinpath("clusters.json").write_text("[]")
+        run_dir.joinpath("issues.json").write_text("[]")
+        drafts = {
+            "source": "ship.csv",
+            "column": "State/Province",
+            "draft_clusters": [
+                {
+                    "kind": "casing",
+                    "canonical": "AZ",
+                    "agreement": 1.0,
+                    "values": ["Arizona", "AZ"],
+                },
+            ],
+        }
+        run_dir.joinpath("column_cluster_drafts.jsonl").write_text(
+            json.dumps(drafts) + "\n"
+        )
+        return run_dir
+
+    def test_corrections_endpoints_work_with_slash_in_column(
+        self, tmp_path: Path,
+    ) -> None:
+        project = tmp_path / "ws"
+        project.mkdir()
+        (project / "frontend" / "labeling").mkdir(parents=True)
+        run_dir = self._make_slash_run(project)
+        run_id = run_dir.name
+        tid = "colclust\x00ship.csv\x00State/Province\x00c1"
+        app = create_app(project, annotator="kaiwen")
+        with TestClient(app) as client:
+            # GET resolves -- the regression: a path-segment route 404'd
+            # here because the '/' in the column name split the segment.
+            g = client.get(
+                f"/api/runs/{run_id}/column-cluster-corrections",
+                params={"cluster_id": tid},
+            )
+            assert g.status_code == 200, g.text
+            assert g.json()["saved_value_corrections"] == {}
+
+            # A tp verdict is the precondition for saving corrections.
+            client.post(
+                f"/api/runs/{run_id}/labels",
+                json={
+                    "target": "column_cluster",
+                    "target_id": tid,
+                    "source": "ship.csv",
+                    "column": "State/Province",
+                    "status": "tp",
+                },
+            ).raise_for_status()
+
+            # POST a (bidirectional) correction and read it back.
+            p = client.post(
+                f"/api/runs/{run_id}/column-cluster-corrections",
+                params={"cluster_id": tid},
+                json={
+                    "value_corrections": {"Arizona": ["Arizona", "AZ"]},
+                    "note_tag": "[manual]",
+                },
+            )
+            assert p.status_code == 200, p.text
+            assert p.json()["saved_value_corrections"] == {
+                "Arizona": ["Arizona", "AZ"]
+            }
+            back = client.get(
+                f"/api/runs/{run_id}/column-cluster-corrections",
+                params={"cluster_id": tid},
+            )
+            assert back.json()["saved_value_corrections"] == {
+                "Arizona": ["Arizona", "AZ"]
+            }
+
+
+class TestVerdictPreservesCorrections:
+    """A column-cluster verdict POST must NOT clobber operator-saved
+    per-value corrections.
+
+    Regression: the verdict endpoint (``POST /labels``) carries only the
+    verdict fields, so the new record became the *latest* label with
+    ``value_corrections`` defaulting to ``{}`` -- re-affirming or
+    changing a verdict after saving corrections silently wiped them
+    (operators saw their saved fix vanish on a hard refresh).
+    """
+
+    def _corr(self, client, run_id, tid):
+        return client.get(
+            f"/api/runs/{run_id}/column-cluster-corrections",
+            params={"cluster_id": tid},
+        ).json()["saved_value_corrections"]
+
+    def _verdict(self, client, run_id, tid, status):
+        return client.post(f"/api/runs/{run_id}/labels", json={
+            "target": "column_cluster", "target_id": tid,
+            "source": "smoke.csv", "column": "School", "status": status,
+        })
+
+    def test_verdict_after_corrections_keeps_them(self, tmp_path: Path) -> None:
+        project = tmp_path / "ws"
+        project.mkdir()
+        (project / "frontend" / "labeling").mkdir(parents=True)
+        run_dir = _make_run(project)
+        _write_drafts(run_dir)
+        app = create_app(project, annotator="kaiwen")
+        with TestClient(app) as client:
+            run_id = run_dir.name
+            tid = "colclust\x00smoke.csv\x00School\x00c2"
+            self._verdict(client, run_id, tid, "tp").raise_for_status()
+            # Save a (comma-containing) correction.
+            client.post(
+                f"/api/runs/{run_id}/column-cluster-corrections",
+                params={"cluster_id": tid},
+                json={"value_corrections": {"EEE": "Elm, East"}, "note_tag": "[manual]"},
+            ).raise_for_status()
+            # Re-affirm the SAME verdict -> corrections survive.
+            self._verdict(client, run_id, tid, "tp").raise_for_status()
+            assert self._corr(client, run_id, tid) == {"EEE": "Elm, East"}
+            # Change the verdict tp -> unsure -> still survive.
+            self._verdict(client, run_id, tid, "unsure").raise_for_status()
+            assert self._corr(client, run_id, tid) == {"EEE": "Elm, East"}
+
+    def test_explicit_clear_is_not_resurrected_by_a_verdict(
+        self, tmp_path: Path,
+    ) -> None:
+        project = tmp_path / "ws"
+        project.mkdir()
+        (project / "frontend" / "labeling").mkdir(parents=True)
+        run_dir = _make_run(project)
+        _write_drafts(run_dir)
+        app = create_app(project, annotator="kaiwen")
+        with TestClient(app) as client:
+            run_id = run_dir.name
+            tid = "colclust\x00smoke.csv\x00School\x00c2"
+            self._verdict(client, run_id, tid, "tp").raise_for_status()
+            client.post(
+                f"/api/runs/{run_id}/column-cluster-corrections",
+                params={"cluster_id": tid},
+                json={"value_corrections": {"EEE": "Elm, East"}, "note_tag": "[manual]"},
+            ).raise_for_status()
+            # Operator explicitly clears the corrections.
+            client.post(
+                f"/api/runs/{run_id}/column-cluster-corrections",
+                params={"cluster_id": tid},
+                json={"value_corrections": {}, "note_tag": "[manual]"},
+            ).raise_for_status()
+            # A later verdict must NOT resurrect the cleared mapping.
+            self._verdict(client, run_id, tid, "tp").raise_for_status()
+            assert self._corr(client, run_id, tid) == {}
+
+
+
+# ---------------------------------------------------------------------------
+# Per-value missed-inconsistency (FN) flagging:
+#   GET/POST/DELETE /columns/{source}/fn-values/{column}
+# ---------------------------------------------------------------------------
+
+
+class TestFnValues:
+    """The column board flags a single distinct value as a missed
+    inconsistency (FN) with a typed fix; the server fans it out to every
+    row holding that value as a cell-level FN label tagged
+    ``error_types=["inconsistency"]`` so it reaches the benchmark without
+    needing a >=2-value cluster."""
+
+    _BASE = "/api/runs/{run_id}/columns/smoke.csv/fn-values/State"
+
+    def test_flag_value_writes_per_row_labels_and_lists(self, client_project) -> None:
+        client, _, run_id = client_project
+        url = self._BASE.format(run_id=run_id)
+        r = client.post(url, json={"value": "Calif.", "corrected_value": "California"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        # "Calif." occupies positional rows 6 and 7 in the smoke CSV.
+        assert body["value"] == "Calif."
+        assert body["corrected_value"] == "California"
+        assert body["rows"] == [6, 7]
+        assert body["n"] == 2
+        # The grouped listing reflects the flag.
+        lst = client.get(url)
+        assert lst.status_code == 200, lst.text
+        items = lst.json()["items"]
+        assert len(items) == 1
+        assert items[0]["value"] == "Calif."
+        assert items[0]["corrected_value"] == "California"
+        assert items[0]["rows"] == [6, 7]
+
+    def test_flag_feeds_inconsistency_benchmark(self, client_project) -> None:
+        client, _, run_id = client_project
+        url = self._BASE.format(run_id=run_id)
+        client.post(
+            url, json={"value": "Calif.", "corrected_value": "California"}
+        ).raise_for_status()
+        rows = [
+            json.loads(line)
+            for line in client.get(
+                f"/api/runs/{run_id}/export/benchmark"
+            ).text.splitlines()
+            if line.strip()
+        ]
+        # No labelled clusters, so the only cells are the two FN rows.
+        assert len(rows) == 2
+        for rec in rows:
+            assert rec["column"] == "State"
+            assert rec["original_value"] == "Calif."
+            assert rec["label"] == "error"
+            assert rec["corrected_value"] == "California"
+            assert rec["error_types"] == ["inconsistency"]
+            assert rec["cluster_ids"] == []
+
+    def test_flag_value_absent_from_column_404(self, client_project) -> None:
+        client, _, run_id = client_project
+        url = self._BASE.format(run_id=run_id)
+        r = client.post(url, json={"value": "Nowhere", "corrected_value": "x"})
+        assert r.status_code == 404
+
+    def test_flag_empty_value_rejected(self, client_project) -> None:
+        client, _, run_id = client_project
+        url = self._BASE.format(run_id=run_id)
+        r = client.post(url, json={"value": "", "corrected_value": "x"})
+        assert r.status_code == 400
+
+    def test_clear_tombstones_all_rows(self, client_project) -> None:
+        client, _, run_id = client_project
+        url = self._BASE.format(run_id=run_id)
+        client.post(
+            url, json={"value": "Calif.", "corrected_value": "California"}
+        ).raise_for_status()
+        r = client.delete(url, params={"value": "Calif."})
+        assert r.status_code == 200, r.text
+        assert r.json()["removed"] == 2
+        # Listing is empty again, and the FN cells leave the benchmark.
+        assert client.get(url).json()["items"] == []
+        rows = [
+            line for line in client.get(
+                f"/api/runs/{run_id}/export/benchmark"
+            ).text.splitlines() if line.strip()
+        ]
+        assert rows == []
+
+    def test_flag_is_idempotent_on_repeat(self, client_project) -> None:
+        client, _, run_id = client_project
+        url = self._BASE.format(run_id=run_id)
+        client.post(
+            url, json={"value": "Calif.", "corrected_value": "California"}
+        ).raise_for_status()
+        # Re-flagging the same value (e.g. editing the fix) updates in
+        # place rather than producing duplicate listing rows.
+        client.post(
+            url, json={"value": "Calif.", "corrected_value": "Calif"}
+        ).raise_for_status()
+        items = client.get(url).json()["items"]
+        assert len(items) == 1
+        assert items[0]["corrected_value"] == "Calif"
+        assert items[0]["rows"] == [6, 7]

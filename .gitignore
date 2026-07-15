@@ -44,6 +44,48 @@ backups/
 *.key
 *secret*
 
+# external/rein: vendored third-party clone + run artifacts
+# (datasets/ and venv/ are already ignored globally above)
+external/rein/rein-benchmark/
+external/rein/results/
+
+# external/cleanagent: vendored clone, isolated venvs, and run artifacts
+external/cleanagent/CleanAgent/
+external/cleanagent/venv/
+external/cleanagent/toolvenv/
+external/cleanagent/results/
+external/cleanagent/annotations*.json
+
+# external/gpt5_detect: per-chunk LLM response cache
+external/gpt5_detect/cache/
+
+# external/tabclean: vendored clone, isolated venv, per-table cache + work dirs
+# (predictions land in external/rein/results/, already ignored above)
+external/tabclean/TabClean/
+external/tabclean/venv/
+external/tabclean/cache/
+external/tabclean/work/
+
+# external/cocoon: vendored clone (interactive RAG product; not headless-runnable)
+# + per-table LLM response cache. Predictions land in external/rein/results/.
+external/cocoon/cocoon_repo/
+external/cocoon/cache/
+
+# external/synth_fewshot: synthetic-error temp tables for honest few-shot training
+# (the inject.py library itself is tracked; only the materialized temp dirs are not)
+external/synth_fewshot/tmp_rein/
+external/synth_fewshot/tmp_tabclean/
+external/synth_fewshot/__pycache__/
+
+# external/fm_data_tasks: per-table LLM response cache (predictions -> rein/results/)
+external/fm_data_tasks/cache/
+
+# external/forested: vendored clone, torch venv, per-table cache + work dirs
+external/forested/ForestED/
+external/forested/venv/
+external/forested/cache/
+external/forested/work/
+
 # Editor
 .vscode/
 .idea/

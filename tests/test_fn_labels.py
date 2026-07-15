@@ -240,9 +240,16 @@ class TestCellState:
         assert match[0]["superseded_fn_by"] == ["c1"]
         assert body["shadowed_fn_count"] == 1
 
-    def test_fp_clears_prior_fn(self, client_and_run) -> None:
+    def test_fp_records_not_an_error_and_keeps_cell_visible(
+        self, client_and_run,
+    ) -> None:
+        """``fp`` on a cell is a RECORDED "reviewed, not an error" verdict --
+        it must KEEP the cell visible (surface in /cells as ``fp``), not
+        clear it. Only ``unlabeled`` (an explicit retract) removes the cell.
+        Regression for the bug where pressing the fp key silently deleted
+        auto-flagged cells."""
         client, run_id = client_and_run
-        # FN, then change of heart -> FP on the same cell.
+        # FN, then "actually not an error" -> FP on the same cell.
         for status in ("fn", "fp"):
             client.post(
                 f"/api/runs/{run_id}/labels",
@@ -253,8 +260,96 @@ class TestCellState:
             )
         cells = client.get(f"/api/runs/{run_id}/sources/a.csv/cells").json()["cells"]
         match = [c for c in cells if c["row"] == 2 and c["column"] == "email"]
-        # Latest verdict on the cell key is FP, so FN shouldn't surface.
-        assert not match or match[0]["state"] != "fn"
+        # The cell stays, now showing the fp verdict (not fn, not gone).
+        assert match, "fp cell must stay visible in /cells"
+        assert match[0]["state"] == "fp"
+        assert match[0]["label_source"] == "cell"
+        # It also stays in the FN review queue so the operator doesn't lose it.
+        fn_items = client.get(f"/api/runs/{run_id}/fn-cells").json()["items"]
+        fp_item = [
+            i for i in fn_items
+            if i["row"] == 2 and i["column"] == "email"
+        ]
+        assert fp_item and fp_item[0]["status"] == "fp"
+
+    def test_unlabeled_retract_removes_cell(self, client_and_run) -> None:
+        """The explicit retract path (``unlabeled``) DOES remove the cell --
+        it drops from /cells and /fn-cells. This is the only way to delete a
+        cell label now (no keyboard verdict does it)."""
+        client, run_id = client_and_run
+        for status in ("fn", "unlabeled"):
+            client.post(
+                f"/api/runs/{run_id}/labels",
+                json={
+                    "target": "cell", "target_id": "x", "source": "a.csv",
+                    "row": 2, "column": "email", "status": status,
+                },
+            )
+        cells = client.get(f"/api/runs/{run_id}/sources/a.csv/cells").json()["cells"]
+        assert not [c for c in cells if c["row"] == 2 and c["column"] == "email"]
+        fn_items = client.get(f"/api/runs/{run_id}/fn-cells").json()["items"]
+        assert not [i for i in fn_items if i["row"] == 2 and i["column"] == "email"]
+
+    @pytest.mark.parametrize("status", ["partial", "unsure", "skip", "fp"])
+    def test_non_fn_cell_label_appears_in_state(
+        self, client_and_run, status,
+    ) -> None:
+        """A cell label carrying a non-FN verdict (partial / unsure / skip /
+        fp -- produced by the trivial-convert flow and the FN detail panel)
+        must paint the CSV grid, not vanish. Regression for the bug where
+        ``/cells`` only surfaced ``fn`` cell labels, so a partial cell's tint
+        disappeared on the next reload."""
+        client, run_id = client_and_run
+        client.post(
+            f"/api/runs/{run_id}/labels",
+            json={
+                "target": "cell", "target_id": "x", "source": "a.csv",
+                "row": 2, "column": "email", "status": status,
+                "corrected_value": "fixed@x",
+                "note": "(auto: punctuation anomaly) TRIVIAL [LLM-fix]",
+            },
+        )
+        cells = client.get(f"/api/runs/{run_id}/sources/a.csv/cells").json()["cells"]
+        match = [c for c in cells if c["row"] == 2 and c["column"] == "email"]
+        assert match, f"{status} cell label should appear in /cells"
+        assert match[0]["state"] == status
+        assert match[0]["label_source"] == "cell"
+
+    def test_marking_one_fn_keeps_sibling_partials(self, client_and_run) -> None:
+        """Reproduces the reported bug: several ``partial`` cell labels in a
+        column, then the operator marks ONE sibling cell FN. The other
+        partials must remain in ``/cells`` (their grid tint must not vanish).
+        Before the fix, ``/cells`` dropped every non-FN cell label, so the
+        next reload after the FN mark wiped the sibling partial tints."""
+        client, run_id = client_and_run
+        # Three partial cell labels in the ``email`` column (rows 0/1/2).
+        for row in (0, 1, 2):
+            client.post(
+                f"/api/runs/{run_id}/labels",
+                json={
+                    "target": "cell", "target_id": "x", "source": "a.csv",
+                    "row": row, "column": "email", "status": "partial",
+                    "corrected_value": f"r{row}@x",
+                },
+            )
+        before = client.get(f"/api/runs/{run_id}/sources/a.csv/cells").json()["cells"]
+        email_before = {c["row"] for c in before if c["column"] == "email"}
+        assert email_before == {0, 1, 2}
+
+        # Mark row 0 as FN (operator changes their mind on one sibling).
+        client.post(
+            f"/api/runs/{run_id}/labels",
+            json={
+                "target": "cell", "target_id": "x", "source": "a.csv",
+                "row": 0, "column": "email", "status": "fn",
+            },
+        )
+        after = client.get(f"/api/runs/{run_id}/sources/a.csv/cells").json()["cells"]
+        email_after = {c["row"]: c["state"] for c in after if c["column"] == "email"}
+        # Row 0 is now fn; rows 1 & 2 must still be present as partial.
+        assert email_after.get(0) == "fn"
+        assert email_after.get(1) == "partial"
+        assert email_after.get(2) == "partial"
 
 
 # ---------------------------------------------------------------------------
@@ -363,6 +458,46 @@ class TestExportWithFN:
         assert rec["label"] == "error"
         assert rec["cluster_ids"] == []
         assert rec["corrected_value"] == "b@example.com"
+
+    def test_fn_cell_carries_error_types_into_benchmark(
+        self, client_and_run,
+    ) -> None:
+        """A cell FN label tagged ``error_types`` exports with that tag
+        (the column-board per-value inconsistency FN flow), instead of
+        the empty-list / ``_uncategorized`` default of a generic FN."""
+        client, run_id = client_and_run
+        client.post(
+            f"/api/runs/{run_id}/labels",
+            json={
+                "target": "cell", "target_id": "x", "source": "a.csv",
+                "row": 2, "column": "email", "status": "fn",
+                "corrected_value": "b@example.com",
+                "error_types": ["inconsistency"],
+            },
+        )
+        rows: List[Dict[str, Any]] = [
+            json.loads(line)
+            for line in client.get(
+                f"/api/runs/{run_id}/export/benchmark"
+            ).text.splitlines()
+            if line.strip()
+        ]
+        assert len(rows) == 1
+        rec = rows[0]
+        assert rec["error_types"] == ["inconsistency"]
+        assert rec["label"] == "error"
+        assert rec["cluster_ids"] == []
+        # And it lands in the inconsistency bucket of the by-type export.
+        single = client.get(
+            f"/api/runs/{run_id}/export/benchmark/inconsistency"
+        )
+        assert single.status_code == 200
+        incon = [
+            json.loads(line)
+            for line in single.text.splitlines() if line.strip()
+        ]
+        assert len(incon) == 1
+        assert incon[0]["row"] == 2 and incon[0]["column"] == "email"
 
     def test_fn_superseded_by_tp_cluster_is_merged_not_duplicated(
         self, client_and_run,
@@ -822,3 +957,58 @@ class TestExportConflictsEndpoint:
         assert client.get(
             f"/api/runs/{run_id}/export/conflicts"
         ).json()["conflicts"] == []
+
+
+def test_cell_state_fans_out_affected_rows(tmp_path: Path) -> None:
+    """A multi-row cluster's verdict must paint every row in its
+    detections' ``affected_rows`` -- not just the anchor -- so cells
+    captured via fan-out don't look UNLABELLED in the viewer. An
+    own-anchor verdict on a cell still wins over the fanned-out one.
+    """
+    project = tmp_path / "proj"
+    (project / "frontend" / "labeling").mkdir(parents=True)
+    data_dir = project / "data"
+    data_dir.mkdir(parents=True)
+    (data_dir / "a.csv").write_text(
+        "name\nalice\nbob\ncarol\ndave\n", encoding="utf-8",
+    )
+    outputs = project / "outputs"
+    outputs.mkdir()
+    run_id = "20260101T000000Z_fanout"
+    rd = outputs / run_id
+    rd.mkdir()
+    (rd / "summary.json").write_text(json.dumps(
+        {"config": {"csv_paths": [str(data_dir / "a.csv")],
+                    "sources": ["a.csv"]}}))
+    clusters = [
+        # Broad cluster anchored at row 0, fanning out to rows 0,1,2,3.
+        {"cluster_id": "broad", "source": "a.csv", "row": 0,
+         "columns": ["name"], "error_types": ["typo"], "synthesis": None,
+         "detections": [{"affected_rows": [0, 1, 2, 3], "columns": ["name"]}]},
+        # A per-row cluster anchored at row 2 (operator will FP it).
+        {"cluster_id": "row2", "source": "a.csv", "row": 2,
+         "columns": ["name"], "error_types": ["typo"], "synthesis": None,
+         "detections": [{"affected_rows": [2], "columns": ["name"]}]},
+    ]
+    (rd / "clusters.json").write_text(json.dumps(clusters))
+    (rd / "issues.json").write_text("[]")
+
+    client = TestClient(create_app(project, annotator="tester"))
+    for cid, row, st in (("broad", 0, "tp"), ("row2", 2, "fp")):
+        r = client.post(f"/api/runs/{run_id}/labels", json={
+            "target": "cluster", "target_id": cid, "source": "a.csv",
+            "row": row, "column": "name", "status": st})
+        assert r.status_code == 200, r.text
+
+    cells = {
+        c["row"]: c["state"]
+        for c in client.get(
+            f"/api/runs/{run_id}/sources/a.csv/cells").json()["cells"]
+        if c["column"] == "name"
+    }
+    # Fan-out paints the peer rows tp ...
+    assert cells[0] == "tp"
+    assert cells[1] == "tp"
+    assert cells[3] == "tp"
+    # ... but row 2's OWN-anchor fp verdict wins over the fanned-out tp.
+    assert cells[2] == "fp"

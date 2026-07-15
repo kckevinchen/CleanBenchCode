@@ -107,7 +107,12 @@ system: |
     `verdict: "uncertain"` with `confidence: "low"` over emitting
     nothing at all - silent drops become permanent false negatives,
     while uncertain findings get a second look. Only stay silent
-    when there is genuinely no candidate disagreement to evaluate.
+    when there is genuinely no candidate disagreement to evaluate -
+    or when the rows are legitimately DIFFERENT records rather than
+    an inconsistent copy of one record (see DISTINCT RECORDS below):
+    that is a confident non-finding, not an uncertain one. Recall
+    means not missing genuine disagreements; it does NOT mean
+    flagging rows that are correct as-is.
 
   HOW TO DECIDE WHICH ROWS PAIR UP
   --------------------------------
@@ -121,6 +126,79 @@ system: |
     pair and add a single `verdict: "uncertain"` record with
     `kind: "attribute_conflict"`, empty `locations`, and a
     one-sentence rationale explaining why pairing was infeasible.
+
+  DISTINCT RECORDS ARE NOT INCONSISTENCIES (check this FIRST)
+  -----------------------------------------------------------
+  Two rows that share a key are an inconsistency ONLY when they are
+  meant to be the SAME record. Before emitting any `duplicate_row`
+  or `attribute_conflict`, rule out these legitimate "different
+  record" cases. In ALL of them the rows are correct as-is: emit
+  NOTHING (preferred), or at most `verdict: "benign_variation"` -
+  NEVER `confirmed_inconsistency`, and never treat the difference
+  as a conflict.
+  * RECORD-TYPE / EVENT discriminator. A column names the KIND of
+    record - type / status / action / category / direction / event
+    (e.g. "Leave" vs "New", "In" vs "Out", "Open" vs "Closed",
+    "Credit" vs "Debit", "Hire" vs "Termination"). The same entity
+    legitimately appears once per type/event; the differing
+    discriminator is what SEPARATES the records, not a conflicting
+    attribute.
+  * TIME / VERSION snapshots. The two sheets, or a date / period /
+    version column, capture the same entity at different points in
+    time - "Before" / "After", "2023" / "2024", "v1" / "v2",
+    "Budget" / "Actual", opening vs closing. Differences are the
+    intended change history, not data errors.
+  * PERIODIC / REPEATED-MEASUREMENT data, even with NO date or
+    version column. The strongest tell is PREVALENCE: if the same
+    key disagrees on its numeric / measured values across MANY rows
+    of the group - not just one or two - the sheets are almost
+    certainly independent snapshots, periods, or repeated
+    measurements of the same entities (monthly / yearly reports,
+    re-surveys, per-run logs, multiple submissions). Their numeric
+    differences are the DATA, not errors. A union whose KEY
+    UNIQUENESS is UNIQUE per sheet BUT whose shared keys disagree
+    almost everywhere is this case - emit nothing (or
+    benign_variation); do NOT flag each row as attribute_conflict.
+  * EVENT / TRANSACTION / LOG grain. The key is an entity id that
+    recurs by design - one row per order, visit, payment, shift,
+    enrolment. The KEY UNIQUENESS block below reports this per
+    sheet: when it marks a key NON-UNIQUE, the SAME key value
+    appears on many rows and is NOT a unique record id; rows sharing
+    it are separate events - do not pair-and-conflict them.
+  * NON-IDENTIFYING / positional key. The "primary key" is a
+    constant, a category, or a row number / positional index (e.g.
+    every row's key is "1", or it is only the order rows appear in).
+    Pairing on it is meaningless - emit nothing.
+
+  Rule of thumb: if the only thing that "disagrees" is a column
+  that plausibly distinguishes WHICH record this is - type, status,
+  direction, time, version, event - the rows are DIFFERENT records,
+  not an inconsistent copy of one record. A genuine
+  `attribute_conflict` needs the rows to be the SAME record AND to
+  disagree on a value that should have been identical.
+
+  PREVALENCE TEST: a real `attribute_conflict` is the EXCEPTION - a
+  few keys disagree while most MATCH. If ALMOST EVERY shared key
+  disagrees on the same numeric column(s), that is not a workbook
+  full of errors; it is periodic / snapshot / measurement data (see
+  above) - suppress the per-row findings. At most emit ONE
+  `benign_variation` note for the group; never hundreds of
+  `attribute_conflict` / `confirmed_inconsistency` rows.
+
+  JOIN GROUPS (group_kind = join: a parent 1 -- N child / lookup)
+  ---------------------------------------------------------------
+  A join group is a foreign-key / lookup relationship, NOT two
+  copies of one table. The KEY UNIQUENESS block marks which sheet is
+  the parent (unique key) and which is the child (key recurs).
+  * A child row whose key MATCHES a parent row is a satisfied
+    foreign key - it is CORRECT. Never report a parent<->child key
+    match as `duplicate_row` or `attribute_conflict`.
+  * The child key repeating across many child rows is the expected
+    many-to-one; those rows are separate records, not duplicates.
+  * The ONLY cross-table finding for a join is `fk_orphan`: a child
+    key with NO matching parent. Compare the child's key values
+    against the parent's and flag children whose key is absent
+    upstream.
 
   HOW TO CLASSIFY A DISAGREEMENT
   -------------------------------
@@ -147,11 +225,12 @@ system: |
     are clearly master vs detail or summary vs transactional;
     `confirmed_inconsistency` only when both sheets are supposed
     to be authoritative on the entity.
-  * The "primary key" was actually a category column and rows
-    sharing a value are not the same entity: emit nothing for
-    those rows, OR a single `verdict: "uncertain"` record with
-    `rationale: "primary key column appears to be a category, not
-    an identifier"`.
+  * The rows are not the same record at all - category / positional
+    key, recurring event grain, or separated by a record-type /
+    time / version discriminator: see DISTINCT RECORDS above. Emit
+    nothing (preferred), or at most `verdict: "benign_variation"`;
+    do NOT emit `duplicate_row` / `attribute_conflict` /
+    `confirmed_inconsistency`.
 
   ROW-INDEX RULES
   ---------------
@@ -174,6 +253,17 @@ user_template: |
 
   ----- COLUMN MAPPING (canonical -> raw variants per sheet) -----
   {column_mapping_block}
+
+  ----- KEY UNIQUENESS (computed over the FULL sheet, not just this page) -----
+  {key_uniqueness_block}
+
+  ----- STRUCTURAL PRIORS (deterministic hints; confirm or reject) -----
+  These value-level candidates were pre-computed by cheap heuristics
+  (foreign-key containment, value-set overlap, embedding similarity,
+  null sentinels). Treat them as leads, not verdicts: confirm the ones
+  the rows support and ignore the rest. They reference VALUES, not row
+  numbers, so cross-check them against the samples below.
+  {priors_block}
 
   ----- ROW SAMPLES (each row prefixed with its LOCAL 0-based index) -----
   Page {page_index} of {n_pages} (sheets may be truncated to {n_sample_rows} rows per page).

@@ -133,6 +133,16 @@ KNOWN_SCOPES = frozenset(
     {"single-column", "multi-column", "multi-row", "multi-table"}
 )
 
+# Non-single-column types this runner detects in-process via a dedicated
+# handler rather than delegating to the relation-discovery pipeline:
+#   row_duplication           -> collision-adjudicator (src/core/row_dup/)
+#   inter_table_inconsistency -> multi-table cross-sheet pipeline
+# The inter_column_pipeline routing must NOT strip these from the active
+# error-type set (their dispatch logic checks ``error_types`` for exactly
+# these keys; stripping silently disables the handlers and can empty the
+# set entirely). Only the multi-column ``scope: row`` types are routed away.
+DEDICATED_HANDLER_TYPES = frozenset({"row_duplication", "inter_table_inconsistency"})
+
 
 def _scope_of(category: str) -> str:
     """Return the lower-cased scope prefix of an ErrorType.category."""
@@ -2849,22 +2859,29 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
 
     # Inter-column pipeline routing: when ``inter_column_pipeline.enabled``
-    # is true (default), every non-single-column type is owned by the
-    # relation pipeline in ``experiments.run_relation_discovery`` rather
-    # than this per-chunk detector. Drop those types here so we don't
+    # is true (default), the multi-column intra-record types (``scope: row``
+    # in prompts/discover_relations.yaml -- fd_violation,
+    # row_calculation_inconsistency, string_calculation_inconsistency) are
+    # owned by the relation pipeline in ``experiments.run_relation_discovery``
+    # rather than this per-chunk detector. Drop those types here so we don't
     # double-detect them via two paths, and log the dropped set so the
     # operator knows where to find them.
+    #
+    # ``row_duplication`` and ``inter_table_inconsistency`` are NOT routed
+    # away: this runner has dedicated in-process handlers for them (see
+    # ``DEDICATED_HANDLER_TYPES``). Keep them so their handlers fire.
     inter_column_cfg = config.get("inter_column_pipeline") or {}
     inter_column_enabled = bool(inter_column_cfg.get("enabled", False))
     if inter_column_enabled and error_types:
-        before_keys = [et.key for et in error_types]
         inter_column_types = [
-            et for et in error_types if _scope_of(et.category) != "single-column"
+            et
+            for et in error_types
+            if _scope_of(et.category) != "single-column"
+            and et.key not in DEDICATED_HANDLER_TYPES
         ]
         if inter_column_types:
-            error_types = [
-                et for et in error_types if _scope_of(et.category) == "single-column"
-            ]
+            _routed_keys = {et.key for et in inter_column_types}
+            error_types = [et for et in error_types if et.key not in _routed_keys]
             logger.info(
                 "inter_column_pipeline.enabled: routing %d type(s) through the "
                 "relation pipeline (run `python -m experiments.run_relation_discovery` "
@@ -3482,11 +3499,17 @@ def main(argv: Optional[list[str]] = None) -> int:
         # No single canonical detector in adaptive mode - record the
         # concurrency each pass actually used by sniffing a throwaway
         # instance built with the same knobs (cheap; no LLM calls).
+        # ``error_types`` can be empty here when every selected type was
+        # routed to the relation pipeline (inter_column_pipeline.enabled),
+        # leaving the per-chunk detector with nothing to run. The sniffed
+        # ``.concurrency`` is independent of the type list, so fall back to
+        # the full taxonomy (``None``) purely to satisfy the constructor's
+        # non-empty guard instead of crashing the whole run.
         representative_concurrency = PerTypeCleaningDetector(
             llm=llm,
             taxonomy=taxonomy,
             model=model,
-            error_types=error_types,
+            error_types=error_types or None,
             reasoning_effort=reasoning_effort,
             reasoning_summary=reasoning_summary,
             concurrency=concurrency,

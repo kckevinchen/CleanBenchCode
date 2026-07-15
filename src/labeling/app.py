@@ -106,11 +106,13 @@ from .schema import (
 )
 from .store import LabelStore
 from .cell_notes_store import CellNotesStore
+from .row_verdict_store import RowVerdictStore
 from .exclusions_store import ExclusionStore
 from .multi_table_label_store import MultiTableLabelStore
 from .column_cluster_store import ColumnClusterStore
 from .column_cluster_queue import iter_column_cluster_targets
 from .routers import cell_notes as cell_notes_router
+from .routers import row_verdicts as row_verdicts_router
 from .routers import clusters as clusters_router
 from .routers import column_clusters as column_clusters_router
 from .routers import correction_jobs as correction_jobs_router
@@ -125,6 +127,7 @@ from .routers import relation_reviews as relation_reviews_router
 from .routers import runs as runs_router
 from .routers import sources as sources_router
 from .routers import stats as stats_router
+from .routers import trivial_corrections as trivial_corrections_router
 from .routers import verifications as verifications_router
 from .routers._context import RouterContext
 
@@ -150,6 +153,13 @@ _BING21_FLAT_RE = re.compile(
     r"^(?P<wb>[0-9a-f]{8,64}\.xlsx)_[0-9a-f]+\.csv$",
     re.IGNORECASE,
 )
+
+# pbi_1000 stores 1000 workbooks (some multi-sheet) flat in one directory,
+# encoding the workbook in the filename as ``<workbook_id>_<sheet>.csv``.
+# Like Bing21 the workbook lives in the filename, not a parent dir, so we
+# lift the numeric id out when the parent-dir heuristic would otherwise
+# collapse the whole corpus into one group (see RunContext.__init__).
+_FLAT_PREFIX_WB_RE = re.compile(r"^(?P<wb>\d{6,})_.+\.csv$", re.IGNORECASE)
 
 
 def _workbook_for(pp: Path) -> str:
@@ -236,6 +246,23 @@ class RunContext:
         if not self.sources:
             self._backfill_multi_table_sources()
 
+        # Flat corpora that encode the workbook in the *filename* rather
+        # than a parent directory (pbi_1000: ``<workbook_id>_<sheet>.csv``)
+        # would otherwise collapse to a single ``pbi_1000`` workbook and the
+        # UI would lump every CSV into one group. When the parent-dir
+        # heuristic yields a single workbook for a multi-CSV run, recover
+        # per-workbook keys from the filename prefix -- but only adopt the
+        # refinement when it actually splits the run into >=2 workbooks, so
+        # genuine single-table flat corpora stay untouched.
+        distinct_parents = {wb for wb in self.source_workbook.values() if wb}
+        if len(distinct_parents) <= 1 and len(self.source_workbook) > 1:
+            refined = {
+                name: (m.group("wb") if (m := _FLAT_PREFIX_WB_RE.match(name)) else wb)
+                for name, wb in self.source_workbook.items()
+            }
+            if len({wb for wb in refined.values() if wb}) >= 2:
+                self.source_workbook = refined
+
         # The parent-dir = workbook heuristic only carries meaning when
         # the run actually targets multiple workbooks AND at least one
         # of them owns 2+ CSVs (e.g. curated_pbi/<sid>/*.csv). For flat
@@ -254,6 +281,12 @@ class RunContext:
         )
 
         self._frame_cache: Dict[str, pd.DataFrame] = {}
+        # Per-source file signature (mtime_ns, size) captured when the frame
+        # was cached. ``load_frame`` re-stats the CSV on every call and reloads
+        # when the signature changes, so an on-disk edit (e.g. the dataset
+        # being normalized AFTER a label run) is picked up instead of serving
+        # a stale memoized frame.
+        self._frame_sig: Dict[str, tuple] = {}
         self._frame_lock = threading.Lock()
         self._canonical_cache: Dict[str, Dict[str, Any]] = {}
 
@@ -320,6 +353,14 @@ class RunContext:
         # :mod:`src.labeling.cell_notes_store` for the storage format.
         self.cell_notes_store = CellNotesStore(
             self.run_dir / "cell_notes.jsonl"
+        )
+        # Per-row verdict overrides: an explicit verdict for a single
+        # (source, row, column) cell that supersedes the enclosing
+        # cluster's fanned-out verdict. Lets the operator label each row
+        # of an fd_violation conflict group independently. See
+        # :mod:`src.labeling.row_verdict_store` for the storage format.
+        self.row_verdict_store = RowVerdictStore(
+            self.run_dir / "row_verdicts.jsonl"
         )
         # Per-source exclusions (whole CSV / specific rows / specific
         # columns the operator marked as too messy to label). Loaded
@@ -540,12 +581,23 @@ class RunContext:
 
     def load_frame(self, source: str) -> pd.DataFrame:
         with self._frame_lock:
-            cached = self._frame_cache.get(source)
-            if cached is not None:
-                return cached
             path = self.sources.get(source)
             if path is None or not path.exists():
                 raise FileNotFoundError(f"source not found: {source}")
+            # Current on-disk signature. If it matches the cached frame's
+            # signature the file is unchanged and we serve the memoised frame;
+            # otherwise the CSV was edited on disk (e.g. the dataset was
+            # normalized after this label run, removing excess whitespace) and
+            # we MUST reload so taggers / highlights read the true cell value
+            # rather than a stale snapshot.
+            try:
+                st = path.stat()
+                sig: tuple = (st.st_mtime_ns, st.st_size)
+            except OSError:
+                sig = None
+            cached = self._frame_cache.get(source)
+            if cached is not None and sig is not None and self._frame_sig.get(source) == sig:
+                return cached
             # Use the same loader the detector pipeline uses so column
             # names line up exactly with what's recorded in
             # ``clusters.json`` (incl. duplicate-column disambiguation
@@ -556,6 +608,10 @@ class RunContext:
             if self._normalize_opts is not None:
                 frame = normalize_frame(frame, self._normalize_opts)
             self._frame_cache[source] = frame
+            if sig is not None:
+                self._frame_sig[source] = sig
+            else:
+                self._frame_sig.pop(source, None)
             return frame
 
     def cluster(self, cid: str) -> Optional[Dict[str, Any]]:
@@ -781,9 +837,11 @@ def create_app(
     )
     launcher_router.register(app, router_ctx)
     cell_notes_router.register(app, router_ctx)
+    row_verdicts_router.register(app, router_ctx)
     clusters_router.register(app, router_ctx)
     column_clusters_router.register(app, router_ctx)
     correction_jobs_router.register(app, router_ctx)
+    trivial_corrections_router.register(app, router_ctx)
     labels_router.register(app, router_ctx)
     exclusions_router.register(app, router_ctx)
     exports_router.register(app, router_ctx)

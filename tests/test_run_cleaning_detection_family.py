@@ -31,9 +31,13 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from experiments.run_cleaning_detection import (  # noqa: E402
+    DEDICATED_HANDLER_TYPES,
     _resolve_model_spec,
     _run_id_tag_for_model_spec,
+    _scope_of,
+    main,
 )
+from src.core.error_taxonomy import load_taxonomy  # noqa: E402
 from src.core.llm_client import GPT5_FAMILY, LLMClient, LLMResponse  # noqa: E402
 
 
@@ -239,3 +243,107 @@ class TestLLMClientRotation:
             per_model[m] = per_model.get(m, 0) + 1
         for m in GPT5_FAMILY:
             assert per_model[m] == 3, f"unbalanced rotation: {per_model}"
+
+
+# ---------------------------------------------------------------------------
+# inter_column_pipeline routing
+# ---------------------------------------------------------------------------
+
+
+def _routed_away(type_keys: List[str]) -> List[str]:
+    """Replicate main()'s inter_column routing predicate for a selection.
+
+    Returns the subset of ``type_keys`` that the routing strips from the
+    active error-type set (delegating them to the relation-discovery
+    pipeline). The remainder stays in ``error_types`` so this runner's own
+    detectors can handle them.
+    """
+    tax = load_taxonomy(PROJECT_ROOT / "prompts" / "error_types.yaml")
+    selected = [et for et in tax.types if et.key in set(type_keys)]
+    return [
+        et.key
+        for et in selected
+        if _scope_of(et.category) != "single-column"
+        and et.key not in DEDICATED_HANDLER_TYPES
+    ]
+
+
+class TestInterColumnRouting:
+    """Guards the fix for the row_duplication-only crash: the dedicated
+    in-process handler types must survive the inter_column routing so their
+    dispatch (``wants_row_dup`` / ``multi_table_enabled``) still fires and
+    ``error_types`` never empties out underneath the adaptive-mode detector.
+    """
+
+    def test_row_duplication_not_routed_away(self) -> None:
+        # The regression: selecting only row_duplication must NOT empty the
+        # active error-type set (which crashed PerTypeCleaningDetector).
+        assert _routed_away(["row_duplication"]) == []
+
+    def test_inter_table_inconsistency_not_routed_away(self) -> None:
+        assert _routed_away(["inter_table_inconsistency"]) == []
+
+    def test_multi_column_scope_row_types_still_routed(self) -> None:
+        # The three scope:row types have no in-process handler here; they
+        # must still be delegated to run_relation_discovery.
+        relation_types = [
+            "fd_violation",
+            "row_calculation_inconsistency",
+            "string_calculation_inconsistency",
+        ]
+        assert set(_routed_away(relation_types)) == set(relation_types)
+
+    def test_single_column_types_never_routed(self) -> None:
+        assert _routed_away(
+            ["typo", "inconsistency", "semantic_incompatible", "numeric_outlier"]
+        ) == []
+
+    def test_dedicated_handler_types_are_non_single_column(self) -> None:
+        # Each dedicated type must actually be a non-single-column type --
+        # otherwise the exclusion is meaningless (it would never be routed
+        # anyway) and a refactor that renames scopes would slip past.
+        tax = load_taxonomy(PROJECT_ROOT / "prompts" / "error_types.yaml")
+        by_key = {et.key: et for et in tax.types}
+        for key in DEDICATED_HANDLER_TYPES:
+            assert key in by_key, f"{key} missing from taxonomy"
+            assert _scope_of(by_key[key].category) != "single-column"
+
+
+# ---------------------------------------------------------------------------
+# Adaptive mode: relation-only selection must not crash (regression)
+# ---------------------------------------------------------------------------
+
+
+class TestAdaptiveRelationOnlyNoCrash:
+    """Selecting only relation-pipeline types (e.g. ``fd_violation``) in a
+    detection run routes every type to the relation pipeline, emptying
+    ``error_types``. Adaptive mode then runs zero passes and previously
+    crashed building a throwaway ``PerTypeCleaningDetector`` solely to sniff
+    its concurrency ("needs at least one error type"). The run must instead
+    complete, write the standard (empty) artifacts, and rely on the
+    operator-facing warning that points at ``run_relation_discovery``. Makes
+    zero LLM calls (zero passes), so it needs no Azure credentials.
+    """
+
+    def test_fd_violation_only_adaptive_completes(self, tmp_path: Path) -> None:
+        csv = tmp_path / "fd.csv"
+        csv.write_text(
+            "id,city,country\n1,Paris,France\n2,Paris,Germany\n",
+            encoding="utf-8",
+        )
+        out_dir = tmp_path / "out"
+        rc = main(
+            [
+                "--csv", str(csv),
+                "--error-types", "fd_violation",
+                "--scopes", "all",
+                "--mode", "adaptive",
+                "--max-chunks", "1",
+                "--output-dir", str(out_dir),
+            ]
+        )
+        assert rc == 0
+        # Exactly one run dir with the standard summary artifact.
+        run_dirs = [p for p in out_dir.iterdir() if p.is_dir()]
+        assert len(run_dirs) == 1
+        assert (run_dirs[0] / "summary.json").is_file()

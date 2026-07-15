@@ -404,7 +404,7 @@ def compile_code_violations(
     verifications: Sequence[Mapping[str, Any]],
     source_frames: Mapping[str, pd.DataFrame],
     *,
-    min_pass_rate: float = 0.5,
+    min_pass_rate: float = 0.90,
     max_pass_rate: float = 1.0 - 1e-9,
     timeout_seconds: float = 8.0,
 ) -> Tuple[List[RelationViolation], List[Dict[str, Any]]]:

@@ -1,0 +1,17 @@
+{
+  "gold_labels": [
+    "typo",
+    "clean",
+    "ambiguous"
+  ],
+  "output_labels": [
+    "typo",
+    "clean"
+  ],
+  "flavours": [
+    "spelling",
+    "whitespace",
+    "punctuation"
+  ],
+  "ambiguous_scoring_rule": "Eval rows with gold_label='ambiguous' are credited as correct regardless of whether the model emits 'typo' or 'clean'."
+}

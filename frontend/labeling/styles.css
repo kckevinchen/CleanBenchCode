@@ -17,6 +17,7 @@
   --partial: #f59e0b;
   --unsure: #a78bfa;
   --skip: #ec4899;
+  --fn: #6366f1;
   /* Bright cyan reserved exclusively for "the cluster cell I'm
      currently labelling". Not used by any verdict state so it
      reads cleanly over every cell-* tint. */
@@ -603,6 +604,7 @@ header .actions .export-single a[aria-disabled="true"] {
 .queue .row .dot.partial { background: var(--partial); }
 .queue .row .dot.unsure { background: var(--unsure); }
 .queue .row .dot.skip { background: var(--skip); }
+.queue .row .dot.fn { background: var(--fn); }
 .queue .row .main .src { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .queue .row .main .cols { font-weight: 600; font-size: 12.5px; }
 .queue .row .main .types { font-size: 11px; color: var(--muted); margin-top: 1px; }
@@ -1247,10 +1249,11 @@ header .actions .export-single a[aria-disabled="true"] {
 .buttons button.partial { border-color: var(--partial); color: var(--partial); }
 .buttons button.unsure { border-color: var(--unsure); color: var(--unsure); }
 .buttons button.skip { border-color: var(--skip); color: var(--skip); }
+.buttons button.fn { border-color: var(--fn); color: var(--fn); }
 .buttons button.active { background: currentColor; }
 .buttons button.active.tp, .buttons button.active.fp,
 .buttons button.active.partial, .buttons button.active.unsure,
-.buttons button.active.skip { color: #0b1120; }
+.buttons button.active.skip, .buttons button.active.fn { color: #0b1120; }
 
 .field { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; font-size: 12px; }
 .field > span { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
@@ -2743,6 +2746,15 @@ footer.shortcuts {
 #identify-trivial-modal .trivial-preview-table .status-pill.fn { background: rgba(99, 102, 241, 0.18); color: rgb(79, 70, 229); }
 #identify-trivial-modal .trivial-preview-table .status-pill.partial { background: rgba(234, 179, 8, 0.18); color: rgb(202, 138, 4); }
 #identify-trivial-modal .trivial-preview-table .status-pill.unsure { background: rgba(156, 163, 175, 0.18); color: var(--muted); }
+#identify-trivial-modal .trivial-preview-table .rowdup-group {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--muted);
+}
+#identify-trivial-modal .trivial-preview-table .rowdup-group strong {
+  color: inherit;
+  font-weight: 700;
+}
 #identify-trivial-modal .trivial-empty {
   padding: 18px;
   text-align: center;

@@ -208,6 +208,91 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
             },
         }
 
+    @app.get("/api/runs/{run_id}/multi-table-groups")
+    def list_multi_table_groups(
+        run_id: str,
+        include_unconfirmed: bool = False,
+    ) -> Dict[str, Any]:
+        """Per-workbook view of the DISCOVERED RELATIONS.
+
+        Surfaces the resolver's ``multi_table_groups.jsonl`` so the
+        labeller can see, for each file, which CSVs we believe are
+        *unionable* (union groups = replica sheets sharing a schema/key)
+        and which are *joinable* (join groups = a parent->child foreign
+        key), independent of whether any row-level finding survived the
+        scope filter / guard. Each group carries a count of findings
+        still attached to it so a join with zero findings is visible.
+
+        Only **confirmed** relations are returned by default (what we
+        believe); discovery proposes many unconfirmed candidates that
+        would otherwise swamp the view. Pass ``include_unconfirmed=true``
+        to see candidates too. ``totals.unconfirmed`` always reports how
+        many were filtered out.
+        """
+        ctx = cache.get(run_id)
+        groups = _read_multi_table_groups(ctx.run_dir)
+        by_id, _rows = _read_multi_table_violations(ctx.run_dir)
+
+        n_find: Dict[Tuple[str, str], int] = {}
+        for _vid, rec in by_id.items():
+            key = (rec.get("workbook") or "", rec.get("group_id") or "")
+            n_find[key] = n_find.get(key, 0) + 1
+
+        per_wb: Dict[str, List[Dict[str, Any]]] = {}
+        n_union = n_join = n_unconfirmed = 0
+        for (wb, gid), g in groups.items():
+            confirmed = bool(g.get("confirmed", True))
+            if not confirmed:
+                n_unconfirmed += 1
+                if not include_unconfirmed:
+                    continue
+            kind = g.get("kind") or ""
+            join = g.get("join") or None
+            join_out = None
+            if isinstance(join, dict):
+                join_out = {
+                    "parent_sheet": join.get("parent_sheet"),
+                    "parent_columns": list(join.get("parent_columns") or []),
+                    "child_sheet": join.get("child_sheet"),
+                    "child_columns": list(join.get("child_columns") or []),
+                }
+            per_wb.setdefault(wb, []).append({
+                "group_id": gid,
+                "kind": kind,
+                "confirmed": confirmed,
+                "sheets": list(g.get("sheets") or []),
+                "primary_key": list(g.get("primary_key") or []),
+                "join": join_out,
+                "rationale": g.get("rationale") or "",
+                "n_findings": n_find.get((wb, gid), 0),
+            })
+            if kind == "union":
+                n_union += 1
+            elif kind == "join":
+                n_join += 1
+
+        workbooks: List[Dict[str, Any]] = []
+        for wb in sorted(per_wb):
+            gs = per_wb[wb]
+            gs.sort(key=lambda e: (e["kind"], e["group_id"]))
+            sheets = sorted({s for e in gs for s in e["sheets"]})
+            workbooks.append({
+                "workbook": wb,
+                "sheets": sheets,
+                "groups": gs,
+            })
+
+        return {
+            "workbooks": workbooks,
+            "totals": {
+                "workbooks": len(workbooks),
+                "union": n_union,
+                "join": n_join,
+                "groups": n_union + n_join,
+                "unconfirmed": n_unconfirmed,
+            },
+        }
+
     @app.get("/api/runs/{run_id}/multi-table-violations/{violation_id}")
     def get_multi_table_violation(
         run_id: str, violation_id: str,

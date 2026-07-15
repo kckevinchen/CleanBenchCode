@@ -31,6 +31,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
@@ -184,6 +185,157 @@ def _format_sibling_values(values: Sequence[str]) -> str:
     if not values:
         return "  (none)"
     return "\n".join(f"  - {v}" for v in values)
+
+
+# Error types whose entire premise is that the suspect is a *small edit*
+# of one canonical string (typo / formatting / casing variants). For
+# these, a verified ``confirmed_error`` correction MUST be a near-edit of
+# the suspect value; if the agent's canonical is a different entity that
+# merely shares some words, the web found a look-alike rather than the
+# corrected form and the flag is a false positive.
+_EDIT_SCALE_ERROR_TYPES = frozenset({
+    "typo",
+    "casing_inconsistency",
+    "pattern_inconsistency",
+    "punctuation_inconsistency",
+    "number_format_inconsistency",
+    "text_inconsistency",
+    "inconsistency",
+    "spelling",
+})
+
+# Error types where a large suspect->canonical rewrite is legitimate (the
+# correct value can be wholly unrelated to the suspect), so the distinct-
+# entity guard must NOT fire for them.
+_EXPANSIVE_ERROR_TYPES = frozenset({
+    "semantic_incompatible",
+    "numeric_outlier",
+})
+
+# Short function words ignored when counting "brand new" content words
+# between a suspect and its proposed canonical correction.
+_SIMILARITY_STOPWORDS = frozenset({
+    "a", "an", "the", "of", "and", "or", "in", "on", "at", "to", "for",
+    "by", "with", "is", "are", "as", "from", "into",
+})
+
+
+def _normalize_for_similarity(value: str) -> str:
+    """Lower-case + NFKC + collapse whitespace for similarity scoring."""
+    import unicodedata
+
+    norm = unicodedata.normalize("NFKC", value or "")
+    return " ".join(norm.lower().split())
+
+
+def _similarity_tokens(value: str) -> List[str]:
+    """Split ``value`` into alphanumeric tokens (hyphens are separators)."""
+    return [t for t in re.split(r"[^0-9a-z]+", value) if t]
+
+
+def _looks_like_distinct_entity(suspect: str, canonical: str) -> bool:
+    """True when ``canonical`` is too different from ``suspect`` to be a
+    typo-scale correction - i.e. the web most likely surfaced a *similar
+    but distinct* entity rather than the suspect's corrected spelling.
+
+    A genuine typo / formatting fix preserves almost the whole string and
+    changes at most a token or two (e.g. ``"Calavares COE"`` ->
+    ``"Calaveras COE"``). A look-alike entity introduces multiple brand-
+    new content words (e.g. ``"The Dougla Body: ... Blackness"`` ->
+    ``"Dougla Poetics: ... Mixedness in Trinidad"``). We combine a char-
+    level similarity ratio with a count of content words in the canonical
+    that have no near-match token in the suspect; both must indicate a
+    large divergence before we declare a distinct entity, so genuine
+    multi-word typo fixes are not downgraded.
+    """
+    sn = _normalize_for_similarity(suspect)
+    cn = _normalize_for_similarity(canonical)
+    if not sn or not cn or sn == cn:
+        return False
+
+    ratio = SequenceMatcher(None, sn, cn).ratio()
+
+    suspect_tokens = _similarity_tokens(sn)
+    new_content_words = 0
+    for tok in _similarity_tokens(cn):
+        if tok in _SIMILARITY_STOPWORDS or len(tok) <= 2:
+            continue
+        if any(
+            SequenceMatcher(None, tok, s).ratio() >= 0.70
+            for s in suspect_tokens
+        ):
+            continue
+        new_content_words += 1
+
+    # Wholesale rewrite (little char overlap) -> distinct entity.
+    if ratio < 0.55:
+        return True
+    # Otherwise require BOTH a sub-threshold char ratio AND >=2 brand-new
+    # content words so single-token typo fixes (which keep a high ratio
+    # and add at most one "new" token) are never downgraded.
+    return ratio < 0.90 and new_content_words >= 2
+
+
+def _content_tokens_cased(value: str) -> List[str]:
+    """Alphanumeric tokens with case PRESERVED (NFKC, no lower-casing).
+
+    The vacuous-correction guard must distinguish a real spelling/casing
+    change (``"iphone"`` -> ``"iPhone"``) from a pure reorder/reformat, so
+    unlike :func:`_similarity_tokens` it does NOT fold case.
+    """
+    import unicodedata
+
+    norm = unicodedata.normalize("NFKC", value or "")
+    return [t for t in re.split(r"[^0-9A-Za-z]+", norm) if t]
+
+
+def _is_vacuous_correction(suspect: str, canonical: str) -> bool:
+    """True when a ``confirmed_error`` canonical does not actually correct
+    any token's spelling - it only reorders, drops, or reformats tokens
+    the suspect already contains (or echoes the suspect verbatim).
+
+    For an edit-scale / typo verdict this is self-contradictory: the agent
+    says "this value is misspelled" yet its canonical keeps every flagged
+    word unchanged. Real example::
+
+        suspect   = "STOCKROOM - TOCKWOTTEN ST 271"
+        canonical = "271 TOCKWOTTEN ST"   # drop + reorder; TOCKWOTTEN kept
+
+    The canonical drops "STOCKROOM" and moves "271", but every word it
+    keeps ("271", "TOCKWOTTEN", "ST") is byte-identical to the suspect, so
+    NO spelling was corrected - the confirmed_error verdict contradicts
+    its own canonical.
+
+    Does NOT trigger when a token's spelling actually changed
+    ("Calavares" -> "Calaveras"), nor for a casing fix ("iphone" ->
+    "iPhone", which differs case-sensitively), nor for an order-preserving
+    whitespace/format normalisation (same tokens in the same order).
+    """
+    import unicodedata
+
+    # Verbatim echo: the canonical is literally the suspect (NFKC only,
+    # case + whitespace preserved so a casing / whitespace fix is NOT
+    # mistaken for an echo).
+    s_keep = unicodedata.normalize("NFKC", suspect or "")
+    c_keep = unicodedata.normalize("NFKC", canonical or "")
+    if not s_keep or not c_keep:
+        return False
+    if s_keep == c_keep:
+        return True
+
+    s_tokens = _content_tokens_cased(suspect)
+    c_tokens = _content_tokens_cased(canonical)
+    if not s_tokens or not c_tokens:
+        return False
+    # Same tokens in the same order => only whitespace/punctuation
+    # changed: a legitimate reformat, not a contradiction.
+    if c_tokens == s_tokens:
+        return False
+    # Every canonical token already appears VERBATIM (case-sensitive) in
+    # the suspect => the canonical introduced no corrected spelling; it
+    # merely reordered / dropped existing tokens.
+    s_set = set(s_tokens)
+    return all(t in s_set for t in c_tokens)
 
 
 def _cache_key(cluster_id: str, prompt: str) -> str:
@@ -1023,6 +1175,95 @@ class Verifier:
             ver.parse_error = (ver.parse_error or "") + (
                 "; downgraded to ambiguous: no evidence URLs survived"
             ).lstrip("; ")
+
+        # Distinct-entity guard for edit-scale defects (typo / formatting
+        # / casing). When the agent "confirms" an error but its canonical
+        # value is a different entity that merely resembles the suspect
+        # (e.g. suspect "The Dougla Body: ... Blackness" -> canonical
+        # "Dougla Poetics: ... Mixedness in Trinidad"), the web surfaced a
+        # look-alike rather than the corrected spelling. A typo correction
+        # must be a near-edit of the suspect; a distinct entity means the
+        # original value is most likely a legitimate, different value, so
+        # the detector flag is a false positive. We only apply this to
+        # single-cell edit-scale error types and never to defect classes
+        # where a large rewrite is expected (semantic_incompatible /
+        # numeric_outlier).
+        if (
+            pattern == "single_cell"
+            and ver.verdict == "confirmed_error"
+            and ver.canonical_value
+            and suspect_value_for_record
+        ):
+            et_lower = {str(t).strip().lower() for t in et_list}
+            scoped = bool(et_lower & _EDIT_SCALE_ERROR_TYPES) and not (
+                et_lower & _EXPANSIVE_ERROR_TYPES
+            )
+            if scoped and _looks_like_distinct_entity(
+                suspect_value_for_record, ver.canonical_value
+            ):
+                rejected_canonical = ver.canonical_value
+                ver.verdict = "false_positive"
+                ver.canonical_value = None
+                ver.canonical_record = None
+                # FP confidence = certainty the suspect is correct. This is
+                # a heuristic override, not positive web confirmation, so
+                # cap it at a moderate level rather than carrying over the
+                # agent's (now-inapplicable) confirmed_error confidence.
+                ver.confidence = min(ver.confidence, 0.5)
+                ver.reasoning = (
+                    (ver.reasoning or "").strip()
+                    + (
+                        " [Automated review: the proposed correction "
+                        f"{rejected_canonical!r} is a different entity than "
+                        "the flagged value (not a small spelling/format "
+                        "edit), so the value is treated as correct as "
+                        "written rather than a typo.]"
+                    )
+                ).strip()
+                ver.parse_error = (ver.parse_error or "") + (
+                    "; downgraded to false_positive: canonical "
+                    f"{rejected_canonical!r} is a distinct entity from "
+                    f"suspect {suspect_value_for_record!r}, not a "
+                    "typo-scale correction"
+                ).lstrip("; ")
+            elif scoped and _is_vacuous_correction(
+                suspect_value_for_record, ver.canonical_value
+            ):
+                # Self-contradictory verdict: confirmed_error, but the
+                # canonical does not change any token's spelling - it only
+                # reorders / drops / reformats words the suspect already
+                # contains (e.g. suspect "STOCKROOM - TOCKWOTTEN ST 271"
+                # -> canonical "271 TOCKWOTTEN ST", which keeps the flagged
+                # "TOCKWOTTEN" verbatim). The agent confirmed an error its
+                # own canonical fails to correct, so we cannot trust either
+                # direction -> ambiguous (needs a human), canonical
+                # cleared. We do NOT assert false_positive here: the
+                # flagged spelling might still be a real typo (the web
+                # evidence may even support it), the agent just produced an
+                # inconsistent canonical.
+                rejected_canonical = ver.canonical_value
+                ver.verdict = "ambiguous"
+                ver.canonical_value = None
+                ver.canonical_record = None
+                # Ambiguous confidence must stay in [0, 0.49] per the
+                # prompt's calibration contract.
+                ver.confidence = min(ver.confidence, 0.49)
+                ver.reasoning = (
+                    (ver.reasoning or "").strip()
+                    + (
+                        " [Automated review: the proposed correction "
+                        f"{rejected_canonical!r} does not change the "
+                        "spelling of the flagged value (it only reorders / "
+                        "drops / reformats words it already contains), so "
+                        "the confirmed_error verdict is inconclusive.]"
+                    )
+                ).strip()
+                ver.parse_error = (ver.parse_error or "") + (
+                    "; downgraded to ambiguous: canonical "
+                    f"{rejected_canonical!r} does not correct any token of "
+                    f"suspect {suspect_value_for_record!r} (vacuous "
+                    "reorder/reformat, not a spelling fix)"
+                ).lstrip("; ")
 
         return ver
 

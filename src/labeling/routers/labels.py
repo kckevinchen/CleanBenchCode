@@ -154,6 +154,22 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
                     payload.source, payload.column, local_id,
                 ),
             })
+            # Preserve operator-saved per-value corrections. A verdict
+            # POST carries only the verdict fields, so without this an
+            # operator who re-affirms or changes a column-cluster verdict
+            # AFTER saving corrections would clobber them: the new record
+            # becomes the latest and ``LabelIn.value_corrections``
+            # defaults to ``{}``. Inherit the latest saved mapping when
+            # the incoming payload didn't set one (mirrors
+            # ``save_cluster_corrections``, which preserves the verdict).
+            # Operators clear corrections explicitly via the corrections
+            # endpoint, so an empty incoming mapping never *means* clear.
+            if not payload.value_corrections:
+                prev = ctx.store.latest_for(payload.target_id)
+                if prev is not None and prev.value_corrections:
+                    payload = payload.model_copy(update={
+                        "value_corrections": dict(prev.value_corrections),
+                    })
         else:  # CELL
             # Cell labels carry FN (false negative). Require the same
             # (source, row, column) triple in the payload so the

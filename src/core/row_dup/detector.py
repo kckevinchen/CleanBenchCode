@@ -598,6 +598,12 @@ class RowDuplicationDetector:
         self.taxonomy = taxonomy
         self.model = model
         self.settings = settings
+        # Per-CSV Good-Turing arms collected during a ``whole_table`` run
+        # (one InnerLoopResult per source). The caller drains this after
+        # ``run()`` and writes it to good_turing/per_arm_estimates.json so
+        # whole_table row_duplication reports per-CSV saturation like the
+        # other adaptive types. Stays empty for collision_adjudication.
+        self.whole_table_arms: List[Dict[str, Any]] = []
         self.digests = dict(digests or {})
         self.reasoning_effort = reasoning_effort
         self.reasoning_summary = reasoning_summary
@@ -1184,6 +1190,29 @@ class RowDuplicationDetector:
             base["adaptive_stopped_reason"] = result.stopped_reason
             merged.append(base)
         report.issues = merged
+        # Record this source's Good-Turing saturation as one per-CSV arm.
+        # ``status`` mirrors the per-chunk / column-clustering schema:
+        # the loop stopped either because a saturation criterion fired
+        # (gt / chao1 / both / two_consecutive) -> "saturated", or because
+        # it spent its budget ("k_max") -> "exhausted".
+        if result.runs_completed > 0:
+            n_species = len(result.species_to_runs)
+            self.whole_table_arms.append({
+                "scope_kind": "row_duplication",
+                "scope_id": str(source),
+                "error_type": _ROW_DUPLICATION_KEY,
+                "runs_completed": result.runs_completed,
+                "num_runs": result.runs_completed,
+                "stopped_reason": result.stopped_reason,
+                "status": (
+                    "exhausted" if result.stopped_reason == "k_max"
+                    else "saturated"
+                ),
+                "n_observed": n_species,
+                "n_species_observed": n_species,
+                "good_turing_missing_mass": result.gt_missing_mass,
+                "chao1_estimated_missed": result.chao1_missed,
+            })
         return [report]
 
     def _whole_table_once(

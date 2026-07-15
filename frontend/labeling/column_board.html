@@ -14,7 +14,7 @@
        the first paint is at the right scale. -->
   <script src="./viewport-zoom.js"></script>
   <link rel="stylesheet" href="./styles.css" />
-  <link rel="stylesheet" href="./column_board.css?v=5" />
+  <link rel="stylesheet" href="./column_board.css?v=7" />
 </head>
 <body>
   <header>
@@ -95,13 +95,25 @@
 
   <section class="detail" id="detail">
     <h2>Distinct values</h2>
-    <p class="cb-help muted">All non-empty values in this column. Pick 2+ to add a missed cluster the LLM didn't propose.</p>
+    <p class="cb-help muted">All non-empty values in this column. Pick 2+ to add a missed cluster the LLM didn't propose — or click <strong>⚑</strong> on a single value to flag it as a missed inconsistency (FN) and type its corrected value.</p>
     <input id="cb-value-search" type="text" placeholder="filter values…" autocomplete="off" />
     <div class="cb-value-list" id="cb-value-list">(no column selected)</div>
     <div class="cb-value-actions" hidden id="cb-value-actions">
       <span id="cb-selected-count" class="muted">0 selected</span>
       <button type="button" id="cb-make-cluster" class="primary">Make cluster from selection</button>
       <button type="button" id="cb-clear-selection" class="ghost">Clear</button>
+    </div>
+
+    <!-- Flagged-as-missed (FN) list. Each entry is a single value the
+         operator marked as a missed inconsistency with a typed fix;
+         it persists immediately as per-row cell FN labels tagged
+         error_types=["inconsistency"] (no cluster needed), so it works
+         when the correct value isn't present in the column or only one
+         variant exists. -->
+    <h2 class="cb-fn-title">Flagged as missed (FN)</h2>
+    <p class="cb-help muted">Single values the LLM missed — e.g. a misspelling whose correct form isn't in the column. Flagging marks every row holding that value as an inconsistency FN with your fix and feeds the inconsistency benchmark. No Save needed.</p>
+    <div class="cb-fn-list" id="cb-fn-list">
+      <div class="muted cb-fn-empty">No values flagged as missed yet. Click ⚑ next to a value to flag it and set its corrected value.</div>
     </div>
 
     <h2 class="cb-verdict-title">Verdict</h2>
@@ -140,6 +152,6 @@
 
   <div class="toast" id="toast" hidden></div>
 
-  <script src="./column_board.js?v=6" type="module"></script>
+  <script src="./column_board.js?v=9" type="module"></script>
 </body>
 </html>

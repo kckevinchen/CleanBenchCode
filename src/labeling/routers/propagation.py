@@ -8,55 +8,579 @@ the human only has to rule once.
 
 from __future__ import annotations
 
-import re
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
 from fastapi import Body, FastAPI, HTTPException
 
 from .. import phone_format
-from .._helpers import _scalar
+from .._helpers import _has_whitespace_anomaly, _normalize_trivial, _scalar
 from ..schema import Label, LabelStatus, LabelTarget, cell_target_id
 from ._context import RouterContext
 
 
-# Cells that carry a trivial-cosmetic anomaly. Used by the
-# ``tag-trivial-whitespace`` endpoint to decide which existing labels
-# should get a ``TRIVIAL`` note tag. Bundles:
-#   1. /^[ ]|[ ]$|[ ]{2,}/   -- edge or 2+ internal ASCII spaces.
-#   2. /[\t\u00A0\n\r\u2028\u2029\u200B\u200C\u200D\u00AD\uFEFF]/
-#      -- tab, NBSP, line breaks, zero-width chars, soft hyphen, BOM.
-#   3. /,[A-Za-z]/           -- missing space after a comma
-#                               (e.g. ``Gas,Oil``, ``HOME,LLC``).
-#                               Bypasses decimals like ``1,234``.
-#   4. / [)\]}]/             -- single space before a closing bracket
-#                               (e.g. ``Trust )``).
-#   5. /'S(?=\W|$)/          -- capital ``S`` immediately after an
-#                               apostrophe at word boundary
-#                               (e.g. ``Defender'S Office`` ->
-#                               ``Defender's``).
-#   6. /\s=\S|\S=\s/         -- ``=`` with whitespace on only one
-#                               side (e.g. ``1 lb =16``).
-# The ``has-ws`` class in ``frontend/labeling/label.js`` still uses
-# only (1)+(2) for the CSV-viewer red-underline; this regex is
-# specifically the trivial-tagger rule and is mirrored in
-# ``label.js`` as ``_WS_MARKER_RE``. Kept narrower in
-# ``experiments/auto_label_whitespace_anomalies.py`` (which creates
-# new labels rather than tagging existing ones).
-_WHITESPACE_ANOMALY_RE = re.compile(
-    r"^ | $|  +"
-    r"|[\t\u00A0\n\r\u2028\u2029\u200B\u200C\u200D\u00AD\uFEFF]"
-    r"|,[A-Za-z]"
-    r"| [)\]}]"
-    r"|'S(?=\W|$)"
-    r"|\s=\S|\S=\s"
-)
+# ``_has_whitespace_anomaly`` (the strict whitespace-only rule) and
+# ``_normalize_trivial`` (its deterministic fix) live in ``_helpers`` so
+# the benchmark exporter can reuse them; they're imported above. Re-exported
+# here for callers/tests that import them from this module.
+
+# Note stamped on labels CREATED by the dataset scan (vs the bare
+# " TRIVIAL" appended to an existing operator note). Carries the TRIVIAL
+# token the benchmark exporter filters on, plus provenance.
+_TRIVIAL_CREATE_NOTE = "(auto: spacing anomaly) TRIVIAL"
+
+# Cluster verdicts that mean "this is a real error". Only these get a
+# TRIVIAL tag; an fp / unsure / skip verdict is the operator saying it is
+# NOT an error, so the scan leaves it alone.
+_POSITIVE_STATUSES = (LabelStatus.TP, LabelStatus.PARTIAL, LabelStatus.FN)
+
+# Cap on how many candidate rows the dry-run preview returns. The write
+# phase rebuilds the full set server-side, so capping the wire payload
+# never drops a write -- it only bounds the preview table.
+_CANDIDATE_PREVIEW_CAP = 800
 
 
-def _has_whitespace_anomaly(value: str) -> bool:
-    if not value:
-        return False
-    return _WHITESPACE_ANOMALY_RE.search(value) is not None
+def _scan_dataset_for_trivial(
+    ctx: Any, *, source_filter: Optional[str], dry_run: bool, ann: str,
+) -> Dict[str, Any]:
+    """Walk every cell of every (optionally filtered) source and act on
+    each spacing-rule anomaly, mirroring
+    ``experiments/auto_label_whitespace_anomalies.py`` in-process:
+
+      * cell covered by a cluster
+          - cluster already carries a positive verdict (tp/partial/fn)
+            -> append ``TRIVIAL`` to its note (unless already tagged);
+          - cluster has a NEGATIVE verdict (fp/unsure/skip)
+            -> leave it (the operator said it is not an error);
+          - cluster unlabelled -> create a TP verdict + ``TRIVIAL``.
+      * cell NOT covered by any cluster
+          - an existing positive cell label -> tag ``TRIVIAL``;
+          - a negative (fp) cell label -> leave it;
+          - no label -> create an FN cell label + ``TRIVIAL``.
+
+    Creations carry the mechanically-normalised value as the fix.
+    Idempotent: a re-run finds the ``TRIVIAL`` note and skips.
+    """
+    # (row, column) -> cluster ids covering it. A cluster covers its anchor
+    # row's columns plus every detection's affected_rows (same as the
+    # propagate-same-value coverage set), so multi-row clusters block their
+    # own siblings from being mislabelled as uncovered FNs.
+    cluster_by_loc: Dict[tuple, List[str]] = {}
+    cluster_by_id: Dict[str, Dict[str, Any]] = {}
+    for c in ctx.clusters:
+        src = c.get("source")
+        cid = c.get("cluster_id")
+        if not src or not isinstance(cid, str):
+            continue
+        cluster_by_id[cid] = c
+        cols = [x for x in (c.get("columns") or []) if isinstance(x, str)]
+        r = c.get("row")
+        if isinstance(r, int):
+            for col in cols:
+                cluster_by_loc.setdefault((src, r, col), []).append(cid)
+        for det in (c.get("detections") or ()):
+            det_cols = [
+                x for x in (det.get("columns") or cols) if isinstance(x, str)
+            ]
+            for ar in (det.get("affected_rows") or ()):
+                if isinstance(ar, int):
+                    for col in det_cols:
+                        cluster_by_loc.setdefault((src, ar, col), []).append(cid)
+
+    latest = ctx.store.latest_by_target()
+    cell_label_by_loc: Dict[tuple, Any] = {}
+    for lab in latest.values():
+        if (lab.target == LabelTarget.CELL and lab.source
+                and lab.row is not None and lab.column):
+            cell_label_by_loc[(lab.source, int(lab.row), lab.column)] = lab
+
+    sources_to_scan = (
+        [source_filter] if source_filter is not None else list(ctx.sources)
+    )
+
+    candidates: List[Dict[str, Any]] = []
+    cells_scanned = 0
+    anomaly_cells = 0
+    skipped_already_tagged = 0
+    skipped_negative_verdict = 0
+    seen_cluster_ids: set = set()
+
+    def _add(target, target_id, src, row, col, value, status, note, action,
+             corrected=None):
+        candidates.append({
+            "target_id": target_id,
+            "target": target,
+            "source": src,
+            "row": row,
+            "column": col,
+            "columns": [col],
+            "ws_hits": [{"column": col, "value": value}],
+            "status": status,
+            "current_note": note,
+            "already_tagged": action == "already_tagged",
+            "action": action,
+            "corrected_value": corrected,
+        })
+
+    for src in sources_to_scan:
+        try:
+            frame = ctx.load_frame(src)
+        except (FileNotFoundError, KeyError):
+            continue
+        n = len(frame)
+        for loc, col_obj in enumerate(frame.columns):
+            col = str(col_obj)
+            series = frame.iloc[:, loc].tolist()
+            for row_int in range(n):
+                cells_scanned += 1
+                v = _scalar(series[row_int])
+                if not _has_whitespace_anomaly(v):
+                    continue
+                anomaly_cells += 1
+                fixed = _normalize_trivial(v)
+                cids = cluster_by_loc.get((src, row_int, col)) or []
+                if cids:
+                    cid = cids[0]
+                    if cid in seen_cluster_ids:
+                        continue
+                    seen_cluster_ids.add(cid)
+                    existing = latest.get(cid)
+                    if (existing is not None
+                            and existing.target == LabelTarget.CLUSTER):
+                        if existing.status not in _POSITIVE_STATUSES:
+                            skipped_negative_verdict += 1
+                            continue
+                        note = existing.note or ""
+                        if "TRIVIAL" in note.upper():
+                            skipped_already_tagged += 1
+                            _add("cluster", cid, src, row_int, col, v,
+                                 existing.status.value, note, "already_tagged")
+                            continue
+                        _add("cluster", cid, src, row_int, col, v,
+                             existing.status.value, note, "tag")
+                    else:
+                        _add("cluster", cid, src, row_int, col, v,
+                             "tp", "", "create_tp", corrected=fixed)
+                else:
+                    existing = cell_label_by_loc.get((src, row_int, col))
+                    if existing is not None:
+                        if existing.status not in _POSITIVE_STATUSES:
+                            skipped_negative_verdict += 1
+                            continue
+                        note = existing.note or ""
+                        if "TRIVIAL" in note.upper():
+                            skipped_already_tagged += 1
+                            _add("cell", existing.target_id, src, row_int,
+                                 col, v, existing.status.value, note,
+                                 "already_tagged")
+                            continue
+                        _add("cell", existing.target_id, src, row_int, col,
+                             v, existing.status.value, note, "tag")
+                    else:
+                        tid = cell_target_id(src, row_int, col)
+                        _add("cell", tid, src, row_int, col, v,
+                             "fn", "", "create_fn", corrected=fixed)
+
+    # Stable preview order: by (source, row, column, action).
+    candidates.sort(
+        key=lambda c: (c["source"], c["row"], c["column"], c["action"])
+    )
+
+    to_tag = sum(1 for c in candidates if c["action"] == "tag")
+    to_create_tp = sum(1 for c in candidates if c["action"] == "create_tp")
+    to_create_fn = sum(1 for c in candidates if c["action"] == "create_fn")
+
+    tagged = 0
+    created_tp = 0
+    created_fn = 0
+    if not dry_run:
+        batch: List[Label] = []
+        for c in candidates:
+            act = c["action"]
+            if act == "tag":
+                lab = latest[c["target_id"]]
+                new_note = (
+                    (lab.note + " TRIVIAL").strip() if lab.note else "TRIVIAL"
+                )
+                batch.append(Label(
+                    target=lab.target,
+                    target_id=lab.target_id,
+                    source=lab.source,
+                    row=lab.row,
+                    column=lab.column,
+                    columns=list(lab.columns) if lab.columns else [],
+                    status=lab.status,
+                    corrected_value=lab.corrected_value,
+                    corrected_values=(
+                        dict(lab.corrected_values) if lab.corrected_values else {}
+                    ),
+                    confirmed_canonical=lab.confirmed_canonical,
+                    value_corrections=(
+                        dict(lab.value_corrections) if lab.value_corrections else {}
+                    ),
+                    note=new_note,
+                    annotator=ann,
+                ))
+                tagged += 1
+            elif act == "create_tp":
+                rec = cluster_by_id.get(c["target_id"], {})
+                cols = [
+                    x for x in (rec.get("columns") or [c["column"]])
+                    if isinstance(x, str)
+                ] or [c["column"]]
+                rrow = rec.get("row")
+                batch.append(Label(
+                    target=LabelTarget.CLUSTER,
+                    target_id=c["target_id"],
+                    source=c["source"],
+                    row=int(rrow) if isinstance(rrow, int) else c["row"],
+                    column=cols[0],
+                    columns=cols,
+                    status=LabelStatus.TP,
+                    corrected_value=c["corrected_value"],
+                    note=_TRIVIAL_CREATE_NOTE,
+                    annotator=ann,
+                ))
+                created_tp += 1
+            elif act == "create_fn":
+                batch.append(Label(
+                    target=LabelTarget.CELL,
+                    target_id=c["target_id"],
+                    source=c["source"],
+                    row=c["row"],
+                    column=c["column"],
+                    columns=[c["column"]],
+                    status=LabelStatus.FN,
+                    corrected_value=c["corrected_value"],
+                    note=_TRIVIAL_CREATE_NOTE,
+                    annotator=ann,
+                ))
+                created_fn += 1
+        if batch:
+            ctx.store.append_many(batch)
+
+    preview = candidates[:_CANDIDATE_PREVIEW_CAP]
+    return {
+        "dry_run": dry_run,
+        "scan_dataset": True,
+        "cells_scanned": cells_scanned,
+        "anomaly_cells": anomaly_cells,
+        "scanned": cells_scanned,
+        "to_tag": to_tag,
+        "to_create_tp": to_create_tp,
+        "to_create_fn": to_create_fn,
+        "to_write": to_tag + to_create_tp + to_create_fn,
+        "tagged": tagged,
+        "created_tp": created_tp,
+        "created_fn": created_fn,
+        "skipped_already_tagged": skipped_already_tagged,
+        "skipped_negative_verdict": skipped_negative_verdict,
+        "skipped_no_value": 0,
+        "candidates": preview,
+        "candidates_truncated": len(candidates) > len(preview),
+    }
+
+
+# Note stamped on row-duplication labels CREATED by the exact-duplicate
+# scan (vs the bare " TRIVIAL" appended to an existing operator note).
+# Carries the TRIVIAL token the benchmark exporter filters on.
+_TRIVIAL_DUP_CREATE_NOTE = "(auto: exact-duplicate row) TRIVIAL"
+
+# row_duplication clusters are the only ones whose ``affected_rows`` we
+# treat as a duplicate group; other multi-row types (FD / calc / cross-
+# table) flag rows for a different reason, so an exact-value match there
+# is not a "trivial duplicate".
+_ROW_DUP_TYPE = "row_duplication"
+
+
+def _row_signatures(frame: "pd.DataFrame") -> tuple:
+    """Return ``(sig_by_row, sig_counts)`` for a frame.
+
+    ``sig_by_row[r]`` is the full-row signature: a tuple of every
+    column's ``_scalar``-coerced value, so two rows share a signature
+    iff they are byte-identical across ALL columns (a "completely
+    identical" / exact-duplicate row). ``sig_counts[sig]`` is how many
+    rows carry that signature; ``>= 2`` means the row is part of an
+    exact-duplicate group.
+    """
+    n = len(frame)
+    # Column-major scalarisation: one ``.tolist()`` per column is far
+    # cheaper than per-cell ``.iat`` on a wide frame.
+    col_values = [frame.iloc[:, i].tolist() for i in range(frame.shape[1])]
+    sig_by_row: List[tuple] = []
+    sig_counts: Dict[tuple, int] = {}
+    for r in range(n):
+        sig = tuple(_scalar(col_values[c][r]) for c in range(len(col_values)))
+        sig_by_row.append(sig)
+        sig_counts[sig] = sig_counts.get(sig, 0) + 1
+    return sig_by_row, sig_counts
+
+
+def _scan_dataset_for_row_duplication(
+    ctx: Any, *, source_filter: Optional[str], dry_run: bool, ann: str,
+) -> Dict[str, Any]:
+    """Auto-tag every *completely identical* (exact-duplicate) row group
+    ``TRIVIAL``, mirroring :func:`_scan_dataset_for_trivial` but for the
+    row-level ``row_duplication`` error type.
+
+    A row is a trivial duplicate when another row in the same source is
+    byte-identical across EVERY column. For each such group:
+
+      * the group is covered by a ``row_duplication`` cluster whose
+        ``affected_rows`` are themselves all byte-identical (i.e. the
+        LLM flagged this exact duplicate)
+          - cluster already carries a positive verdict (tp/partial/fn)
+            -> append ``TRIVIAL`` to its note (unless already tagged);
+          - cluster has a NEGATIVE verdict (fp/unsure/skip)
+            -> leave it (the operator said it is not a duplicate);
+          - cluster unlabelled -> create a TP verdict + ``TRIVIAL``.
+      * a duplicate row NOT covered by any ``row_duplication`` cluster
+        (the LLM missed it)
+          - an existing positive row-level cell label -> tag ``TRIVIAL``;
+          - a negative (fp) row-level cell label -> leave it;
+          - no label -> create a row-level FN cell label + ``TRIVIAL``.
+
+    Row-level FN labels carry ``column=""`` (the same sentinel the
+    benchmark exporter uses for ``row_duplication`` cluster verdicts).
+    Idempotent: a re-run finds the ``TRIVIAL`` note and skips.
+    """
+    # (source, row) -> covering row_duplication cluster ids. A cluster
+    # covers its anchor row plus every detection's affected_rows.
+    cluster_by_row: Dict[tuple, List[str]] = {}
+    cluster_by_id: Dict[str, Dict[str, Any]] = {}
+    # cid -> sorted list of every row the cluster touches.
+    cluster_rows: Dict[str, List[int]] = {}
+    for c in ctx.clusters:
+        src = c.get("source")
+        cid = c.get("cluster_id")
+        if not src or not isinstance(cid, str):
+            continue
+        if _ROW_DUP_TYPE not in (c.get("error_types") or ()):
+            continue
+        cluster_by_id[cid] = c
+        rows: set = set()
+        r = c.get("row")
+        if isinstance(r, int):
+            rows.add(r)
+        for det in (c.get("detections") or ()):
+            for ar in (det.get("affected_rows") or ()):
+                if isinstance(ar, int):
+                    rows.add(ar)
+        cluster_rows[cid] = sorted(rows)
+        for rr in rows:
+            cluster_by_row.setdefault((src, rr), []).append(cid)
+
+    latest = ctx.store.latest_by_target()
+    # Existing ROW-LEVEL cell labels (column empty) keyed by (source,row).
+    cell_label_by_loc: Dict[tuple, Any] = {}
+    for lab in latest.values():
+        if (lab.target == LabelTarget.CELL and lab.source
+                and lab.row is not None and not lab.column):
+            cell_label_by_loc[(lab.source, int(lab.row))] = lab
+
+    sources_to_scan = (
+        [source_filter] if source_filter is not None else list(ctx.sources)
+    )
+
+    # Per-source row-signature cache so a source frame is hashed once.
+    sig_cache: Dict[str, tuple] = {}
+
+    def _sigs(src: str) -> tuple:
+        if src not in sig_cache:
+            sig_cache[src] = _row_signatures(ctx.load_frame(src))
+        return sig_cache[src]
+
+    candidates: List[Dict[str, Any]] = []
+    rows_scanned = 0
+    dup_rows = 0
+    dup_groups = 0
+    skipped_already_tagged = 0
+    skipped_negative_verdict = 0
+
+    def _add(target, target_id, src, row, group_rows, status, note, action):
+        candidates.append({
+            "target_id": target_id,
+            "target": target,
+            "source": src,
+            "row": row,
+            "group_rows": list(group_rows),
+            "group_size": len(group_rows),
+            "status": status,
+            "current_note": note,
+            "already_tagged": action == "already_tagged",
+            "action": action,
+        })
+
+    # ---- Pass 1: row_duplication clusters whose affected_rows form an
+    # exact-duplicate group (the LLM-found trivial duplicates).
+    for cid, rows in cluster_rows.items():
+        rec = cluster_by_id[cid]
+        src = rec.get("source")
+        if source_filter is not None and src != source_filter:
+            continue
+        if len(rows) < 2:
+            continue
+        try:
+            sig_by_row, _counts = _sigs(src)
+        except (FileNotFoundError, KeyError):
+            continue
+        n = len(sig_by_row)
+        if any(not (0 <= r < n) for r in rows):
+            continue
+        # Trivial iff every affected row shares ONE full-row signature.
+        if len({sig_by_row[r] for r in rows}) != 1:
+            continue
+        anchor = rec.get("row")
+        anchor = anchor if isinstance(anchor, int) else rows[0]
+        existing = latest.get(cid)
+        if existing is not None and existing.target == LabelTarget.CLUSTER:
+            if existing.status not in _POSITIVE_STATUSES:
+                skipped_negative_verdict += 1
+                continue
+            note = existing.note or ""
+            if "TRIVIAL" in note.upper():
+                skipped_already_tagged += 1
+                _add("cluster", cid, src, anchor, rows,
+                     existing.status.value, note, "already_tagged")
+                continue
+            _add("cluster", cid, src, anchor, rows,
+                 existing.status.value, note, "tag")
+        else:
+            _add("cluster", cid, src, anchor, rows, "tp", "", "create_tp")
+
+    # ---- Pass 2: exact-duplicate rows NOT covered by any
+    # row_duplication cluster (the LLM-missed trivial duplicates -> FN).
+    for src in sources_to_scan:
+        try:
+            sig_by_row, sig_counts = _sigs(src)
+        except (FileNotFoundError, KeyError):
+            continue
+        n = len(sig_by_row)
+        rows_scanned += n
+        # Group rows by signature so the preview can show the full
+        # duplicate set each FN row belongs to.
+        rows_by_sig: Dict[tuple, List[int]] = {}
+        for r in range(n):
+            rows_by_sig.setdefault(sig_by_row[r], []).append(r)
+        for sig, group in rows_by_sig.items():
+            if len(group) < 2:
+                continue
+            dup_groups += 1
+            dup_rows += len(group)
+            for r in group:
+                if (src, r) in cluster_by_row:
+                    # Covered by a row_duplication cluster: handled in
+                    # pass 1 (or deliberately left for manual review on
+                    # a conflicting cluster). Never double-label here.
+                    continue
+                existing = cell_label_by_loc.get((src, r))
+                if existing is not None:
+                    if existing.status not in _POSITIVE_STATUSES:
+                        skipped_negative_verdict += 1
+                        continue
+                    note = existing.note or ""
+                    if "TRIVIAL" in note.upper():
+                        skipped_already_tagged += 1
+                        _add("cell", existing.target_id, src, r, group,
+                             existing.status.value, note, "already_tagged")
+                        continue
+                    _add("cell", existing.target_id, src, r, group,
+                         existing.status.value, note, "tag")
+                else:
+                    tid = cell_target_id(src, r, "")
+                    _add("cell", tid, src, r, group, "fn", "", "create_fn")
+
+    # Stable preview order: by (source, row, action).
+    candidates.sort(key=lambda c: (c["source"], c["row"], c["action"]))
+
+    to_tag = sum(1 for c in candidates if c["action"] == "tag")
+    to_create_tp = sum(1 for c in candidates if c["action"] == "create_tp")
+    to_create_fn = sum(1 for c in candidates if c["action"] == "create_fn")
+
+    tagged = 0
+    created_tp = 0
+    created_fn = 0
+    if not dry_run:
+        batch: List[Label] = []
+        for c in candidates:
+            act = c["action"]
+            if act == "tag":
+                lab = latest[c["target_id"]]
+                new_note = (
+                    (lab.note + " TRIVIAL").strip() if lab.note else "TRIVIAL"
+                )
+                batch.append(Label(
+                    target=lab.target,
+                    target_id=lab.target_id,
+                    source=lab.source,
+                    row=lab.row,
+                    column=lab.column,
+                    columns=list(lab.columns) if lab.columns else [],
+                    status=lab.status,
+                    corrected_value=lab.corrected_value,
+                    corrected_values=(
+                        dict(lab.corrected_values) if lab.corrected_values else {}
+                    ),
+                    confirmed_canonical=lab.confirmed_canonical,
+                    value_corrections=(
+                        dict(lab.value_corrections) if lab.value_corrections else {}
+                    ),
+                    note=new_note,
+                    annotator=ann,
+                ))
+                tagged += 1
+            elif act == "create_tp":
+                rec = cluster_by_id.get(c["target_id"], {})
+                rrow = rec.get("row")
+                batch.append(Label(
+                    target=LabelTarget.CLUSTER,
+                    target_id=c["target_id"],
+                    source=c["source"],
+                    row=int(rrow) if isinstance(rrow, int) else c["row"],
+                    column=None,
+                    columns=[],
+                    status=LabelStatus.TP,
+                    note=_TRIVIAL_DUP_CREATE_NOTE,
+                    annotator=ann,
+                ))
+                created_tp += 1
+            elif act == "create_fn":
+                batch.append(Label(
+                    target=LabelTarget.CELL,
+                    target_id=c["target_id"],
+                    source=c["source"],
+                    row=c["row"],
+                    column="",
+                    columns=[],
+                    status=LabelStatus.FN,
+                    note=_TRIVIAL_DUP_CREATE_NOTE,
+                    annotator=ann,
+                ))
+                created_fn += 1
+        if batch:
+            ctx.store.append_many(batch)
+
+    preview = candidates[:_CANDIDATE_PREVIEW_CAP]
+    return {
+        "dry_run": dry_run,
+        "scan_dataset": True,
+        "rows_scanned": rows_scanned,
+        "scanned": rows_scanned,
+        "dup_rows": dup_rows,
+        "dup_groups": dup_groups,
+        "to_tag": to_tag,
+        "to_create_tp": to_create_tp,
+        "to_create_fn": to_create_fn,
+        "to_write": to_tag + to_create_tp + to_create_fn,
+        "tagged": tagged,
+        "created_tp": created_tp,
+        "created_fn": created_fn,
+        "skipped_already_tagged": skipped_already_tagged,
+        "skipped_negative_verdict": skipped_negative_verdict,
+        "skipped_no_value": 0,
+        "candidates": preview,
+        "candidates_truncated": len(candidates) > len(preview),
+    }
 
 
 def register(app: FastAPI, router_ctx: RouterContext) -> None:
@@ -283,6 +807,15 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
                     ) from exc
         ann = (payload.get("annotator") or annotator).strip() or annotator
 
+        # scan_dataset: instead of only re-noting EXISTING labels, walk
+        # every cell of every (filtered) source and auto-label each
+        # spacing-rule anomaly TRIVIAL -- covered cells become TP,
+        # uncovered cells become FN. See _scan_dataset_for_trivial.
+        if bool(payload.get("scan_dataset")):
+            return _scan_dataset_for_trivial(
+                ctx, source_filter=source_filter, dry_run=dry_run, ann=ann,
+            )
+
         latest = ctx.store.latest_by_target()
         # Index clusters by id for O(1) lookup of (row, columns) given
         # a CLUSTER label.
@@ -463,6 +996,53 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
             "skipped_no_value": skipped_no_value,
             "candidates": candidates,
         }
+
+    @app.post("/api/runs/{run_id}/labels/tag-trivial-row-duplication")
+    def tag_trivial_row_duplication(
+        run_id: str, payload: Dict[str, Any] = Body(default_factory=dict),
+    ) -> Dict[str, Any]:
+        """Auto-tag every *completely identical* (exact-duplicate) row
+        ``TRIVIAL``, the row-level analogue of
+        ``tag-trivial-whitespace``'s ``scan_dataset`` mode.
+
+        A row is a trivial duplicate when another row in the same source
+        is byte-identical across EVERY column. The scan walks each
+        (optionally filtered) source and, per exact-duplicate group:
+
+          * a ``row_duplication`` cluster whose ``affected_rows`` are all
+            byte-identical (the LLM flagged this exact duplicate) becomes
+            **TP** + ``TRIVIAL`` when unlabelled, has ``TRIVIAL`` appended
+            when already tp/partial/fn, and is left untouched when the
+            operator ruled it fp / unsure / skip;
+          * a duplicate row NOT covered by any ``row_duplication`` cluster
+            (the LLM missed it) gets a row-level **FN** cell label
+            (``column=""``) + ``TRIVIAL``.
+
+        Conflicting / partial duplicates (same key, differing other
+        columns) are NOT touched - only fully identical rows.
+
+        Payload (all optional):
+          * ``source``    - limit the scan to one CSV (404 if absent).
+          * ``dry_run``   - return candidates without writing (preview).
+          * ``annotator`` - override annotator on the new records.
+
+        Response mirrors the whitespace scan: ``candidates`` plus
+        ``rows_scanned`` / ``dup_rows`` / ``dup_groups`` /
+        ``to_tag`` / ``to_create_tp`` / ``to_create_fn`` / ``to_write``
+        and the post-write ``tagged`` / ``created_tp`` / ``created_fn`` /
+        ``skipped_already_tagged`` / ``skipped_negative_verdict`` counts.
+        Idempotent: rows whose latest note already contains ``TRIVIAL``
+        are skipped.
+        """
+        ctx = cache.get(run_id)
+        source_filter = payload.get("source") or None
+        if source_filter is not None and source_filter not in ctx.sources:
+            raise HTTPException(404, f"source not found: {source_filter}")
+        dry_run = bool(payload.get("dry_run"))
+        ann = (payload.get("annotator") or annotator).strip() or annotator
+        return _scan_dataset_for_row_duplication(
+            ctx, source_filter=source_filter, dry_run=dry_run, ann=ann,
+        )
 
     @app.post("/api/runs/{run_id}/labels/tag-trivial-phone-format")
     def tag_trivial_phone_format(

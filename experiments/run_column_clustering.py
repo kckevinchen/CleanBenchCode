@@ -216,15 +216,27 @@ def _append_per_arm_stats(
     for r in results:
         if r.runs_completed == 0:
             continue
+        n_species = len(r.draft_clusters)
         arms.append({
             "scope_kind": "column_clustering",
             "scope_id": f"{r.source}::{r.column}",
             "error_type": "inconsistency",
             "runs_completed": r.runs_completed,
             "stopped_reason": r.stopped_reason,
+            # Normalised fields aligned with the per-chunk arm schema
+            # (src/adaptive/scoped_gt) so run-level saturation rollups
+            # and the report count column-clustering arms uniformly.
+            # The adaptive loop stops an arm either because a saturation
+            # criterion fired (gt / chao1 / both / two_consecutive) or
+            # because it ran out of budget ("k_max"); the former is
+            # ``saturated``, the latter ``exhausted`` -- the same meaning
+            # as the chunk-scan ``status``.
+            "status": "exhausted" if r.stopped_reason == "k_max" else "saturated",
+            "num_runs": r.runs_completed,
+            "n_observed": n_species,
             "good_turing_missing_mass": r.gt_missing_mass,
             "chao1_estimated_missed": r.chao1_missed,
-            "n_species_observed": len(r.draft_clusters),
+            "n_species_observed": n_species,
         })
     existing["arms"] = arms
     tmp = path.with_suffix(path.suffix + ".tmp")

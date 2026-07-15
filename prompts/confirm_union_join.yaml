@@ -163,7 +163,13 @@ system: |
   RETURN STRICT JSON. No prose, no markdown fences, no comments.
   Every group_id from the input MUST appear in the output exactly
   once, even when confirmed=false (so the downstream pipeline can
-  audit your decisions).
+  audit your decisions). You MAY ALSO ADD new groups that no
+  candidate listed: when two or more sheets clearly form a real
+  union or join that is absent from the candidates above, emit it
+  with a fresh, unique group_id (e.g. "u_new1", "j_new1") plus the
+  same confirmed=true + column_mapping (+ join for joins) fields.
+  Hold any added group to the SAME precision bar - only add ones
+  you are confident about.
 
 user_template: |
   WORKBOOK: {workbook!r}

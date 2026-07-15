@@ -1,0 +1,57 @@
+2026-05-19 20:05:28,305 INFO demo_rft: Staged 120 typo records: RFT/typo_v2/data/train.jsonl -> outputs/rft_typo_v2/typo_train.jsonl
+2026-05-19 20:05:28,307 INFO demo_rft: Staged 30 typo records: RFT/typo_v2/data/valid.jsonl -> outputs/rft_typo_v2/typo_valid.jsonl
+
+Sample staged record:
+{
+  "messages": [
+    {
+      "role": "developer",
+      "content": "You are a data-quality reviewer evaluating one cell of a CSV column. Decide whether the cell is a typo or clean under the rulebook below. You MUST commit to one of those two labels -- 'ambiguous' is not a valid choice. Reply with a single JSON object only -- no Markdown fences, no surrounding text.\n\nA cell is a TYPO only when, judging from the cell value and column header alone, BOTH of the following hold:\n  (a) you can name the specific defect, AND\n  (b) the intended correction is unambiguous and requires a real       character-level edit (not merely a layout fix).\nThe two flavours that qualify are SPELLING and PUNCTUATION:\n  - spelling: a one- or two-character distortion of a word that     plausibly belongs in this column (e.g., 'Acomodate' ->     'Accommodate'; 'Pilot Mountatin' -> 'Pilot Mountain').\n  - punctuation: a wrong or missing punctuation token that     changes how the value is read (e.g., 'Address,State' ->     'Address, State'; '(575-) 894-8350' -> '(575) 894-8350').\nDo NOT flag values whose only difference from the intended form is whitespace, casing, or trivial punctuation -- those are normalisation issues caught upstream, not typos. Examples that are CLEAN under this rulebook even if they look 'off':\n  - 'New  York' (double space)  -- whitespace normalisation.\n  - 'STRATFORD-UPON-AVON' vs 'Stratford-upon-Avon' -- casing.\n  - 'Du Page' vs 'DuPage' (pure spacing) -- not a typo.\nUse CLEAN for everything else, especially:\n  - Recognised proper nouns, brand names, person names.\n  - Fixed-length codes (zip, SKU, FIPS, ISBN, version strings).\n  - Pure numeric values -- never typos by our definition.\n  - Date-shaped strings -- never typos by our definition.\n  - Standard idioms with elided punctuation ('New Years Day').\n  - Truncated / contracted values where you cannot recover the     full form ('CLARION SAFETY SYSTE', 'Twp'). The benchmark may     score these as 'ambiguous' but you must commit to CLEAN here.\nWhen in doubt, prefer CLEAN over TYPO.\n\nOutput JSON keys (strict):\n  label:      'typo' | 'clean'\n  correction: intended spelling as a string (only when               label=='typo'); otherwise null.\n  flavour:    'spelling' | 'punctuation' (only when               label=='typo'); otherwise null.\n  rationale:  one short sentence naming the defect or stating               why the cell is clean."
+    },
+    {
+      "role": "user",
+      "content": "Column header: Pozicija Srpski - cirilica\nSource CSV: c65e5960bc464c54be7a568006b61c3a.csv\nOther distinct values in this column (sample of 20):\n  - '\u0410\u041a\u0422\u0418\u0412\u0410'\n  - '\u0410. \u0421\u0422\u0410\u041b\u041d\u0410 \u0421\u0420\u0415\u0414\u0421\u0422\u0412\u0410 (002 + 008 + 015 + 021 + 030)'\n  - 'I - \u041d\u0415\u041c\u0410\u0422\u0415\u0420\u0418\u0408\u0410\u041b\u041d\u0410 \u0421\u0420\u0415\u0414\u0421\u0422\u0412\u0410 (003 \u0434\u043e 007)'\n  - '1. \u0423\u043b\u0430\u0433\u0430\u045a\u0430 \u0443 \u0440\u0430\u0437\u0432\u043e\u0458'\n  - '2. \u041a\u043e\u043d\u0446\u0435\u0441\u0438\u0458\u0435_ \u043f\u0430\u0442\u0435\u043d\u0442\u0438_ \u043b\u0438\u0446\u0435\u043d\u0446\u0435 \u0438 \u043e\u0441\u0442\u0430\u043b\u0430 \u043f\u0440\u0430\u0432\u0430'\n  - '3. Goodwill'\n  - '4. \u041e\u0441\u0442\u0430\u043b\u0430 \u043d\u0435\u043c\u0430\u0442\u0435\u0440\u0438\u0458\u0430\u043b\u043d\u0430 \u0441\u0440\u0435\u0434\u0441\u0442\u0432\u0430'\n  - '5. \u0410\u0432\u0430\u043d\u0441\u0438 \u0438 \u043d\u0435\u043c\u0430\u0442\u0435\u0440\u0438\u0458\u0430\u043b\u043d\u0430 \u0441\u0440\u0435\u0434\u0441\u0442\u0432\u0430 \u0443 \u043f\u0440\u0438\u043f\u0440\u0435\u043c\u0438'\n  - 'II - \u041d\u0415\u041a\u0420\u0415\u0422\u041d\u0418\u041d\u0415_ \u041f\u041e\u0421\u0422\u0420\u041e\u0408\u0415\u040a\u0410_ \u041e\u041f\u0420\u0415\u041c\u0410 \u0418 \u0418\u041d\u0412\u0415\u0421\u0422\u0418\u0426\u0418\u041e\u041d\u0415 \u041d\u0415\u041a\u0420\u0415\u0422\u041d\u0418\u041d\u0415 (009 \u0434\u043e 014)'\n  - '1. \u0417\u0435\u043c\u0459\u0438\u0448\u0442\u0435'\n  - '2. \u0413\u0440\u0430\u0452\u0435\u0432\u0438\u043d\u0441\u043a\u0438 \u043e\u0431\u0458\u0435\u043a\u0442\u0438'\n  - '3. \u041f\u043e\u0441\u0442\u0440\u043e\u0458\u0435\u045a\u0430 \u0438 \u043e\u043f\u0440\u0435\u043c\u0430'\n  - '4. \u0418\u043d\u0432\u0435\u0441\u0442\u0438\u0446\u0438\u043e\u043d\u0435 \u043d\u0435\u043a\u0440\u0435\u0442\u043d\u0438\u043d\u0435'\n  - '5. \u0423\u043b\u0430\u0433\u0430\u045a\u0435 \u043d\u0430 \u0442\u0443\u0452\u0438\u043c \u043d\u0435\u043a\u0440\u0435\u0442\u043d\u0438\u043d\u0430\u043c\u0430_ \u043f\u043e\u0441\u0442\u0440\u043e\u0458\u0435\u045a\u0438\u043c\u0430 \u0438 \u043e\u043f\u0440\u0435\u043c\u0438'\n  - '6. \u0410\u0432\u0430\u043d\u0441\u0438 \u0438 \u043d\u0435\u043a\u0440\u0435\u0442\u043d\u0438\u043d\u0435_ \u043f\u043e\u0441\u0442\u0440\u043e\u0458\u0435\u045a\u0430_ \u043e\u043f\u0440\u0435\u043c\u0430 \u0438 \u0438\u043d\u0432\u0435\u0441\u0442\u0438\u0446\u0438\u043e\u043d\u0435 \u043d\u0435\u043a\u0440\u0435\u0442\u043d\u0438\u043d\u0435 \u0443 \u043f\u0440\u0438\u043f\u0440\u0435\u043c\u0438'\n  - 'III - \u0411\u0418\u041e\u041b\u041e\u0428\u041a\u0410 \u0421\u0420\u0415\u0414\u0421\u0422\u0412\u0410 \u0418 \u0421\u0420\u0415\u0414\u0421\u0422\u0412\u0410 \u041a\u0423\u041b\u0422\u0423\u0420\u0415 (016 \u0434\u043e 020)'\n  - '1. \u0428\u0443\u043c\u0435'\n  - '2. \u0412\u0438\u0448\u0435\u0433\u043e\u0434\u0438\u0448\u045a\u0438 \u0437\u0430\u0441\u0430\u0434\u0438'\n  - '3. \u041e\u0441\u043d\u043e\u0432\u043d\u043e \u0441\u0442\u0430\u0434\u043e'\n  - '4. \u0421\u0440\u0435\u0434\u0441\u0442\u0432\u0430 \u043a\u0443\u043b\u0442\u0443\u0440\u0435'\n\nCandidate value to judge:\n  'I \u041d\u0415\u041c\u0410\u0422\u0415\u0420\u0418\u0408\u0410\u041b\u041d\u0410 \u0421\u0420\u0415\u0414\u0421\u0422\u0412\u0410 (003 \u0434\u043e 007)'\n\nReturn the JSON object."
+    }
+  ],
+  "gold_label": "\"typo\"",
+  "gold_correction": "\"I - \\u041d\\u0415\\u041c\\u0410\\u0422\\u0415\\u0420\\u0418\\u0408\\u0410\\u041b\\u041d\\u0410 \\u0421\\u0420\\u0415\\u0414\\u0421\\u0422\\u0412\\u0410 (003 \\u0434\\u043e 007)\"",
+  "candidate_value": "\"I \\u041d\\u0415\\u041c\\u0410\\u0422\\u0415\\u0420\\u0418\\u0408\\u0410\\u041b\\u041d\\u0410 \\u0421\\u0420\\u0415\\u0414\\u0421\\u0422\\u0412\\u0410 (003 \\u0434\\u043e 007)\"",
+  "column": "\"Pozicija Srpski - cirilica\"",
+  "source": "\"c65e5960bc464c54be7a568006b61c3a.csv\""
+}
+2026-05-19 20:05:41,953 INFO demo_rft: Using endpoint https://dmxaz-test-aoai.openai.azure.com/ (auto-resolved).
+2026-05-19 20:05:41,953 INFO demo_rft: Using AzureCliCredential (run `az login` if this fails).
+2026-05-19 20:05:42,533 INFO azure.identity._internal.decorators: AzureCliCredential.get_token_info succeeded
+2026-05-19 20:05:44,378 INFO httpx: HTTP Request: POST https://dmxaz-test-aoai.openai.azure.com/openai/files?api-version=2025-04-01-preview "HTTP/1.1 201 Created"
+2026-05-19 20:05:44,380 INFO demo_rft: Uploaded typo_train.jsonl -> file-6f1022fdb7794af6b454dea0a94f4682
+2026-05-19 20:05:44,708 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/files/file-6f1022fdb7794af6b454dea0a94f4682?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 20:05:44,709 INFO demo_rft: File file-6f1022fdb7794af6b454dea0a94f4682 status=pending
+2026-05-19 20:05:50,389 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/files/file-6f1022fdb7794af6b454dea0a94f4682?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 20:05:50,389 INFO demo_rft: File file-6f1022fdb7794af6b454dea0a94f4682 status=processed
+2026-05-19 20:05:51,187 INFO httpx: HTTP Request: POST https://dmxaz-test-aoai.openai.azure.com/openai/files?api-version=2025-04-01-preview "HTTP/1.1 201 Created"
+2026-05-19 20:05:51,187 INFO demo_rft: Uploaded typo_valid.jsonl -> file-19361ee4e5e64250a28c4d49d8f1edc8
+2026-05-19 20:05:51,407 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/files/file-19361ee4e5e64250a28c4d49d8f1edc8?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 20:05:51,408 INFO demo_rft: File file-19361ee4e5e64250a28c4d49d8f1edc8 status=pending
+2026-05-19 20:05:57,089 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/files/file-19361ee4e5e64250a28c4d49d8f1edc8?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 20:05:57,089 INFO demo_rft: File file-19361ee4e5e64250a28c4d49d8f1edc8 status=processed
+2026-05-19 20:06:08,795 INFO demo_rft: Using endpoint https://dmxaz-test-aoai.openai.azure.com/ (auto-resolved).
+2026-05-19 20:06:08,796 INFO demo_rft: Using AzureCliCredential (run `az login` if this fails).
+2026-05-19 20:06:09,377 INFO azure.identity._internal.decorators: AzureCliCredential.get_token_info succeeded
+2026-05-19 20:06:10,182 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/models?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 20:06:10,994 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/files/file-6f1022fdb7794af6b454dea0a94f4682?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 20:06:10,996 INFO demo_rft: File file-6f1022fdb7794af6b454dea0a94f4682 status=processed
+2026-05-19 20:06:11,857 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/files/file-19361ee4e5e64250a28c4d49d8f1edc8?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 20:06:11,857 INFO demo_rft: File file-19361ee4e5e64250a28c4d49d8f1edc8 status=processed
+2026-05-19 20:06:12,269 INFO httpx: HTTP Request: POST https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs?api-version=2025-04-01-preview "HTTP/1.1 201 Created"
+2026-05-19 20:06:12,442 INFO demo_rft: Submitted RFT job: ftjob-034a136375344ffc81c366389e44534f (status=pending)
+
+Job ID: ftjob-034a136375344ffc81c366389e44534f
+Watch with: python -m experiments.demo_rft status --job-id ftjob-034a136375344ffc81c366389e44534f
+2026-05-19 20:06:20,846 INFO demo_rft: Using endpoint https://dmxaz-test-aoai.openai.azure.com/ (auto-resolved).
+2026-05-19 20:06:20,846 INFO demo_rft: Using AzureCliCredential (run `az login` if this fails).
+2026-05-19 20:06:21,439 INFO azure.identity._internal.decorators: AzureCliCredential.get_token_info succeeded
+2026-05-19 20:06:22,240 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-034a136375344ffc81c366389e44534f?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 20:06:22,724 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-034a136375344ffc81c366389e44534f/events?api-version=2025-04-01-preview&limit=20 "HTTP/1.1 200 OK"
+
+[  0] status=pending trained_tokens=None fine_tuned_model=None
+  [20:06:12] info    Job enqueued. Waiting for jobs ahead to complete.

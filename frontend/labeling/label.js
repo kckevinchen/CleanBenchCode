@@ -20,7 +20,7 @@ const state = {
   // plus the synthetic ``no-estimate`` value for cells the labelling-
   // effort artifact doesn't cover. Empty array == no filter on that
   // facet (i.e. "any").
-  filters: { source: [], status: [], error_type: [], column_status: [] },
+  filters: { source: [], status: [], error_type: [], column_status: [], search: "" },
   queue: [],
   index: -1,
   selectedId: null,
@@ -514,6 +514,21 @@ async function bootstrap() {
     state.filters.error_type = selected;
     refreshQueue({ keepSelection: false });
   });
+  state.errorTypeOptions = ets.slice();
+
+  // Free-text queue search (debounced) -> treated as another filter, so
+  // the summary count, empty-state and per-type counts all reflect it.
+  const queueSearchEl = document.getElementById("queue-search");
+  if (queueSearchEl) {
+    let searchTimer;
+    queueSearchEl.addEventListener("input", () => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => {
+        state.filters.search = queueSearchEl.value || "";
+        refreshQueue({ keepSelection: true });
+      }, 200);
+    });
+  }
 
   // Column-status filter: narrows the queue by the adaptive-loop arm
   // state of the cluster's (source, column) cell. Backed by the per-
@@ -2901,6 +2916,42 @@ function bumpCellStateLocal(source, row, col, status, extras = {}) {
 
 // ----------------------------------------------------------- queue
 
+// Build a lowercase haystack for a queue item so the free-text search can
+// match across all item kinds (cluster / FN cell / column-cluster / MT).
+function itemSearchText(c) {
+  const parts = [c.source, c.cluster_id, c.column, String(c.row ?? ""),
+    ...(c.columns || []), ...(c.error_types || [])];
+  if (Array.isArray(c.values)) parts.push(...c.values.map(String));
+  if (c.canonical_value) parts.push(String(c.canonical_value));
+  if (c.note) parts.push(String(c.note));
+  if (c.row_values) parts.push(...Object.values(c.row_values).map(String));
+  return parts.filter(Boolean).join(" ").toLowerCase();
+}
+
+// Show per-error-type item counts in the error-type dropdown, but only
+// when no error-type facet is selected (once you pick a type the faceted
+// counts would read a misleading 0 for the unselected ones). Counts are
+// over the current source/status/search-filtered queue.
+function updateErrorTypeCounts() {
+  const ctrl = _multiFilters.get(document.getElementById("filter-error-type"));
+  if (!ctrl || !Array.isArray(state.errorTypeOptions)) return;
+  const show = (state.filters.error_type || []).length === 0;
+  const counts = new Map();
+  if (show) {
+    for (const c of state.queue) {
+      for (const et of (c.error_types || [])) counts.set(et, (counts.get(et) || 0) + 1);
+    }
+  }
+  const byValue = new Map();
+  for (const et of state.errorTypeOptions) {
+    const n = counts.get(et) || 0;
+    byValue.set(et, show
+      ? { label: `${et} (${n})`, title: `${n} item(s) in the current view` }
+      : { label: et, title: et });
+  }
+  ctrl.refreshLabels(byValue);
+}
+
 // Sidebar queue summary: how many items the current filter combination
 // yields, plus a one-click "clear" when any facet is active (otherwise
 // you'd open each dropdown to reset it). Refreshed on every refreshQueue.
@@ -2911,7 +2962,8 @@ function updateQueueSummary() {
   const f = state.filters || {};
   const active =
     (f.source || []).length + (f.status || []).length +
-    (f.error_type || []).length + (f.column_status || []).length;
+    (f.error_type || []).length + (f.column_status || []).length +
+    (f.search ? 1 : 0);
   el.innerHTML =
     `<span class="qs-count">${n} item${n === 1 ? "" : "s"}</span>`
     + (active
@@ -2928,7 +2980,9 @@ function clearAllFilters() {
                     "filter-error-type", "filter-column-status"]) {
     _multiFilters.get(document.getElementById(id))?.setSelected([]);
   }
-  state.filters = { source: [], status: [], error_type: [], column_status: [] };
+  state.filters = { source: [], status: [], error_type: [], column_status: [], search: "" };
+  const _qse = document.getElementById("queue-search");
+  if (_qse) _qse.value = "";
   // Mirror the side-effects the per-filter onChange handlers fire.
   updateSourceXlsxActions();
   renderLabelingEffort();
@@ -3206,8 +3260,12 @@ async function refreshQueue({ keepSelection }) {
     });
   }
 
+  const _q = (state.filters.search || "").trim().toLowerCase();
+  if (_q) queueItems = queueItems.filter((c) => itemSearchText(c).includes(_q));
+
   state.queue = queueItems;
   updateQueueSummary();
+  updateErrorTypeCounts();
 
   const listEl = $("#queue");
   listEl.innerHTML = "";
@@ -3219,7 +3277,8 @@ async function refreshQueue({ keepSelection }) {
     const f = state.filters || {};
     const nFilters =
       (f.source || []).length + (f.status || []).length +
-      (f.error_type || []).length + (f.column_status || []).length;
+      (f.error_type || []).length + (f.column_status || []).length +
+      (f.search ? 1 : 0);
     listEl.innerHTML = nFilters
       ? `<div class="queue-empty">No items match the current filters.`
         + `<button type="button" id="qe-clear" class="qs-clear">Clear filters</button></div>`
@@ -3235,10 +3294,14 @@ async function refreshQueue({ keepSelection }) {
   }
 
   // Build a 2-level grouping: workbook -> csv -> [{cluster, queueIndex}].
-  // Queue items keep their flat ``state.queue`` index so the j/k/Enter
-  // and 1-5 shortcuts (which all index ``state.queue`` directly) keep
-  // working without any change to the keyboard handlers. We only
-  // change how the rows are RENDERED.
+  // Queue items keep their flat ``state.queue`` index (stamped as
+  // ``data-queue-index``) so the 1-5 verdict shortcuts and row-click
+  // handlers can address an item directly. The RENDER order, however,
+  // diverges from ``state.queue`` order (row_duplication clusters are
+  // re-bucketed + row-sorted below), so Enter / j / k navigate via
+  // ``state.visualOrder`` - the list of queue indices in DOM order,
+  // rebuilt as rows are appended - to stop on the row that visually
+  // follows the current one instead of the array-next one.
   const multiWb = !!state.run?.multi_workbook;
   const groups = new Map(); // wb -> Map(src -> [{c, idx}])
   state.queue.forEach((c, idx) => {
@@ -3253,6 +3316,14 @@ async function refreshQueue({ keepSelection }) {
   // Persist collapsed state across re-renders so labelling a cluster
   // doesn't snap every group back open.
   state.collapsed = state.collapsed || new Set();
+
+  // Order in which rows are appended to the DOM (top -> bottom). Keyboard
+  // navigation reads this so Enter / j / k advance in the SAME order the
+  // operator sees, not raw ``state.queue`` (API) order. The two diverge
+  // for row_duplication runs because dup clusters are re-bucketed and
+  // sorted by row; without this, Enter would land on the array-next item
+  // and appear to skip the row directly below the current one.
+  state.visualOrder = [];
 
   const headerSummary = (items) => {
     const total = items.length;
@@ -3413,6 +3484,8 @@ async function refreshQueue({ keepSelection }) {
           </div>
         `;
         row.addEventListener("click", () => selectIndex(idx));
+        // Record DOM (visual) order so keyboard navigation follows it.
+        state.visualOrder.push(idx);
         return row;
       };
 
@@ -3502,7 +3575,10 @@ async function refreshQueue({ keepSelection }) {
     if (i >= 0) return selectIndex(i);
   }
   if (state.queue.length) {
-    selectIndex(0);
+    // Land on the visually-first row (top of the sidebar). For
+    // re-bucketed row_duplication runs that is not array index 0.
+    selectIndex((state.visualOrder && state.visualOrder.length)
+      ? state.visualOrder[0] : 0);
     return;
   }
   // Empty queue: if the source filter targets a single CSV (not a
@@ -3661,18 +3737,52 @@ function updateGroupCounts() {
 // so end-of-queue still moves the cursor instead of locking.
 function nextUnlabeledIndex(from) {
   const n = state.queue.length;
-  for (let i = from; i < n; i++) {
-    const s = state.queue[i].label_status;
-    if (!s || s === "unlabeled") return i;
+  // Navigate in the rendered (visual) order, not raw ``state.queue``
+  // order. ``from`` is ``currentIndex + 1`` by convention, so the item
+  // the operator just acted on is ``from - 1``. We find its slot in the
+  // DOM order and return the next still-unlabeled item after it. For
+  // row_duplication runs the two orders differ (dup clusters are
+  // re-bucketed + row-sorted), so walking the raw array would skip the
+  // row that visually sits directly below the current one.
+  const order = (Array.isArray(state.visualOrder) && state.visualOrder.length === n)
+    ? state.visualOrder
+    : state.queue.map((_, i) => i); // fallback: identity (array order)
+  const isUnlabeled = (idx) => {
+    const s = state.queue[idx] && state.queue[idx].label_status;
+    return !s || s === "unlabeled";
+  };
+  const current = from - 1;
+  const pos = order.indexOf(current);
+  // Forward from the visual successor.
+  for (let p = pos + 1; p < order.length; p++) {
+    if (isUnlabeled(order[p])) return order[p];
   }
-  for (let i = 0; i < Math.min(from, n); i++) {
-    const s = state.queue[i].label_status;
-    if (!s || s === "unlabeled") {
+  // Wrap to the top, scanning up to and including the current slot.
+  for (let p = 0; p <= pos && p < order.length; p++) {
+    if (isUnlabeled(order[p])) {
       toast("wrapped: jumped to first unlabeled");
-      return i;
+      return order[p];
     }
   }
-  return Math.min(from, n - 1);
+  // Nothing unlabeled anywhere: fall back to the visual successor so
+  // end-of-queue still moves the cursor instead of locking in place.
+  if (pos >= 0 && pos + 1 < order.length) return order[pos + 1];
+  return Math.min(Math.max(from, 0), n - 1);
+}
+
+// Visually-previous queue index (the row directly above the current one
+// in the sidebar). Mirrors ``nextUnlabeledIndex`` but for ``k`` / reverse
+// navigation; unlike the forward case it stops on ANY item (labeled or
+// not) so ``k`` can revisit a verdict the operator just set. Returns -1
+// (a no-op for ``selectIndex``) when already at the top of the queue.
+function prevVisualIndex(current) {
+  const n = state.queue.length;
+  const order = (Array.isArray(state.visualOrder) && state.visualOrder.length === n)
+    ? state.visualOrder
+    : state.queue.map((_, i) => i);
+  const pos = order.indexOf(current);
+  if (pos > 0) return order[pos - 1];
+  return -1;
 }
 
 // ----------------------------------------------------------- detail + CSV
@@ -3755,12 +3865,16 @@ async function loadFnCell(item) {
 
 // Render the right-hand detail panel for an FN queue item. Looks
 // like a normal labelled-cell detail (Original / Fix, editable
-// Corrected + Note, full verdict button row) so the operator can
-// rate the confidence of their own FN claim (tp / partial / unsure
-// / skip). The FP button is replaced by a ``Remove FN`` button that
-// tombstones the cell label outright -- ``fp`` on one's own claim
-// doesn't make semantic sense and was the cause of the historical
-// "two entries, one only for remove" UX. Cluster-specific blocks
+// Corrected + Note, full verdict button row). The FN claim is its own
+// verdict: ``fn`` is the AUTO-ASSIGNED, active-by-default state (the
+// cell IS labelled the moment it's claimed), and the operator may
+// downgrade to partial / unsure / skip. There is no ``tp`` button --
+// the LLM never flagged this cell, so "true positive" is meaningless
+// here; the positive verdict is ``fn`` itself. The FP button is a
+// ``Remove FN`` button that tombstones the cell label outright --
+// ``fp`` on one's own claim doesn't make semantic sense and was the
+// cause of the historical "two entries, one only for remove" UX.
+// Cluster-specific blocks
 // (synthesis / detections / web verification) are omitted because
 // the LLM never produced anything for this cell.
 function renderFnDetail(item) {
@@ -3821,7 +3935,7 @@ function renderFnDetail(item) {
     <div class="block">
       <h2>Verdict</h2>
       <div class="buttons" id="verdict-buttons">
-        ${btn("tp","1")}${btn("partial","3")}${btn("unsure","4")}${btn("skip","5")}
+        ${btn("fn","1")}${btn("partial","3")}${btn("unsure","4")}${btn("skip","5")}
         <button class="fp" data-fn-action="remove" title="tombstones the cell label so the row disappears from the queue">Remove FN</button>
       </div>
       <label class="field">
@@ -6195,10 +6309,10 @@ function openCellPopover(anchorEl, source, row, col) {
     b.addEventListener("click", async () => {
       const cid = pop.dataset.clusterId;
       const status = b.getAttribute("data-cluster-status");
-      // Propagate flag is honoured for fp / unsure / skip (the
-      // cluster-status propagation endpoint requires no corrected
-      // value); tp/partial ignore it because the popover doesn't
-      // collect a corrected value to FN-spread to siblings.
+      // Propagate flag is honoured for every concrete verdict
+      // (tp/fp/partial/unsure/skip): cluster-status propagation needs
+      // no corrected value, so it spreads the same verdict to every
+      // same-value sibling cluster ("label the issue once").
       const propagate = !!pop.querySelector("[data-field='propagate-same-value']")?.checked;
       await submitClusterStatusForCell(cid, status, {
         propagate, anchorValue: cellValueRaw,
@@ -6339,15 +6453,22 @@ async function submitClusterStatusForCell(clusterId, status, opts = {}) {
         note: "",
       }),
     });
-    // Same-value propagation: fp / unsure / skip from the popover (the
-    // popover doesn't collect a corrected value, so we can't FN-spread
-    // on tp/partial). Skip when the seed cell was empty - the column
-    // would match every blank sibling and spam other clusters.
+    // Same-value propagation applies the SAME verdict to every other
+    // cluster on (source, column) holding the identical value - the
+    // same defect fanned into one cluster per affected row. Honoured
+    // for every concrete verdict (tp/fp/partial/unsure/skip) so the
+    // operator labels the issue ONCE. Cluster-status propagation needs
+    // no corrected value, so tp/partial qualify here too (the FN-spread
+    // to LLM-missed rows still only happens from the queue panel, which
+    // does collect a corrected value). Skip when the seed cell was
+    // empty - the column would match every blank sibling and spam
+    // other clusters.
     let propagated = 0;
     let propagateResult = null;
     const anchorTrimmed = (anchorValue || "").trim();
     const isClusterPropagateStatus = (
-      status === "fp" || status === "unsure" || status === "skip"
+      status === "tp" || status === "fp" || status === "partial"
+      || status === "unsure" || status === "skip"
     );
     if (
       propagate
@@ -6847,6 +6968,27 @@ async function submitLabel(status, { advance = true } = {}) {
   if (state.cluster._cc) {
     return submitColClusterLabel(status, { advance });
   }
+  // FN cell items have their own verdict vocabulary: the positive
+  // verdict is ``fn`` (not ``tp``), and ``fp`` means "remove the FN
+  // claim". Route keyboard / Enter verdicts to the cell-FN path so they
+  // match the FN detail panel's buttons (key 1 = fn, 2 = Remove FN).
+  if (state.cluster._fn) {
+    const fn = state.cluster.fn || {};
+    const src = fn.fn_source || fn.source;
+    const row = fn.fn_row != null ? fn.fn_row : fn.row;
+    const col = fn.fn_column || (fn.columns || [])[0] || "";
+    const submittedIndex = state.index;
+    if (status === "tp") status = "fn";
+    // Fire the write in the background (both helpers update the queue +
+    // refresh themselves), then advance synchronously like the cluster
+    // path. Without this, Enter on an FN item applied the verdict but
+    // never moved to the next item. keepSelection in the background
+    // refresh is id-based, so it preserves this advanced selection.
+    if (status === "fp") removeFnCell(src, row, col);
+    else submitFnCellLabel(status, src, row, col);
+    if (advance) selectIndex(nextUnlabeledIndex(submittedIndex + 1));
+    return;
+  }
   const c = state.cluster.cluster;
 
   // ----- Phase 1: synchronous local updates ---------------------
@@ -6949,42 +7091,29 @@ async function submitLabel(status, { advance = true } = {}) {
     //                   value needed. Skip continues to row-cascade
     //                   independently above.
     let propagated = 0;
+    let propagatedFn = 0;
     let propagateFnResult = null;
     let propagateClusterResult = null;
     const propagateChk = document.getElementById("propagate-same-value");
     const wantPropagate = !!(propagateChk && propagateChk.checked);
     const firstCol = (c.columns || [])[0];
-    const isClusterPropagateStatus = (
-      status === "fp" || status === "unsure" || status === "skip"
+    const canPropagate = (
+      wantPropagate && c.source && Number.isInteger(c.row) && firstCol
     );
-    if (
-      wantPropagate
-      && (status === "tp" || status === "partial")
-      && c.source && Number.isInteger(c.row) && firstCol
-      && corrected
-    ) {
-      try {
-        const r = await api(`${API}/labels/propagate-same-value`, {
-          method: "POST",
-          body: JSON.stringify({
-            source: c.source,
-            row: c.row,
-            column: firstCol,
-            corrected_value: corrected,
-            note: `(auto: same-value as ${c.cluster_id})`,
-          }),
-        });
-        propagated = r.propagated || 0;
-        propagateFnResult = r;
-      } catch (e) {
-        // Non-fatal: the cluster verdict is already saved.
-        toast(`propagation failed: ${e.message}`, 3000);
-      }
-    } else if (
-      wantPropagate
-      && isClusterPropagateStatus
-      && c.source && Number.isInteger(c.row) && firstCol
-    ) {
+    // Cluster-status propagation applies the SAME verdict to every
+    // OTHER cluster on (source, column) holding the identical value -
+    // i.e. the same underlying defect that ``cluster_issues`` fanned
+    // into one cluster per affected row. It runs for every concrete
+    // verdict (tp/fp/partial/unsure/skip) so the operator labels the
+    // issue ONCE and all its same-value sibling clusters follow,
+    // instead of having to re-label each fanned row. (TP used to be
+    // excluded here, which is why marking a typo TP left its same-value
+    // siblings unlabeled.)
+    const isClusterPropagateStatus = (
+      status === "tp" || status === "fp" || status === "partial"
+      || status === "unsure" || status === "skip"
+    );
+    if (canPropagate && isClusterPropagateStatus) {
       try {
         const r = await api(`${API}/clusters/propagate-status`, {
           method: "POST",
@@ -7002,17 +7131,40 @@ async function submitLabel(status, { advance = true } = {}) {
         // the sidebar reflects the new verdict without a reload.
         applyPropagatedClustersToQueue(r.clusters || [], status);
       } catch (e) {
+        // Non-fatal: the seed cluster verdict is already saved.
+        toast(`propagation failed: ${e.message}`, 3000);
+      }
+    }
+    // FN-cell propagation (tp / partial only, and only when a corrected
+    // value is supplied): walk the column and FN-label OTHER rows
+    // holding the same erroneous value that the LLM NEVER flagged (no
+    // cluster covers them), so the missed siblings still enter the
+    // benchmark with the right fix. This is complementary to the
+    // cluster-status propagation above - that one covers rows the LLM
+    // DID flag; this one covers rows it missed.
+    if (canPropagate && (status === "tp" || status === "partial") && corrected) {
+      try {
+        const r = await api(`${API}/labels/propagate-same-value`, {
+          method: "POST",
+          body: JSON.stringify({
+            source: c.source,
+            row: c.row,
+            column: firstCol,
+            corrected_value: corrected,
+            note: `(auto: same-value as ${c.cluster_id})`,
+          }),
+        });
+        propagatedFn = r.propagated || 0;
+        propagateFnResult = r;
+      } catch (e) {
+        // Non-fatal: the cluster verdict is already saved.
         toast(`propagation failed: ${e.message}`, 3000);
       }
     }
     const parts = [`saved: ${status}`];
     if (cascaded) parts.push(`+${cascaded} skipped on row`);
-    if (propagated) {
-      const verb = isClusterPropagateStatus
-        ? `${status} auto-applied`
-        : "fn auto-applied";
-      parts.push(`+${propagated} ${verb}`);
-    }
+    if (propagated) parts.push(`+${propagated} ${status} auto-applied`);
+    if (propagatedFn) parts.push(`+${propagatedFn} fn auto-applied`);
     toast(parts.join(" · "));
     scheduleStatsRefresh();
     scheduleSourceMetaRefresh();
@@ -7127,9 +7279,10 @@ function onKeydown(e) {
     return;
   }
   if (e.key === "j") { selectIndex(nextUnlabeledIndex(state.index + 1)); e.preventDefault(); }
-  else if (e.key === "k") { selectIndex(state.index - 1); e.preventDefault(); }
+  else if (e.key === "k") { selectIndex(prevVisualIndex(state.index)); e.preventDefault(); }
   else if (e.key === "c") { $("#corrected-value")?.focus(); e.preventDefault(); }
   else if (e.key === "n") { $("#note")?.focus(); e.preventDefault(); }
+  else if (e.key === "/") { document.getElementById("queue-search")?.focus(); e.preventDefault(); }
 }
 
 // ----------------------------------------------------------- util
@@ -7816,19 +7969,21 @@ const _trivialTagger = {
   preview: null,         // last dry-run response
   applyResult: null,     // last apply response
   error: null,
+  // When true, the endpoint walks EVERY cell (not just existing labels)
+  // and auto-creates labels for un-flagged spacing anomalies: covered
+  // cells become TP, uncovered cells become FN, all tagged TRIVIAL.
+  scanDataset: true,
 };
 
 // Mirror EXACTLY what /labels/tag-trivial-whitespace considers a
-// trivial-cosmetic anomaly (see ``_WHITESPACE_ANOMALY_RE`` in
-// ``src/labeling/app.py``). Used to highlight the offending
-// characters in the preview table.
-//
-// NOTE: the CSV viewer's red-dotted ``.has-ws`` underline still uses
-// the narrower edge/internal-space + non-printable rule (see
-// ``hasWs`` further up in this file); only the trivial-tagger
-// preview uses this wider rule.
+// whitespace anomaly (see ``_WHITESPACE_ANOMALY_RE`` in
+// ``src/labeling/routers/propagation.py``). Used to highlight the
+// offending characters in the preview table. STRICT: only edge / 2+
+// internal spaces and non-printable whitespace (tab, NBSP, line breaks,
+// zero-width, soft hyphen, BOM) -- no comma / bracket / casing
+// reformats. Same rule as the CSV-viewer red-underline (``hasWs``).
 const _WS_MARKER_RE =
-  /(^[ ]+|[ ]+$|[ ]{2,}|[\t\u00A0\n\r\u2028\u2029\u200B\u200C\u200D\u00AD\uFEFF]+|,[A-Za-z]| [)\]}]|'S(?=\W|$)|\s=\S|\S=\s)/g;
+  /(^[ ]+|[ ]+$|[ ]{2,}|[\t\u00A0\n\r\u2028\u2029\u200B\u200C\u200D\u00AD\uFEFF]+)/g;
 
 // Render a value with each whitespace-anomaly run wrapped in a
 // .ws-marker span so the operator can see the offending characters
@@ -7901,10 +8056,11 @@ function openIdentifyTrivialModal() {
   modal.hidden = false;
   // Always re-fetch the preview on open: labels may have changed
   // since the last time the modal was open (other operators, manual
-  // edits) so a stale preview would be misleading. Both panes load
+  // edits) so a stale preview would be misleading. All panes load
   // in parallel so switching tabs is instant.
   loadTrivialPreview();
   loadPhonePreview();
+  loadRowDupPreview();
   // Default to the whitespace tab unless the body remembers a prior
   // selection (e.g. operator switched, closed, reopened).
   const body = document.getElementById("identify-trivial-body");
@@ -7927,7 +8083,9 @@ async function loadTrivialPreview() {
   try {
     const r = await api(`${API}/labels/tag-trivial-whitespace`, {
       method: "POST",
-      body: JSON.stringify({ dry_run: true }),
+      body: JSON.stringify({
+        dry_run: true, scan_dataset: _trivialTagger.scanDataset,
+      }),
     });
     _trivialTagger.preview = r;
     _trivialTagger.status = "preview";
@@ -7938,28 +8096,49 @@ async function loadTrivialPreview() {
   renderIdentifyTrivialModal();
 }
 
+// A bulk tagger writes many cluster verdicts + cell labels at once. The
+// debounced scheduleStatsRefresh() alone leaves the cluster queue and
+// cell view stale until a manual reload (and can lag the progress
+// panel). Mirror the page-load refresh so stats, the cluster queue
+// (colours + per-source counts) and the cells all reflect the new
+// labels immediately. Awaited (not debounced) so a slow bulk scan can't
+// race the timer.
+async function _refreshAfterBulkTagWrite() {
+  try {
+    await Promise.all([refreshLatest(), refreshStats()]);
+  } catch (e) {
+    console.warn("post-bulk refresh (latest/stats) failed:", e);
+  }
+  try {
+    await refreshQueue({ keepSelection: true });
+  } catch (e) {
+    console.warn("post-bulk refresh (queue) failed:", e);
+  }
+}
+
 async function applyTrivialTagger() {
   _trivialTagger.status = "applying";
   renderIdentifyTrivialModal();
   try {
     const r = await api(`${API}/labels/tag-trivial-whitespace`, {
       method: "POST",
-      body: JSON.stringify({}),
+      body: JSON.stringify({ scan_dataset: _trivialTagger.scanDataset }),
     });
     _trivialTagger.applyResult = r;
     _trivialTagger.status = "done";
-    // Refresh the in-memory ``state.latest`` so the next export /
-    // benchmark download picks up the new TRIVIAL notes without a
-    // page reload. Cluster-state colours don't change (status is
-    // unchanged), so no /cells reload needed.
-    try { await refreshLatest(); } catch (_) { /* non-fatal */ }
-    if (typeof scheduleStatsRefresh === "function") {
-      try { scheduleStatsRefresh(); } catch (_) { /* non-fatal */ }
-    }
-    if (r.tagged > 0) {
-      toast(`Tagged ${r.tagged} cell(s) TRIVIAL`, 2500);
+    // Bulk write: refresh stats + cluster queue + cells immediately so
+    // the created TP clusters recolour, the FN cells render, and the
+    // progress panel updates without a manual page reload.
+    await _refreshAfterBulkTagWrite();
+    const written = (r.tagged || 0) + (r.created_tp || 0) + (r.created_fn || 0);
+    if (written > 0) {
+      toast(
+        `Wrote ${written} TRIVIAL label(s): `
+        + `${r.created_tp || 0} TP, ${r.created_fn || 0} FN, ${r.tagged || 0} tagged`,
+        3000,
+      );
     } else {
-      toast("No new cells tagged TRIVIAL", 2000);
+      toast("No new TRIVIAL labels written", 2000);
     }
   } catch (e) {
     _trivialTagger.status = "error";
@@ -7974,6 +8153,8 @@ function renderIdentifyTrivialModal() {
   const active = body.dataset.activeTab || "whitespace";
   if (active === "phone") {
     renderTrivialPhonePane(body);
+  } else if (active === "rowdup") {
+    renderTrivialRowDupPane(body);
   } else {
     renderTrivialWhitespacePane(body);
   }
@@ -7986,7 +8167,8 @@ function activateTrivialTab(which) {
   const modal = document.getElementById("identify-trivial-modal");
   const body = document.getElementById("identify-trivial-body");
   if (!modal || !body) return;
-  const target = (which === "phone") ? "phone" : "whitespace";
+  const valid = new Set(["whitespace", "phone", "rowdup"]);
+  const target = valid.has(which) ? which : "whitespace";
   body.dataset.activeTab = target;
   for (const tab of modal.querySelectorAll(".trivial-tab")) {
     const isActive = (tab.dataset.trivialTab === target);
@@ -7996,6 +8178,8 @@ function activateTrivialTab(which) {
   // Lazily load this tab's preview if it hasn't been fetched yet.
   if (target === "phone" && _phoneTagger.status === "idle") {
     loadPhonePreview();
+  } else if (target === "rowdup" && _rowDupTagger.status === "idle") {
+    loadRowDupPreview();
   } else if (target === "whitespace" && _trivialTagger.status === "idle") {
     loadTrivialPreview();
   }
@@ -8007,7 +8191,7 @@ function renderTrivialWhitespacePane(body) {
     body.innerHTML = `
       <div class="muted" style="font-size:12px;padding:18px;text-align:center;">
         <span class="trivial-spinner"></span>
-        Scanning labels for whitespace anomalies\u2026
+        Scanning for spacing anomalies\u2026
       </div>
     `;
     return;
@@ -8027,11 +8211,12 @@ function renderTrivialWhitespacePane(body) {
   }
 
   if (_trivialTagger.status === "applying") {
-    const toTag = _trivialTagger.preview?.to_tag || 0;
+    const n = _trivialTagger.preview?.to_write
+      ?? _trivialTagger.preview?.to_tag ?? 0;
     body.innerHTML = `
       <div class="muted" style="font-size:12px;padding:18px;text-align:center;">
         <span class="trivial-spinner"></span>
-        Appending TRIVIAL to ${toTag} note(s)\u2026
+        Writing ${n} TRIVIAL label(s)\u2026
       </div>
     `;
     return;
@@ -8039,25 +8224,26 @@ function renderTrivialWhitespacePane(body) {
 
   if (_trivialTagger.status === "done") {
     const r = _trivialTagger.applyResult || {};
+    const written = (r.tagged || 0) + (r.created_tp || 0) + (r.created_fn || 0);
     body.innerHTML = `
       <div class="trivial-summary">
         <div class="trivial-stat to-tag">
-          <strong>${r.tagged || 0}</strong>
-          <span class="trivial-stat-label">tagged this run</span>
+          <strong>${written}</strong>
+          <span class="trivial-stat-label">written this run</span>
         </div>
         <div class="trivial-stat skip">
           <strong>${r.skipped_already_tagged || 0}</strong>
           <span class="trivial-stat-label">already tagged</span>
         </div>
         <div class="trivial-stat skip">
-          <strong>${r.scanned || 0}</strong>
-          <span class="trivial-stat-label">labels scanned</span>
+          <strong>${r.cells_scanned ?? r.scanned ?? 0}</strong>
+          <span class="trivial-stat-label">${r.scan_dataset ? "cells scanned" : "labels scanned"}</span>
         </div>
       </div>
       <div class="muted" style="font-size:12px;">
-        ${r.tagged > 0
-          ? "The next benchmark export will include the TRIVIAL note marker for these cells."
-          : "No labels matched the whitespace rule. Re-open the modal after labelling to re-scan."}
+        ${written > 0
+          ? `Created ${r.created_tp || 0} TP + ${r.created_fn || 0} FN, tagged ${r.tagged || 0} existing. The next benchmark export includes the TRIVIAL marker for these cells.`
+          : "Nothing matched the spacing rule. Re-open the modal after labelling to re-scan."}
       </div>
       <div class="trivial-actions">
         <button type="button" data-modal-close="1">Done</button>
@@ -8071,13 +8257,19 @@ function renderTrivialWhitespacePane(body) {
 
   // Default: status === "preview"
   const p = _trivialTagger.preview || {};
+  const scanMode = !!_trivialTagger.scanDataset;
   const candidates = p.candidates || [];
-  const toTagCount = p.to_tag || 0;
+  const toTag = p.to_tag || 0;
+  const toCreateTp = p.to_create_tp || 0;
+  const toCreateFn = p.to_create_fn || 0;
+  // Labeled-only mode has no to_write field; fall back to to_tag.
+  const toWrite = (p.to_write != null) ? p.to_write : toTag;
   const skippedAlready = p.skipped_already_tagged || 0;
+  const skippedNeg = p.skipped_negative_verdict || 0;
   const scanned = p.scanned || 0;
   const skippedNoVal = p.skipped_no_value || 0;
-  // Render to-tag rows first (the action targets), then the
-  // already-tagged rows so the operator can confirm coverage.
+  const truncated = !!p.candidates_truncated;
+  // Render actionable rows first, already-tagged rows last.
   const sortedCandidates = candidates.slice().sort((a, b) => {
     if (a.already_tagged !== b.already_tagged) {
       return a.already_tagged ? 1 : -1;
@@ -8085,11 +8277,27 @@ function renderTrivialWhitespacePane(body) {
     return 0;
   });
 
+  // Map a candidate's action -> a coloured "Action" cell.
+  function actionCell(c) {
+    if (c.already_tagged) {
+      return '<span title="latest note already contains TRIVIAL">already tagged</span>';
+    }
+    switch (c.action) {
+      case "create_tp":
+        return '<span style="color:rgb(34,197,94);" title="create a TP cluster verdict">+ create TP</span>';
+      case "create_fn":
+        return '<span style="color:rgb(79,70,229);" title="create an FN cell label">+ create FN</span>';
+      default:  // "tag" (or labeled-only mode, where action is absent)
+        return '<span style="color:rgb(34,197,94);">+ TRIVIAL</span>';
+    }
+  }
+
   let tableHtml;
   if (sortedCandidates.length === 0) {
     tableHtml = `<div class="trivial-empty">
-      No TP / PARTIAL / FN labels match the whitespace-anomaly rule.<br/>
-      Label some cells whose values contain tabs, NBSP, or double spaces and re-open this dialog.
+      ${scanMode
+        ? "No cell in the dataset triggers the spacing-anomaly rule (tabs, NBSP, double spaces, etc.)."
+        : "No TP / PARTIAL / FN labels match the whitespace-anomaly rule.<br/>Label some cells whose values contain tabs, NBSP, or double spaces and re-open this dialog."}
     </div>`;
   } else {
     const rows = sortedCandidates.map((c) => {
@@ -8108,13 +8316,16 @@ function renderTrivialWhitespacePane(body) {
             <td><span class="status-pill ${statusCls}">${escape(c.status)}</span></td>
             <td><span class="target-pill">${escape(c.target)}</span></td>
             <td class="ws-value">${renderTrivialWsValue(hit.value)}</td>
-            <td>${c.already_tagged
-              ? '<span title="latest note already contains TRIVIAL">already tagged</span>'
-              : '<span style="color:rgb(34,197,94);">+ TRIVIAL</span>'}</td>
+            <td>${actionCell(c)}</td>
           </tr>
         `;
       }).join("");
     }).join("");
+    const truncNote = truncated
+      ? `<div class="muted" style="font-size:11px;margin-top:4px;">
+           Preview truncated to ${candidates.length} rows; all matching
+           cells are still written on apply.</div>`
+      : "";
     tableHtml = `
       <div class="trivial-preview">
         <table class="trivial-preview-table">
@@ -8132,6 +8343,7 @@ function renderTrivialWhitespacePane(body) {
           <tbody>${rows}</tbody>
         </table>
       </div>
+      ${truncNote}
     `;
   }
 
@@ -8141,47 +8353,92 @@ function renderTrivialWhitespacePane(body) {
          (deleted source / row out of range).
        </div>`
     : "";
+  const negHtml = (scanMode && skippedNeg > 0)
+    ? `<div class="muted" style="font-size:11px;margin-top:6px;">
+         ${skippedNeg} anomaly cell(s) left alone: covered by a cluster the
+         operator ruled fp / unsure / skip.
+       </div>`
+    : "";
+
+  // Stats row + apply-button label differ between the two modes.
+  const statsHtml = scanMode
+    ? `<div class="trivial-summary">
+         <div class="trivial-stat to-tag">
+           <strong>${toWrite}</strong>
+           <span class="trivial-stat-label">to write</span>
+         </div>
+         <div class="trivial-stat skip">
+           <strong>${skippedAlready}</strong>
+           <span class="trivial-stat-label">already tagged</span>
+         </div>
+         <div class="trivial-stat skip">
+           <strong>${scanned}</strong>
+           <span class="trivial-stat-label">cells scanned</span>
+         </div>
+       </div>
+       <div class="muted" style="font-size:11px;margin:-4px 0 6px;">
+         ${toCreateTp} create&nbsp;TP &middot; ${toCreateFn} create&nbsp;FN
+         &middot; ${toTag} tag existing
+       </div>`
+    : `<div class="trivial-summary">
+         <div class="trivial-stat to-tag">
+           <strong>${toWrite}</strong>
+           <span class="trivial-stat-label">to tag</span>
+         </div>
+         <div class="trivial-stat skip">
+           <strong>${skippedAlready}</strong>
+           <span class="trivial-stat-label">already tagged</span>
+         </div>
+         <div class="trivial-stat skip">
+           <strong>${scanned}</strong>
+           <span class="trivial-stat-label">labels scanned</span>
+         </div>
+       </div>`;
+
+  const descHtml = scanMode
+    ? `Walks <strong>every cell</strong> and auto-labels each genuine
+       <strong>whitespace</strong> anomaly (edge / double spaces, tab,
+       NBSP, line breaks, zero-width chars) <code>TRIVIAL</code>: a cell
+       covered by a cluster becomes <strong>TP</strong>, an un-flagged
+       cell becomes <strong>FN</strong>. Cosmetic comma / bracket /
+       casing reformats are NOT tagged. Operator fp / unsure / skip
+       verdicts are preserved. Idempotent: cells already TRIVIAL are skipped.`
+    : `Appends the literal token <code>TRIVIAL</code> to the
+       <code>note</code> of every <strong>TP / PARTIAL / FN</strong> label
+       whose underlying cell value triggers the spacing-anomaly rule.
+       Idempotent: rows already containing TRIVIAL are skipped.`;
 
   body.innerHTML = `
-    <div class="muted" style="font-size:12px;margin-bottom:8px;">
-      Appends the literal token <code>TRIVIAL</code> to the
-      <code>note</code> of every <strong>TP / PARTIAL / FN</strong> label
-      whose underlying cell value triggers the labelling-UI's
-      red-underline whitespace-anomaly rule (edge / double internal
-      spaces, tab, NBSP, line breaks, zero-width chars, soft hyphen,
-      BOM). Idempotent: rows already containing TRIVIAL are skipped.
-    </div>
-    <div class="trivial-summary">
-      <div class="trivial-stat to-tag">
-        <strong>${toTagCount}</strong>
-        <span class="trivial-stat-label">to tag</span>
-      </div>
-      <div class="trivial-stat skip">
-        <strong>${skippedAlready}</strong>
-        <span class="trivial-stat-label">already tagged</span>
-      </div>
-      <div class="trivial-stat skip">
-        <strong>${scanned}</strong>
-        <span class="trivial-stat-label">labels scanned</span>
-      </div>
-    </div>
+    <div class="muted" style="font-size:12px;margin-bottom:8px;">${descHtml}</div>
+    <label class="trivial-scan-toggle"
+           style="display:flex;align-items:center;gap:6px;font-size:12px;margin-bottom:8px;cursor:pointer;">
+      <input type="checkbox" id="trivial-scan-toggle" ${scanMode ? "checked" : ""}/>
+      Scan entire dataset (auto-label un-flagged anomaly cells, not just existing labels)
+    </label>
+    ${statsHtml}
     ${tableHtml}
     ${noValHtml}
+    ${negHtml}
     <div class="trivial-actions">
-      <span class="left">${toTagCount > 0
-        ? `Will append <code>TRIVIAL</code> to ${toTagCount} note(s).`
+      <span class="left">${toWrite > 0
+        ? `Will write <code>TRIVIAL</code> on ${toWrite} label(s).`
         : "Nothing to write."}</span>
       <button type="button" data-modal-close="1">Cancel</button>
       <button type="button" id="trivial-rescan-btn">Re-scan</button>
       <button type="button" class="primary" id="trivial-apply-btn"
-              ${toTagCount === 0 ? "disabled" : ""}>
-        Tag ${toTagCount} cell(s) TRIVIAL
+              ${toWrite === 0 ? "disabled" : ""}>
+        Write ${toWrite} label(s) TRIVIAL
       </button>
     </div>
   `;
+  body.querySelector("#trivial-scan-toggle")
+    ?.addEventListener("change", (e) => {
+      _trivialTagger.scanDataset = !!e.target.checked;
+      loadTrivialPreview();
+    });
   body.querySelector("#trivial-apply-btn")
     ?.addEventListener("click", () => {
-      if (toTagCount === 0) return;
+      if (toWrite === 0) return;
       applyTrivialTagger();
     });
   body.querySelector("#trivial-rescan-btn")
@@ -8243,12 +8500,9 @@ async function applyPhoneTagger() {
     });
     _phoneTagger.applyResult = r;
     _phoneTagger.status = "done";
-    // Pick up new FN/SKIP labels into the in-memory cache so the
-    // benchmark export reflects them without a page reload.
-    try { await refreshLatest(); } catch (_) { /* non-fatal */ }
-    if (typeof scheduleStatsRefresh === "function") {
-      try { scheduleStatsRefresh(); } catch (_) { /* non-fatal */ }
-    }
+    // Bulk write: refresh stats + cluster queue + cells immediately so
+    // the new SKIP/FN labels reflect without a manual page reload.
+    await _refreshAfterBulkTagWrite();
     const written = (r.cells_written || 0) + (r.clusters_written || 0);
     if (written > 0) {
       toast(
@@ -8484,6 +8738,300 @@ function renderTrivialPhonePane(body) {
     });
   body.querySelector("#phone-rescan-btn")
     ?.addEventListener("click", loadPhonePreview);
+  for (const el of body.querySelectorAll("[data-modal-close]")) {
+    el.addEventListener("click", closeIdentifyTrivialModal);
+  }
+}
+
+// ------------------------------------------------------- Identical-rows pane
+//
+// Mirrors the whitespace flow, but targets the
+// /api/runs/<id>/labels/tag-trivial-row-duplication endpoint which
+// scans every source for COMPLETELY IDENTICAL (byte-identical across
+// all columns) rows and auto-labels each exact-duplicate group:
+//   - a row_duplication cluster whose affected_rows are all identical
+//     (the LLM flagged this exact duplicate) -> TP + TRIVIAL when
+//     unlabelled, TRIVIAL appended when already tp/partial/fn, left
+//     alone when ruled fp/unsure/skip;
+//   - a duplicate row the LLM missed (no covering cluster) -> row-level
+//     FN cell label (column="") + TRIVIAL.
+// Conflicting / partial duplicates (same key, differing other columns)
+// are NOT touched. Idempotent on the TRIVIAL note.
+const _rowDupTagger = {
+  status: "idle",        // idle | loading | preview | applying | done | error
+  preview: null,         // last dry-run response
+  applyResult: null,     // last apply response
+  error: null,
+};
+
+async function loadRowDupPreview() {
+  _rowDupTagger.status = "loading";
+  _rowDupTagger.error = null;
+  _rowDupTagger.preview = null;
+  _rowDupTagger.applyResult = null;
+  renderIdentifyTrivialModal();
+  try {
+    const r = await api(`${API}/labels/tag-trivial-row-duplication`, {
+      method: "POST",
+      body: JSON.stringify({ dry_run: true }),
+    });
+    _rowDupTagger.preview = r;
+    _rowDupTagger.status = "preview";
+  } catch (e) {
+    _rowDupTagger.status = "error";
+    _rowDupTagger.error = e.message || String(e);
+  }
+  renderIdentifyTrivialModal();
+}
+
+async function applyRowDupTagger() {
+  _rowDupTagger.status = "applying";
+  renderIdentifyTrivialModal();
+  try {
+    const r = await api(`${API}/labels/tag-trivial-row-duplication`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    _rowDupTagger.applyResult = r;
+    _rowDupTagger.status = "done";
+    // Bulk write: refresh stats + cluster queue + cells immediately so
+    // the created TP clusters recolour and the FN rows render without a
+    // manual page reload.
+    await _refreshAfterBulkTagWrite();
+    const written = (r.tagged || 0) + (r.created_tp || 0) + (r.created_fn || 0);
+    if (written > 0) {
+      toast(
+        `Wrote ${written} TRIVIAL label(s): `
+        + `${r.created_tp || 0} TP, ${r.created_fn || 0} FN, ${r.tagged || 0} tagged`,
+        3000,
+      );
+    } else {
+      toast("No new TRIVIAL duplicate labels written", 2000);
+    }
+  } catch (e) {
+    _rowDupTagger.status = "error";
+    _rowDupTagger.error = e.message || String(e);
+  }
+  renderIdentifyTrivialModal();
+}
+
+// Compact "rows 0, 57" / "5 rows: 0, 3, 9, ..." description of a
+// duplicate group (caps the listed indices so a 40-row group stays
+// readable in the preview table).
+function renderRowDupGroup(groupRows, anchorRow) {
+  const rows = (groupRows || []).slice();
+  const n = rows.length;
+  const shown = rows.slice(0, 8).map((r) => (r === anchorRow
+    ? `<strong>${r}</strong>` : String(r)));
+  const more = n > 8 ? `, +${n - 8} more` : "";
+  return `<span title="${escape(rows.join(', '))}">${shown.join(", ")}${more}</span>`;
+}
+
+function renderTrivialRowDupPane(body) {
+  if (_rowDupTagger.status === "loading") {
+    body.innerHTML = `
+      <div class="muted" style="font-size:12px;padding:18px;text-align:center;">
+        <span class="trivial-spinner"></span>
+        Scanning for completely identical rows\u2026
+      </div>
+    `;
+    return;
+  }
+
+  if (_rowDupTagger.status === "error") {
+    body.innerHTML = `
+      <div class="trivial-error">${escape(_rowDupTagger.error || "request failed")}</div>
+      <div class="trivial-actions">
+        <button type="button" data-modal-close="1">Close</button>
+        <button type="button" class="primary" id="rowdup-retry">Retry</button>
+      </div>
+    `;
+    body.querySelector("#rowdup-retry")?.addEventListener("click", loadRowDupPreview);
+    body.querySelector("[data-modal-close]")?.addEventListener("click", closeIdentifyTrivialModal);
+    return;
+  }
+
+  if (_rowDupTagger.status === "applying") {
+    const n = _rowDupTagger.preview?.to_write ?? 0;
+    body.innerHTML = `
+      <div class="muted" style="font-size:12px;padding:18px;text-align:center;">
+        <span class="trivial-spinner"></span>
+        Writing ${n} TRIVIAL label(s)\u2026
+      </div>
+    `;
+    return;
+  }
+
+  if (_rowDupTagger.status === "done") {
+    const r = _rowDupTagger.applyResult || {};
+    const written = (r.tagged || 0) + (r.created_tp || 0) + (r.created_fn || 0);
+    body.innerHTML = `
+      <div class="trivial-summary">
+        <div class="trivial-stat to-tag">
+          <strong>${written}</strong>
+          <span class="trivial-stat-label">written this run</span>
+        </div>
+        <div class="trivial-stat skip">
+          <strong>${r.skipped_already_tagged || 0}</strong>
+          <span class="trivial-stat-label">already tagged</span>
+        </div>
+        <div class="trivial-stat skip">
+          <strong>${r.dup_rows ?? 0}</strong>
+          <span class="trivial-stat-label">duplicate rows</span>
+        </div>
+      </div>
+      <div class="muted" style="font-size:12px;">
+        ${written > 0
+          ? `Created ${r.created_tp || 0} TP + ${r.created_fn || 0} FN, tagged ${r.tagged || 0} existing. The next benchmark export marks these rows TRIVIAL.`
+          : "No completely identical rows found. Re-open the modal after labelling to re-scan."}
+      </div>
+      <div class="trivial-actions">
+        <button type="button" data-modal-close="1">Done</button>
+        <button type="button" class="primary" id="rowdup-rescan">Re-scan</button>
+      </div>
+    `;
+    body.querySelector("#rowdup-rescan")?.addEventListener("click", loadRowDupPreview);
+    body.querySelector("[data-modal-close]")?.addEventListener("click", closeIdentifyTrivialModal);
+    return;
+  }
+
+  // Default: status === "preview"
+  const p = _rowDupTagger.preview || {};
+  const candidates = p.candidates || [];
+  const toTag = p.to_tag || 0;
+  const toCreateTp = p.to_create_tp || 0;
+  const toCreateFn = p.to_create_fn || 0;
+  const toWrite = (p.to_write != null) ? p.to_write : (toTag + toCreateTp + toCreateFn);
+  const skippedAlready = p.skipped_already_tagged || 0;
+  const skippedNeg = p.skipped_negative_verdict || 0;
+  const dupRows = p.dup_rows || 0;
+  const dupGroups = p.dup_groups || 0;
+  const truncated = !!p.candidates_truncated;
+
+  // Render actionable rows first, already-tagged rows last.
+  const sortedCandidates = candidates.slice().sort((a, b) => {
+    if (a.already_tagged !== b.already_tagged) return a.already_tagged ? 1 : -1;
+    return 0;
+  });
+
+  function actionCell(c) {
+    if (c.already_tagged) {
+      return '<span title="latest note already contains TRIVIAL">already tagged</span>';
+    }
+    switch (c.action) {
+      case "create_tp":
+        return '<span style="color:rgb(34,197,94);" title="create a TP cluster verdict">+ create TP</span>';
+      case "create_fn":
+        return '<span style="color:rgb(79,70,229);" title="create a row-level FN label">+ create FN</span>';
+      default:  // "tag"
+        return '<span style="color:rgb(34,197,94);">+ TRIVIAL</span>';
+    }
+  }
+
+  let tableHtml;
+  if (sortedCandidates.length === 0) {
+    tableHtml = `<div class="trivial-empty">
+      No source contains completely identical (byte-identical across every
+      column) rows. Conflicting / partial duplicates are not tagged here.
+    </div>`;
+  } else {
+    const rows = sortedCandidates.map((c) => {
+      const cls = c.already_tagged ? "is-already-tagged" : "";
+      const statusCls = (c.status || "").toLowerCase();
+      return `
+        <tr class="${cls}">
+          <td><code>${escape(c.source)}</code></td>
+          <td>${c.row}</td>
+          <td class="rowdup-group">${renderRowDupGroup(c.group_rows, c.row)}</td>
+          <td style="text-align:center;">${c.group_size || (c.group_rows || []).length}</td>
+          <td><span class="status-pill ${statusCls}">${escape(c.status)}</span></td>
+          <td><span class="target-pill">${escape(c.target)}</span></td>
+          <td>${actionCell(c)}</td>
+        </tr>
+      `;
+    }).join("");
+    const truncNote = truncated
+      ? `<div class="muted" style="font-size:11px;margin-top:4px;">
+           Preview truncated to ${candidates.length} rows; all matching
+           rows are still written on apply.</div>`
+      : "";
+    tableHtml = `
+      <div class="trivial-preview">
+        <table class="trivial-preview-table">
+          <thead>
+            <tr>
+              <th>Source</th>
+              <th style="width:50px;">Row</th>
+              <th>Duplicate of</th>
+              <th style="width:45px;">Size</th>
+              <th style="width:60px;">Status</th>
+              <th style="width:65px;">Target</th>
+              <th style="width:110px;">Action</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      ${truncNote}
+    `;
+  }
+
+  const negHtml = skippedNeg > 0
+    ? `<div class="muted" style="font-size:11px;margin-top:6px;">
+         ${skippedNeg} duplicate group(s) left alone: covered by a cluster the
+         operator ruled fp / unsure / skip.
+       </div>`
+    : "";
+
+  body.innerHTML = `
+    <div class="muted" style="font-size:12px;margin-bottom:8px;">
+      Scans <strong>every source</strong> for <strong>completely identical</strong>
+      rows (byte-identical across every column) and auto-labels each
+      exact-duplicate group <code>TRIVIAL</code>: a group the LLM flagged
+      becomes <strong>TP</strong>, a duplicate row the LLM missed becomes a
+      row-level <strong>FN</strong>. Conflicting / partial duplicates (same
+      key, differing columns) are NOT tagged. Operator fp / unsure / skip
+      verdicts are preserved. Idempotent: rows already TRIVIAL are skipped.
+    </div>
+    <div class="trivial-summary">
+      <div class="trivial-stat to-tag">
+        <strong>${toWrite}</strong>
+        <span class="trivial-stat-label">to write</span>
+      </div>
+      <div class="trivial-stat skip">
+        <strong>${skippedAlready}</strong>
+        <span class="trivial-stat-label">already tagged</span>
+      </div>
+      <div class="trivial-stat skip">
+        <strong>${dupRows}</strong>
+        <span class="trivial-stat-label">duplicate rows</span>
+      </div>
+    </div>
+    <div class="muted" style="font-size:11px;margin:-4px 0 6px;">
+      ${toCreateTp} create&nbsp;TP &middot; ${toCreateFn} create&nbsp;FN
+      &middot; ${toTag} tag existing &middot; ${dupGroups} duplicate group(s)
+    </div>
+    ${tableHtml}
+    ${negHtml}
+    <div class="trivial-actions">
+      <span class="left">${toWrite > 0
+        ? `Will write <code>TRIVIAL</code> on ${toWrite} label(s).`
+        : "Nothing to write."}</span>
+      <button type="button" data-modal-close="1">Cancel</button>
+      <button type="button" id="rowdup-rescan-btn">Re-scan</button>
+      <button type="button" class="primary" id="rowdup-apply-btn"
+              ${toWrite === 0 ? "disabled" : ""}>
+        Write ${toWrite} label(s) TRIVIAL
+      </button>
+    </div>
+  `;
+  body.querySelector("#rowdup-apply-btn")
+    ?.addEventListener("click", () => {
+      if (toWrite === 0) return;
+      applyRowDupTagger();
+    });
+  body.querySelector("#rowdup-rescan-btn")
+    ?.addEventListener("click", loadRowDupPreview);
   for (const el of body.querySelectorAll("[data-modal-close]")) {
     el.addEventListener("click", closeIdentifyTrivialModal);
   }

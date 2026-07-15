@@ -173,6 +173,92 @@
   font-size: 11px;
 }
 
+/* Schema-level finding (header_synonym / dtype_drift): a per-sheet map
+   of the header (and dtype) a single canonical concept takes. Spans the
+   full width of the compare grid since there are no side-by-side rows. */
+.mt-compare .mt-schema { grid-column: 1 / -1; }
+.mt-schema-table thead th {
+  color: var(--muted);
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+}
+.mt-schema-table td.mt-schema-diff {
+  color: var(--sev-medium);
+  font-weight: 600;
+}
+.mt-schema-note {
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+/* ---- Relations browser modal (per-file union/join groups) ---- */
+.rel-panel { width: min(860px, 94vw); max-height: 88vh; }
+.rel-panel .cc-modal-body { overflow: auto; }
+.rel-summary {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  padding: 4px 2px 12px; border-bottom: 1px solid var(--border);
+  margin-bottom: 12px;
+}
+.rel-stat { font-size: 12.5px; color: var(--muted); }
+.rel-stat b { color: var(--text); font-size: 14px; }
+.rel-stat-union b { color: #60a5fa; }
+.rel-stat-join b { color: #c084fc; }
+.rel-filter {
+  margin-left: auto; min-width: 200px;
+  padding: 5px 8px; border: 1px solid var(--border);
+  border-radius: 6px; background: var(--panel-2); color: var(--text);
+  font-size: 12px;
+}
+.rel-list { display: flex; flex-direction: column; gap: 10px; }
+.rel-wb {
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--panel); overflow: hidden;
+}
+.rel-wb-head {
+  display: flex; justify-content: space-between; align-items: baseline;
+  gap: 10px; padding: 7px 12px; background: var(--panel-2);
+  border-bottom: 1px solid var(--border);
+}
+.rel-wb-name {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px; font-weight: 600; color: var(--text);
+  word-break: break-all;
+}
+.rel-wb-sheets { font-size: 11px; white-space: nowrap; }
+.rel-groups { display: flex; flex-direction: column; }
+.rel-group { padding: 8px 12px; }
+.rel-group + .rel-group { border-top: 1px solid var(--border); }
+.rel-group-top { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
+.rel-badge {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.04em;
+  padding: 1px 7px; border-radius: 4px;
+}
+.rel-badge-union { background: rgba(96,165,250,0.18); color: #60a5fa; }
+.rel-badge-join  { background: rgba(192,132,252,0.18); color: #c084fc; }
+.rel-unconf {
+  font-size: 10px; padding: 1px 6px; border-radius: 4px;
+  background: rgba(148,163,184,0.18); color: var(--muted);
+}
+.rel-find { font-size: 11px; color: var(--sev-medium); }
+.rel-find-0 { color: var(--muted); opacity: 0.7; }
+.rel-group-body {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11.5px; line-height: 1.6; color: var(--text);
+  word-break: break-word;
+}
+.rel-sheet { color: var(--text); }
+.rel-col { color: var(--accent); }
+.rel-arrow { color: var(--muted); margin: 0 2px; }
+.rel-rationale { margin-top: 5px; font-size: 11px; line-height: 1.4; }
+.rel-toggle {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--muted); cursor: pointer;
+}
+.rel-empty { padding: 24px; text-align: center; font-size: 13px; }
+
 /* ---- detail panel ---- */
 .detail .mt-detail {
   padding: 12px;

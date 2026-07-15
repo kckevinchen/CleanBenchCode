@@ -11,7 +11,11 @@ from pathlib import Path
 
 import pytest
 
-from src.labeling.export import materialize_label_benchmark
+from src.labeling._helpers import _is_low_value_fix
+from src.labeling.export import (
+    materialize_label_benchmark,
+    materialize_skipped_cells,
+)
 from src.labeling.schema import Label, LabelStatus, LabelTarget
 from src.labeling.store import LabelStore
 
@@ -192,16 +196,17 @@ class TestAffectedRowsPropagation:
     without this fan-out the benchmark would only carry the verdict
     for the representative row and silently drop the rest."""
 
-    def test_fans_out_to_every_affected_row(
+    def test_fans_out_to_every_affected_row_for_fd_violation(
         self, store: LabelStore,
     ) -> None:
+        # FD violations fan out to all affected rows.
         cluster = _cluster(
             "c1",
-            ["school", "city"],
-            error_types=["string_calculation_inconsistency"],
+            ["zip", "state"],
+            error_types=["fd_violation"],
             detections=[
                 {
-                    "issue_id": "rel__r1#a.csv#r00005",
+                    "issue_id": "fd__r1#a.csv#r00005",
                     "affected_rows": [5, 23, 26, 32],
                 },
             ],
@@ -210,7 +215,7 @@ class TestAffectedRowsPropagation:
         store.append(Label(
             target=LabelTarget.CLUSTER, target_id="c1",
             source="a.csv", row=5, column=None,
-            columns=["school", "city"],
+            columns=["zip", "state"],
             status=LabelStatus.TP,
             annotator="tester",
         ))
@@ -219,16 +224,57 @@ class TestAffectedRowsPropagation:
         # 4 rows × 2 columns = 8 emitted cells.
         keys = {(c.row, c.column) for c in cells}
         assert keys == {
-            (5, "school"), (5, "city"),
-            (23, "school"), (23, "city"),
-            (26, "school"), (26, "city"),
-            (32, "school"), (32, "city"),
+            (5, "zip"), (5, "state"),
+            (23, "zip"), (23, "state"),
+            (26, "zip"), (26, "state"),
+            (32, "zip"), (32, "state"),
         }
         # Every emitted cell carries the cluster's verdict + cluster id.
         for c in cells:
             assert c.label == "error"
             assert c.cluster_ids == ["c1"]
-            assert c.error_types == ["string_calculation_inconsistency"]
+            assert c.error_types == ["fd_violation"]
+
+    def test_calculation_inconsistency_does_not_fan_out_to_affected_rows(
+        self, store: LabelStore,
+    ) -> None:
+        # Calculation inconsistency types (row_calculation_inconsistency,
+        # string_calculation_inconsistency) apply ONLY to the anchor row,
+        # NOT to affected_rows. This differs from FD violations and row
+        # duplications which do fan out.
+        cluster = _cluster(
+            "c1",
+            ["qty", "price", "total"],
+            error_types=["row_calculation_inconsistency"],
+            detections=[
+                {
+                    "issue_id": "calc__r1#a.csv#r00005",
+                    "affected_rows": [5, 23, 26, 32],
+                },
+            ],
+            row=5,
+        )
+        store.append(Label(
+            target=LabelTarget.CLUSTER, target_id="c1",
+            source="a.csv", row=5, column=None,
+            columns=["qty", "price", "total"],
+            status=LabelStatus.TP,
+            annotator="tester",
+        ))
+
+        cells = materialize_label_benchmark([cluster], store)
+        # Only 1 row (anchor) × 3 columns = 3 emitted cells.
+        keys = {(c.row, c.column) for c in cells}
+        assert keys == {
+            (5, "qty"), (5, "price"), (5, "total"),
+        }
+        # Verify no cells from affected rows are emitted.
+        assert all(c.row == 5 for c in cells)
+        # Every emitted cell carries the cluster's verdict + cluster id.
+        for c in cells:
+            assert c.label == "error"
+            assert c.cluster_ids == ["c1"]
+            assert c.error_types == ["row_calculation_inconsistency"]
 
     def test_no_affected_rows_emits_only_primary_row(
         self, store: LabelStore,
@@ -363,6 +409,56 @@ class TestAffectedRowsPropagation:
         )
         by_row_rev = {c.row: c.corrected_value for c in cells_rev}
         assert by_row_rev == fixes
+
+    def test_overbroad_error_fanout_does_not_make_peer_ambiguous(
+        self, store: LabelStore,
+    ) -> None:
+        # Regression for the phantom "ambiguous" verdict on
+        # ``f5f0334b.csv`` row 2 (run 20260601T193136Z): a TP cluster
+        # anchored at row 10 carried an aggregate "examples: ..."
+        # detection whose over-broad ``affected_rows`` fanned its
+        # "error" verdict onto peer rows. Those peers have their OWN
+        # FP (clean) anchor cluster -- but the clean anchor's verdict
+        # MATCHED other clean fan-outs first, so the cell was never
+        # marked authoritative and the later error fan-out downgraded
+        # it to "ambiguous". The peer's own anchor must win: "clean".
+        peers = [2, 5, 16]
+        clean_clusters = []
+        for r in peers:
+            cl = _cluster(
+                f"clean{r}",
+                ["VENDOR NAME"],
+                row=r,
+                row_values={"VENDOR NAME": f"vendor_{r}"},
+                # Each clean cluster also advertises an aggregate
+                # detection that fans onto its clean peers.
+                detections=[{"affected_rows": peers}],
+            )
+            clean_clusters.append(cl)
+            store.append(_label(
+                target_id=f"clean{r}", column="VENDOR NAME",
+                columns=["VENDOR NAME"], status=LabelStatus.FP,
+            ))
+        # TP cluster anchored elsewhere whose aggregate detection
+        # over-reaches onto rows 2 and 16 (but NOT row 5).
+        err = _cluster(
+            "err10",
+            ["VENDOR NAME"],
+            row=10,
+            row_values={"VENDOR NAME": "XEROX BUSINESS  SOLU"},
+            detections=[{"affected_rows": [2, 10, 16]}],
+        )
+        store.append(_label(
+            target_id="err10", column="VENDOR NAME",
+            columns=["VENDOR NAME"], status=LabelStatus.TP,
+        ))
+
+        cells = materialize_label_benchmark(clean_clusters + [err], store)
+        by_row = {c.row: c.label for c in cells}
+        assert by_row[2] == "clean"
+        assert by_row[5] == "clean"
+        assert by_row[16] == "clean"
+        assert by_row[10] == "error"
 
 
 # ---------------------------------------------------------------------------
@@ -967,5 +1063,561 @@ class TestFindLabelConflicts:
         assert keys_a == keys_b == [
             ("a.csv", "c", "V"), ("z.csv", "c", "V"),
         ]
+
+
+
+
+class TestTrivialPerCellFix:
+    """A multi-row TRIVIAL whitespace cluster must give each affected row
+    its OWN deterministic whitespace fix, not the anchor's correction
+    fanned out via ``affected_rows``."""
+
+    def test_peer_rows_get_own_normalized_fix(self, store: LabelStore) -> None:
+        vals = {
+            (0, "name"): "DRY SODA  - TPR 11/18",   # double space
+            (1, "name"): "SEA TANGLE  - TPR",
+            (2, "name"): "LIGHTLIFE  - TPR",
+        }
+        cluster = _cluster(
+            "c1", ["name"],
+            synthesis={"canonical_fix": "DRY SODA - TPR 11/18"},
+            detections=[{"affected_rows": [0, 1, 2], "columns": ["name"]}],
+            row=0,
+        )
+        store.append(Label(
+            target=LabelTarget.CLUSTER, target_id="c1", source="a.csv",
+            row=0, column="name", columns=["name"], status=LabelStatus.TP,
+            note="(auto: spacing anomaly) TRIVIAL", annotator="tester",
+        ))
+        cells = materialize_label_benchmark(
+            [cluster], store,
+            value_resolver=lambda s, r, c: vals.get((r, c), ""),
+        )
+        by_row = {c.row: c.corrected_value for c in cells}
+        assert by_row[0] == "DRY SODA - TPR 11/18"
+        # Peer rows get THEIR OWN fix, not the anchor's "DRY SODA ...".
+        assert by_row[1] == "SEA TANGLE - TPR"
+        assert by_row[2] == "LIGHTLIFE - TPR"
+        for c in cells:
+            assert c.label == "error"
+            assert "TRIVIAL" in (c.note or "")
+
+    def test_own_anchor_fix_not_overridden(self, store: LabelStore) -> None:
+        # An explicit (operator/LLM) fix on a TRIVIAL-noted cell must be
+        # preserved -- the deterministic recompute only fills EMPTY fixes.
+        cluster = _cluster("c1", ["name"], row=0)
+        store.append(Label(
+            target=LabelTarget.CLUSTER, target_id="c1", source="a.csv",
+            row=0, column="name", columns=["name"], status=LabelStatus.TP,
+            corrected_value="Operator's better fix",
+            note="spelling+space TRIVIAL", annotator="tester",
+        ))
+        cells = materialize_label_benchmark(
+            [cluster], store, value_resolver=lambda s, r, c: "foo  bar",
+        )
+        assert cells[0].corrected_value == "Operator's better fix"
+
+    def test_non_trivial_peer_unaffected(self, store: LabelStore) -> None:
+        # A non-TRIVIAL multi-row cluster keeps the existing fan-out /
+        # llm-suggestion behaviour (peer rows are NOT whitespace-normalised).
+        cluster = _cluster(
+            "c1", ["name"],
+            synthesis={"canonical_fix": "Canonical"},
+            detections=[{"affected_rows": [0, 1], "columns": ["name"]}],
+            row=0,
+        )
+        store.append(Label(
+            target=LabelTarget.CLUSTER, target_id="c1", source="a.csv",
+            row=0, column="name", columns=["name"], status=LabelStatus.TP,
+            annotator="tester",
+        ))
+        cells = materialize_label_benchmark(
+            [cluster], store, value_resolver=lambda s, r, c: "weird  value",
+        )
+        # Peer row falls back to the cluster's llm suggestion, unchanged.
+        by_row = {c.row: c.corrected_value for c in cells}
+        assert by_row[1] == "Canonical"
+
+    def test_trivial_anchor_note_survives_earlier_fanout(
+        self, store: LabelStore,
+    ) -> None:
+        # A non-anchor fan-out (cluster c1, plain note) creates the cell
+        # for row 1 BEFORE its own anchor (cluster c2, TRIVIAL note) is
+        # processed. The agreeing anchor's note must supersede the
+        # fanned-out plain note, otherwise the deterministic
+        # whitespace-fix backfill (which keys on "TRIVIAL" in the note)
+        # skips the cell and the error exports with no correction.
+        c1 = {
+            "cluster_id": "c1", "source": "a.csv", "row": 0,
+            "columns": ["name"], "row_values": {"name": "X"},
+            "error_types": ["typo"],
+            "detections": [{"affected_rows": [1], "columns": ["name"]}],
+        }
+        c2 = {
+            "cluster_id": "c2", "source": "a.csv", "row": 1,
+            "columns": ["name"], "row_values": {"name": "Acme  Co"},
+            "error_types": ["typo"], "detections": [],
+        }
+        # c1 plain note, c2 TRIVIAL note; both TP, neither carries a fix.
+        store.append(Label(
+            target=LabelTarget.CLUSTER, target_id="c1", source="a.csv",
+            row=0, column="name", columns=["name"], status=LabelStatus.TP,
+            note="(real typo)", annotator="tester",
+        ))
+        store.append(Label(
+            target=LabelTarget.CLUSTER, target_id="c2", source="a.csv",
+            row=1, column="name", columns=["name"], status=LabelStatus.TP,
+            note="(auto: spacing anomaly) TRIVIAL", annotator="tester",
+        ))
+        vals = {(0, "name"): "X", (1, "name"): "Acme  Co"}
+        # c1 (the fan-out) is processed BEFORE c2 (the TRIVIAL anchor).
+        cells = materialize_label_benchmark(
+            [c1, c2], store,
+            value_resolver=lambda s, r, c: vals.get((r, c), ""),
+        )
+        by_key = {(c.row, c.column): c for c in cells}
+        row1 = by_key[(1, "name")]
+        assert "TRIVIAL" in (row1.note or "")
+        # The deterministic whitespace fix is applied (double space -> one).
+        assert row1.corrected_value == "Acme Co"
+
+
+class TestIsLowValueFix:
+    """Spacing-or-single-punctuation rule used to flag 'low value' TP cells."""
+
+    @pytest.mark.parametrize(
+        "a,b,expected",
+        [
+            ("New  Haven", "New Haven", True),       # internal whitespace
+            (" Apple ", "Apple", True),              # padding whitespace
+            ("Strubenvalley", "Struben Valley", True),   # word-boundary spacing
+            ("log anberries", "loganberries", True),     # OCR word-split
+            ("St Louis", "St. Louis", True),         # one punctuation added
+            ("Pty,) Ltd", "Pty) Ltd", True),         # one punctuation removed
+            ("apple", "Apple", True),                # casing-only
+            ("Pacfic", "Pacific", False),            # real letter typo
+            ("CENTENNIEL", "CENTENNIAL", False),     # real letter typo
+            ("NX PRESTIEGE", "NX PRESTIGE", False),  # real letter typo
+            ("foo", "foo", False),                   # no-op (no fix)
+        ],
+    )
+    def test_classification(self, a, b, expected):
+        assert _is_low_value_fix(a, b) is expected
+
+
+class TestSkippedCells:
+    """``materialize_skipped_cells`` captures SKIP-cluster cells separately."""
+
+    def test_skip_cluster_emitted_with_skip_label(self, store):
+        store.append(_label(target_id="c1", column="name", status=LabelStatus.SKIP))
+        skipped = materialize_skipped_cells([_cluster("c1", ["name"])], store)
+        assert len(skipped) == 1
+        assert skipped[0].label == "skip"
+        assert skipped[0].original_value == "val_name"
+        assert skipped[0].cluster_ids == ["c1"]
+        assert skipped[0].corrected_value is None
+
+    def test_non_skip_cluster_not_emitted(self, store):
+        store.append(_label(target_id="c1", column="name", status=LabelStatus.TP))
+        assert materialize_skipped_cells([_cluster("c1", ["name"])], store) == []
+
+    def test_exclude_keys_drops_benchmark_cells(self, store):
+        # A real verdict on the same cell outranks the skip -> omit it.
+        store.append(_label(target_id="c1", column="name", status=LabelStatus.SKIP))
+        skipped = materialize_skipped_cells(
+            [_cluster("c1", ["name"])], store,
+            exclude_keys={("a.csv", 0, "name")},
+        )
+        assert skipped == []
+
+    def test_fanout_across_affected_rows(self, store):
+        store.append(_label(target_id="c1", column="name", status=LabelStatus.SKIP))
+        cluster = _cluster("c1", ["name"], detections=[{"affected_rows": [0, 5]}])
+        skipped = materialize_skipped_cells([cluster], store)
+        assert sorted(c.row for c in skipped) == [0, 5]
+        assert all(c.label == "skip" for c in skipped)
+
+
+class TestLowValueFlag:
+    """low_value marks ONLY rejected (FP / clean) LLM flags whose fix is
+    spacing-or-single-punctuation. Confirmed typos (TP / error) are never
+    low value, however trivial their fix."""
+
+    def _flagged(self, store, status, original, fix):
+        store.append(_label(
+            target_id="c1", column="name", columns=["name"], status=status,
+        ))
+        return _cluster(
+            "c1", ["name"],
+            row_values={"name": original},
+            synthesis={"canonical_fix": fix},
+        )
+
+    def test_fp_spacing_or_punct_fix_is_low_value(self, store):
+        cl = self._flagged(store, LabelStatus.FP, "Pty,) Ltd", "Pty) Ltd")
+        cells = materialize_label_benchmark([cl], store)
+        assert cells[0].label == "clean"
+        assert cells[0].low_value is True
+
+    def test_tp_spacing_fix_not_low_value(self, store):
+        # A confirmed typo is a real error even with a trivial fix.
+        cl = self._flagged(store, LabelStatus.TP, "New  Haven", "New Haven")
+        cells = materialize_label_benchmark([cl], store)
+        assert cells[0].label == "error"
+        assert cells[0].low_value is False
+
+    def test_fp_letter_fix_not_low_value(self, store):
+        # FP, but a real letter change -> not a spacing/punct flag.
+        cl = self._flagged(store, LabelStatus.FP, "Pacfic", "Pacific")
+        cells = materialize_label_benchmark([cl], store)
+        assert cells[0].label == "clean"
+        assert cells[0].low_value is False
+
+    def test_clean_without_llm_fix_not_low_value(self, store):
+        store.append(_label(
+            target_id="c1", column="name", columns=["name"],
+            status=LabelStatus.FP,
+        ))
+        cl = _cluster("c1", ["name"], row_values={"name": "Acme Ltd"})
+        cells = materialize_label_benchmark([cl], store)
+        assert cells[0].low_value is False
+
+
+# ---------------------------------------------------------------------------
+# Instruction-vs-value detection + lean benchmark projection
+# ---------------------------------------------------------------------------
+
+from src.labeling._helpers import _derive_trivial_fix, _looks_like_instruction
+from src.labeling.export import (
+    LEAN_BENCHMARK_FIELDS,
+    LEAN_EXPORT_ERROR_TYPES,
+    benchmark_record_for_export,
+    full_benchmark_record,
+    lean_benchmark_record,
+)
+
+
+class TestLooksLikeInstruction:
+    @pytest.mark.parametrize("text", [
+        'Change "Strubenvalley" to "Struben Valley".',
+        'set Primary Target Firm to "Pacific Breeze (Pty) Ltd"',
+        'Correct to "Property Protection Management SA (Pty) Ltd"',
+        'Change "Ptd" to "Ltd"',
+        'Replace “Smart phones” with “Smartphones”',
+        "Replace Quard-Core with Quad-Core",
+        # Markerless instructions: verb + editing-OBJECT keyword, no quote/arrow.
+        "Remove the trailing comma",
+        "Remove the trailing comma.",
+        "Remove the space before the comma",
+        "Remove the space before the colon.",
+        "Remove the trailing apostrophe",
+        "Add closing parenthesis",
+        "Remove the extra whitespace",
+        "Delete the leading space",
+    ])
+    def test_instruction_prose_detected(self, text):
+        assert _looks_like_instruction(text) is True
+
+    @pytest.mark.parametrize("text", [
+        "Struben Valley",
+        "Pacific Breeze (Pty) Ltd",
+        "Smartphones & PDAs",
+        "Change Healthcare Inc",       # verb prefix but no instruction marker
+        "Set Design Studio",            # verb prefix but no marker
+        "Remove Wall Anchors",          # verb prefix, no editing-object keyword
+        "Add Value Consulting Group",   # verb prefix, no editing-object keyword
+        "Trim Kitchen Cabinets",        # verb prefix, no editing-object keyword
+        "10 to 20",                      # marker but no verb prefix
+        "",
+        None,
+    ])
+    def test_plain_values_not_instructions(self, text):
+        assert _looks_like_instruction(text) is False
+
+
+class TestDeriveTrivialFix:
+    """``_derive_trivial_fix`` turns a trivial edit INSTRUCTION into the literal
+    result of that specific edit (faithful by construction), or ``None`` when
+    the instruction is out of scope."""
+
+    @pytest.mark.parametrize("original,instruction,expected", [
+        # Class 1: remove a stray space before a named mark.
+        ("PMP , Machine learning with R",
+         "Remove the space before the comma",
+         "PMP, Machine learning with R"),
+        ("Petroleum (Price) Violation Escrow : Exxon 1986 Restitution",
+         "Remove the space before the colon.",
+         "Petroleum (Price) Violation Escrow: Exxon 1986 Restitution"),
+        # Class 2: remove a trailing named mark.
+        ("MATTHEW R. DEKOATZ,", "Remove the trailing comma", "MATTHEW R. DEKOATZ"),
+        ("RUBEN P. HERNANDEZ,", "Remove the trailing comma.", "RUBEN P. HERNANDEZ"),
+        ("Elliott Nevertire Trust'", "Remove the trailing apostrophe",
+         "Elliott Nevertire Trust"),
+        # Class 3: purely-whitespace collapse (no punctuation object named).
+        ("Acme  Ltd", "Remove the extra whitespace", "Acme Ltd"),
+    ])
+    def test_derives_faithfully(self, original, instruction, expected):
+        assert _derive_trivial_fix(original, instruction) == expected
+
+    def test_trailing_removal_does_not_touch_other_punctuation(self):
+        # The ampersand must survive: only the trailing comma is removed.
+        out = _derive_trivial_fix(
+            "Group Insurance Acct Appd&Cont Isf,", "Remove the trailing comma."
+        )
+        assert out == "Group Insurance Acct Appd&Cont Isf"
+
+    @pytest.mark.parametrize("original,instruction", [
+        # Ambiguous placement -> not derivable.
+        ("CLUBS-CNTRY,MBRSHIP(ATHLET", "Add closing parenthesis"),
+        # Blank-a-cell semantics -> not a concrete value.
+        ("NM", "set SA3_Code to null"),
+        # Replace with an unknown value -> concrete value unavailable here.
+        ('Change "x" to "y"', 'Change "x" to "y"'),
+        # A trailing-comma instruction on a value with no trailing comma is a no-op.
+        ("MATTHEW R. DEKOATZ", "Remove the trailing comma"),
+    ])
+    def test_out_of_scope_returns_none(self, original, instruction):
+        assert _derive_trivial_fix(original, instruction) is None
+
+    def test_non_instruction_input_returns_none(self):
+        # A concrete value that is not an instruction is never "derived".
+        assert _derive_trivial_fix("Acme Ltd", "Pacific Breeze (Pty) Ltd") is None
+
+    def test_empty_original_returns_none(self):
+        assert _derive_trivial_fix("", "Remove the trailing comma") is None
+
+
+class TestLeanBenchmarkRecord:
+    def _cell(self, **kw) -> BenchmarkCell:
+        base = {
+            "source": "a.csv", "row": 0, "column": "Firm",
+            "original_value": "Pacfic Breeze (Pty) Ltd",
+            "label": "error",
+            "corrected_value": None,
+            "llm_suggested_value": None,
+            "error_types": ["typo"],
+            "cluster_ids": ["a.csv__r00000-c000"] * 40,
+            "detection_ids": ["r0001-i0000"],
+            "annotators": ["tester"],
+            "note": "(auto: spacing anomaly) TRIVIAL",
+        }
+        base.update(kw)
+        return BenchmarkCell(**base)
+
+    def test_lean_record_has_only_lean_fields(self):
+        rec = lean_benchmark_record(self._cell())
+        assert set(rec.keys()) == set(LEAN_BENCHMARK_FIELDS)
+        # Provenance bloat is dropped.
+        for dropped in ("cluster_ids", "detection_ids", "annotators",
+                        "note", "llm_suggested_value"):
+            assert dropped not in rec
+
+    def test_prose_corrected_value_resolves_to_llm_value(self):
+        cell = self._cell(
+            corrected_value='set Firm to "Pacific Breeze (Pty) Ltd"',
+            llm_suggested_value="Pacific Breeze (Pty) Ltd",
+        )
+        rec = lean_benchmark_record(cell)
+        assert rec["corrected_value"] == "Pacific Breeze (Pty) Ltd"
+
+    def test_concrete_operator_value_is_kept(self):
+        cell = self._cell(
+            corrected_value="Pacific Breeze (Pty) Ltd",
+            llm_suggested_value="something else",
+        )
+        rec = lean_benchmark_record(cell)
+        assert rec["corrected_value"] == "Pacific Breeze (Pty) Ltd"
+
+    def test_underivable_prose_is_dropped(self):
+        cell = self._cell(
+            corrected_value='Change "x" to "y"',
+            llm_suggested_value=None,
+        )
+        rec = lean_benchmark_record(cell)
+        # No concrete value AND the instruction is not a trivially derivable
+        # class -> drop it (null) rather than ship an edit-instruction sentence.
+        assert rec["corrected_value"] is None
+
+    def test_derivable_prose_instruction_is_resolved(self):
+        cell = self._cell(
+            original_value="MATTHEW R. DEKOATZ,",
+            corrected_value="Remove the trailing comma",
+            llm_suggested_value=None,
+        )
+        rec = lean_benchmark_record(cell)
+        # A trivial, unambiguous instruction is applied to the original.
+        assert rec["corrected_value"] == "MATTHEW R. DEKOATZ"
+
+    def test_clean_cell_has_null_corrected_value(self):
+        cell = self._cell(label="clean", corrected_value=None,
+                          llm_suggested_value="Cape Gate (Pty) Ltd")
+        rec = lean_benchmark_record(cell)
+        assert rec["label"] == "clean"
+        assert rec["corrected_value"] is None
+
+    def test_benchmark_record_for_export_lean_only_for_lean_types(self):
+        cell = self._cell()
+        assert "typo" in LEAN_EXPORT_ERROR_TYPES
+        # typo -> lean
+        typo_rec = benchmark_record_for_export(cell, "typo")
+        assert set(typo_rec.keys()) == set(LEAN_BENCHMARK_FIELDS)
+        # a non-lean type -> full schema (provenance retained)
+        full_rec = benchmark_record_for_export(cell, "fd_violation")
+        assert "cluster_ids" in full_rec and "note" in full_rec
+
+    def test_non_lean_export_is_also_instruction_safe(self):
+        # The unified non-lean path resolves corrected_value too: an edit
+        # instruction never ships verbatim, while full provenance is kept.
+        cell = self._cell(
+            corrected_value='set Firm to "Pacific Breeze (Pty) Ltd"',
+            llm_suggested_value="Pacific Breeze (Pty) Ltd",
+        )
+        rec = benchmark_record_for_export(cell, "fd_violation")
+        assert rec["corrected_value"] == "Pacific Breeze (Pty) Ltd"
+        assert "cluster_ids" in rec and "note" in rec
+
+
+class TestFullBenchmarkRecord:
+    """``full_benchmark_record`` keeps every model_dump field but resolves
+    ``corrected_value`` to a concrete literal for ``error`` cells (so the
+    full ``benchmark.jsonl`` never ships an edit-instruction), exactly like
+    the lean/merged exports."""
+
+    def _cell(self, **kw) -> BenchmarkCell:
+        base = {
+            "source": "a.csv", "row": 0, "column": "Firm",
+            "original_value": "Pacfic Breeze (Pty) Ltd",
+            "label": "error",
+            "corrected_value": None,
+            "llm_suggested_value": None,
+            "error_types": ["typo"],
+            "cluster_ids": ["a.csv__r00000-c000"],
+            "detection_ids": ["r0001-i0000"],
+            "annotators": ["tester"],
+            "note": "n",
+        }
+        base.update(kw)
+        return BenchmarkCell(**base)
+
+    def test_prose_corrected_value_resolves_to_llm_literal(self):
+        cell = self._cell(
+            corrected_value='set Firm to "Pacific Breeze (Pty) Ltd"',
+            llm_suggested_value="Pacific Breeze (Pty) Ltd",
+        )
+        rec = full_benchmark_record(cell)
+        assert rec["corrected_value"] == "Pacific Breeze (Pty) Ltd"
+        # Full schema retained, incl. the raw suggestion alongside.
+        assert rec["llm_suggested_value"] == "Pacific Breeze (Pty) Ltd"
+        assert "cluster_ids" in rec and "note" in rec and "annotators" in rec
+
+    def test_operator_literal_is_kept_over_suggestion(self):
+        cell = self._cell(
+            corrected_value="Pacific Breeze (Pty) Ltd",
+            llm_suggested_value="something else",
+        )
+        rec = full_benchmark_record(cell)
+        assert rec["corrected_value"] == "Pacific Breeze (Pty) Ltd"
+
+    def test_clean_cell_dumped_unchanged(self):
+        cell = self._cell(label="clean", corrected_value="whatever",
+                          llm_suggested_value="x")
+        rec = full_benchmark_record(cell)
+        # Non-error cells are dumped verbatim (corrected_value untouched).
+        assert rec["corrected_value"] == "whatever"
+        assert rec == cell.model_dump()
+
+    def test_matches_lean_corrected_value(self):
+        # The full and lean exports must agree on the resolved corrected_value.
+        cell = self._cell(
+            corrected_value='Change "Pacfic" to "Pacific"',
+            llm_suggested_value="Pacific Breeze (Pty) Ltd",
+        )
+        assert (
+            full_benchmark_record(cell)["corrected_value"]
+            == lean_benchmark_record(cell)["corrected_value"]
+        )
+
+
+# ---------------------------------------------------------------------------
+# Merged immunity stream (skip cells + exclusion sentinels)
+# ---------------------------------------------------------------------------
+
+from src.labeling.export import materialize_ignored_cells
+from src.labeling.schema import Exclusion, ExclusionScope, IgnoreRecord
+
+
+def _exclusion(scope, source, *, rows=None, columns=None) -> Exclusion:
+    return Exclusion(
+        id=f"x-{source}-{scope.value}",
+        scope=scope,
+        source=source,
+        rows=rows or [],
+        columns=columns or [],
+        annotator="tester",
+    )
+
+
+class TestMaterializeIgnoredCells:
+    def _skip_cell(self, source="a.csv", row=3, column="Firm") -> BenchmarkCell:
+        return BenchmarkCell(
+            source=source, row=row, column=column,
+            original_value="Acme  Ltd", label="skip",
+        )
+
+    def test_skip_cells_become_skip_records(self):
+        recs = materialize_ignored_cells([self._skip_cell()], [])
+        assert len(recs) == 1
+        r = recs[0]
+        assert r.reason == "skip"
+        assert (r.source, r.row, r.column) == ("a.csv", 3, "Firm")
+        assert r.original_value == "Acme  Ltd"
+        assert r.scope is None
+
+    def test_csv_exclusion_is_one_wildcard_sentinel(self):
+        recs = materialize_ignored_cells(
+            [], [_exclusion(ExclusionScope.CSV, "big.csv")]
+        )
+        assert len(recs) == 1
+        r = recs[0]
+        assert (r.reason, r.scope) == ("exclusion", "csv")
+        assert r.source == "big.csv"
+        assert r.row is None and r.column is None  # whole-file wildcard
+
+    def test_rows_exclusion_expands_per_row_column_wildcard(self):
+        recs = materialize_ignored_cells(
+            [], [_exclusion(ExclusionScope.ROWS, "b.csv", rows=[4, 9])]
+        )
+        assert {(r.row, r.column) for r in recs} == {(4, None), (9, None)}
+        assert all(r.reason == "exclusion" and r.scope == "rows" for r in recs)
+
+    def test_columns_exclusion_expands_per_column_row_wildcard(self):
+        recs = materialize_ignored_cells(
+            [], [_exclusion(ExclusionScope.COLUMNS, "c.csv", columns=["Notes"])]
+        )
+        assert len(recs) == 1
+        r = recs[0]
+        assert (r.row, r.column, r.scope) == (None, "Notes", "columns")
+
+    def test_merge_orders_skips_then_exclusions(self):
+        recs = materialize_ignored_cells(
+            [self._skip_cell()],
+            [
+                _exclusion(ExclusionScope.COLUMNS, "c.csv", columns=["X"]),
+                _exclusion(ExclusionScope.CSV, "big.csv"),
+                _exclusion(ExclusionScope.ROWS, "b.csv", rows=[1]),
+            ],
+        )
+        reasons = [r.reason for r in recs]
+        # skip first, then exclusions grouped csv -> rows -> columns.
+        assert reasons[0] == "skip"
+        assert [r.scope for r in recs[1:]] == ["csv", "rows", "columns"]
+
+    def test_ignore_record_is_serializable(self):
+        recs = materialize_ignored_cells(
+            [self._skip_cell()], [_exclusion(ExclusionScope.CSV, "big.csv")]
+        )
+        for r in recs:
+            assert isinstance(r, IgnoreRecord)
+            json.dumps(r.model_dump())  # must not raise
 
 

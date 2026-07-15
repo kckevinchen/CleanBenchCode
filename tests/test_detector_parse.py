@@ -14,6 +14,7 @@ no real Azure traffic is generated. Coverage:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, List, Optional
 from unittest.mock import MagicMock
@@ -26,6 +27,7 @@ from src.core.detector import (
     ChunkReport,
     PerTypeCleaningDetector,
     _coerce_issues,
+    _filter_pure_numeric_typo_issues,
     parse_llm_json,
 )
 from src.core.error_taxonomy import ErrorTaxonomy, ErrorType
@@ -294,6 +296,85 @@ class TestPerTypeCleaningDetectorRun:
         assert "NAME=Typo" in call["prompt"]
         assert "DESC=description-of-typo" in call["prompt"]
         assert call["system_prompt"] == "SYS"
+
+    def test_filters_pure_numeric_typo_findings(self) -> None:
+        llm = _StubLLM(
+            responses=[
+                LLMResponse(
+                    text=json.dumps(
+                        {
+                            "issues": [
+                                {
+                                    "row": 0,
+                                    "columns": ["value"],
+                                    "observed": "6",
+                                    "corrected_value": {"value": "6.00"},
+                                },
+                                {
+                                    "row": 1,
+                                    "columns": ["value"],
+                                    "observed": "555-123-4567",
+                                    "corrected_value": {"value": "5551234567"},
+                                },
+                                {
+                                    "row": 2,
+                                    "columns": ["value"],
+                                    "observed": "199,5",
+                                    "corrected_value": {"value": "199,50"},
+                                },
+                                {
+                                    "row": 3,
+                                    "columns": ["value"],
+                                    "observed": "1133,21",
+                                    "corrected_value": {"value": "1133, 21"},
+                                },
+                            ]
+                        }
+                    ),
+                    endpoint="http://stub",
+                    model="m",
+                    attempts=1,
+                )
+            ]
+        )
+        chunk = CsvChunk(
+            source=Path("numbers.csv"),
+            start_row=0,
+            end_row=4,
+            headers=["value"],
+            frame=pd.DataFrame({"value": ["6", "555-123-4567", "199,5", "1133,21"]}),
+            column_mode="single",
+        )
+        detector = PerTypeCleaningDetector(
+            llm,
+            _taxonomy(["typo"]),
+            model="m",
+            concurrency=1,
+        )
+
+        report = detector.run([chunk])[0]
+
+        assert [issue["row"] for issue in report.issues] == [1, 3]
+        assert report.metadata["filtered_pure_numeric_typo_issues"] == 2
+
+    def test_numeric_findings_remain_for_non_typo_type(self) -> None:
+        issues = [{"row": 0, "columns": ["value"], "observed": "6"}]
+        chunk = CsvChunk(
+            source=Path("numbers.csv"),
+            start_row=0,
+            end_row=1,
+            headers=["value"],
+            frame=pd.DataFrame({"value": ["6"]}),
+            column_mode="single",
+        )
+        kept, filtered = _filter_pure_numeric_typo_issues(
+            issues,
+            chunk,
+            _taxonomy(["numeric_outlier"]).types[0],
+        )
+
+        assert kept == issues
+        assert filtered == 0
 
     def test_concurrency_path_preserves_position_order(self) -> None:
         # Concurrency > 1 shouldn't scramble the final order — the

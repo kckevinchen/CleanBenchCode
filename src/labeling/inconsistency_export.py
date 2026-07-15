@@ -43,6 +43,7 @@ from src.labeling.correction_suggester import (
     build_cluster_index,
     dispatch_groups,
     load_cache,
+    load_column_cluster_records,
     load_drafts,
     load_labels,
     resolve_csv_map,
@@ -267,12 +268,19 @@ def materialize_inconsistency_benchmark(
 
     labels_path = run_dir / "labels.jsonl"
     drafts_path = run_dir / "column_cluster_drafts.jsonl"
-    if not labels_path.exists() or not drafts_path.exists():
+    records_path = run_dir / "column_clusters.jsonl"
+    # Need labels plus at least one cluster source: the LLM drafts file
+    # or the operator-curated column_clusters.jsonl (operator-ADDED
+    # "missed inconsistency" clusters live only in the latter).
+    if not labels_path.exists() or not (
+        drafts_path.exists() or records_path.exists()
+    ):
         return []
 
     labels = load_labels(labels_path)
     drafts = load_drafts(drafts_path)
-    cluster_index = build_cluster_index(drafts, labels)
+    records = load_column_cluster_records(records_path)
+    cluster_index = build_cluster_index(drafts, labels, records=records)
 
     n_interesting = sum(
         1 for ctxs in cluster_index.values()
@@ -436,11 +444,32 @@ def materialize_inconsistency_benchmark(
         agreement = info["agreement"]
         n_valid = info["n_valid"]
         if info["would_drop"] and i not in rescued_indices:
-            stats["cell_groups_already_canonical"] += 1
-            stats["rows_already_canonical"] += len(grp.rows)
-            continue
-        if i in rescued_indices:
+            # A "would_drop" value is one whose canonical form equals the
+            # value itself -- either the LLM consensus said so (Pass 1) or
+            # the operator dropped it via ``value_corrections`` (an absent
+            # key in Pass 1.5). For an ERROR cell (a TP cluster covers it)
+            # that genuinely means "the canonical form of a confirmed error
+            # is not itself an error", so we drop it from the benchmark
+            # (it exports as clean by being absent).
+            #
+            # But an UNSURE-only cell exports as ``ambiguous`` (FP immunity):
+            # the reviewer could not confidently call the cluster an error,
+            # so a model that flags ANY of its values must not be penalised.
+            # Dropping such a value would silently strip that immunity (the
+            # cell becomes absent -> scored as clean -> a flag is an FP),
+            # which is exactly the accidental data-loss the per-value
+            # "Drop" default causes. Ambiguous cells carry no
+            # ``corrected_value`` anyway, so we KEEP the cell (emitted with
+            # no correction) instead of dropping it.
+            if _label_from_involved(grp.involved) != "ambiguous":
+                stats["cell_groups_already_canonical"] += 1
+                stats["rows_already_canonical"] += len(grp.rows)
+                continue
+            stats["ambiguous_groups_kept_despite_drop"] += 1
+            stats["ambiguous_rows_kept_despite_drop"] += len(grp.rows)
             possible_for_cell: Optional[List[str]] = None
+        elif i in rescued_indices:
+            possible_for_cell = None
             stats["cells_emitted_null_cluster_rescue"] += len(grp.rows)
         elif n_valid == 0 or consensus is None:
             possible_for_cell = None

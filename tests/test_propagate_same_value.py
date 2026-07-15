@@ -524,3 +524,128 @@ def test_cluster_propagate_with_partial_status(tmp_path: Path):
         ).json()
         assert bundle["label"]["status"] == "partial"
 
+
+# ---------------------------------------------------------------------
+# Relation-style guard: same-value cluster propagation keys on ONE
+# anchor cell value, which only identifies a shared defect for
+# single-column error types. A relation-style cluster (fd_violation,
+# row/string calculation inconsistency, row_duplication,
+# inter_table_inconsistency) encodes a multi-column / multi-row rule, so
+# a recurring anchor value (e.g. ``Month=3``) must NOT leak a verdict
+# across clusters. Regression for the DimDate.csv run where a
+# row_calculation_inconsistency verdict fanned out via same-value match.
+# ---------------------------------------------------------------------
+
+
+def _build_relation_run(tmp_path: Path) -> tuple[Path, str]:
+    """Run whose ``Month`` column holds the value ``3`` in three rows.
+    Rows 0 and 1 carry single-column ``typo`` clusters; row 2 carries a
+    relation-style ``row_calculation_inconsistency`` cluster. The shared
+    ``Month=3`` value is the same-value bait."""
+    project = tmp_path / "ws"
+    project.mkdir()
+    (project / "frontend" / "labeling").mkdir(parents=True)
+    data_dir = project / "data"
+    data_dir.mkdir()
+    csv = data_dir / "dim.csv"
+    csv.write_text(
+        "Datekey,Date,Year,Month,Day\n"
+        "20190301,2019-03-01,2019,3,1\n"   # row 0 - Month=3
+        "20190302,2019-03-02,2019,3,2\n"   # row 1 - Month=3
+        "20190303,2019-03-03,2019,3,3\n",  # row 2 - Month=3
+        encoding="utf-8",
+    )
+    outputs = project / "outputs"
+    outputs.mkdir()
+    run_id = "20260428T000000Z_relation"
+    rd = outputs / run_id
+    rd.mkdir()
+    (rd / "summary.json").write_text(
+        json.dumps({"config": {"csv_paths": [str(csv)]}}),
+    )
+    (rd / "clusters.json").write_text(json.dumps([
+        {"cluster_id": "dim.csv__r00000-c000", "source": "dim.csv",
+         "row": 0, "columns": ["Month"],
+         "row_values": {"Datekey": "20190301", "Month": "3", "Day": "1"},
+         "error_types": ["typo"], "error_type_categories": [],
+         "evidence_count": 1, "detections": []},
+        {"cluster_id": "dim.csv__r00001-c000", "source": "dim.csv",
+         "row": 1, "columns": ["Month"],
+         "row_values": {"Datekey": "20190302", "Month": "3", "Day": "2"},
+         "error_types": ["typo"], "error_type_categories": [],
+         "evidence_count": 1, "detections": []},
+        {"cluster_id": "dim.csv__r00002-c000", "source": "dim.csv",
+         "row": 2, "columns": ["Month", "Day"],
+         "row_values": {"Datekey": "20190303", "Month": "3", "Day": "3"},
+         "error_types": ["row_calculation_inconsistency"],
+         "error_type_categories": [], "evidence_count": 1, "detections": []},
+    ]))
+    (rd / "issues.json").write_text("[]")
+    return project, run_id
+
+
+def test_cluster_propagate_blocked_for_relation_seed(tmp_path: Path):
+    """Propagating from a relation-style seed cluster is a no-op: a
+    shared anchor value is not evidence the same relation is violated
+    elsewhere, so nothing fans out."""
+    project, run_id = _build_relation_run(tmp_path)
+    app = create_app(project, annotator="t")
+    with TestClient(app) as client:
+        # Seed verdict on the relation cluster (row 2).
+        client.post(f"/api/runs/{run_id}/labels", json={
+            "target": "cluster",
+            "target_id": "dim.csv__r00002-c000",
+            "source": "dim.csv",
+            "row": 2, "column": "Month",
+            "status": "tp",
+        })
+        r = client.post(f"/api/runs/{run_id}/clusters/propagate-status", json={
+            "source": "dim.csv",
+            "row": 2, "column": "Month",
+            "status": "tp",
+        })
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["matched"] == 0
+        assert body["propagated"] == 0
+        assert body["clusters"] == []
+        assert "relation-style" in body.get("skipped_reason", "")
+        # The typo clusters on rows 0 and 1 must remain unlabelled.
+        for cid in ("dim.csv__r00000-c000", "dim.csv__r00001-c000"):
+            bundle = client.get(f"/api/runs/{run_id}/clusters/{cid}").json()
+            assert bundle.get("label") is None
+
+
+def test_cluster_propagate_skips_relation_style_siblings(tmp_path: Path):
+    """A single-column seed still propagates to same-value single-column
+    siblings, but a relation-style sibling sharing the anchor value must
+    be skipped (defense-in-depth in the sibling loop)."""
+    project, run_id = _build_relation_run(tmp_path)
+    app = create_app(project, annotator="t")
+    with TestClient(app) as client:
+        # Seed verdict on the row-0 typo cluster.
+        client.post(f"/api/runs/{run_id}/labels", json={
+            "target": "cluster",
+            "target_id": "dim.csv__r00000-c000",
+            "source": "dim.csv",
+            "row": 0, "column": "Month",
+            "status": "fp",
+        })
+        r = client.post(f"/api/runs/{run_id}/clusters/propagate-status", json={
+            "source": "dim.csv",
+            "row": 0, "column": "Month",
+            "status": "fp",
+        })
+        assert r.status_code == 200, r.text
+        body = r.json()
+        # Only the row-1 typo sibling matches; the row-2 relation cluster
+        # shares Month=3 but is skipped.
+        assert body["matched"] == 1
+        assert body["propagated"] == 1
+        assert body["clusters"][0]["cluster_id"] == "dim.csv__r00001-c000"
+        # The relation cluster's verdict must be untouched.
+        bundle = client.get(
+            f"/api/runs/{run_id}/clusters/dim.csv__r00002-c000"
+        ).json()
+        assert bundle.get("label") is None
+

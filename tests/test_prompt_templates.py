@@ -182,6 +182,8 @@ PROMPT_FIXTURES: Dict[str, Dict[str, str]] = {
         "sheets": "['a.csv', 'b.csv']",
         "primary_key": "['K']",
         "column_mapping_block": "  - 'K': a.csv:'K', b.csv:'K'",
+        "key_uniqueness_block": "  PRIMARY key cardinality per sheet:\n    a.csv.['K']: 1 rows, 1 distinct -> UNIQUE (one row per key)",
+        "priors_block": "  (no structural priors available for this group)",
         "row_samples_block": "  === 'a.csv' (1 row) ===\n  row_idx | K\n  0 | 1",
         "page_index": 1,
         "n_pages": 1,
@@ -327,3 +329,24 @@ def test_every_prompt_has_a_fixture() -> None:
         f"prompt(s) without a fixture in PROMPT_FIXTURES: {sorted(missing)}. "
         "Register one so the format() smoke test covers it."
     )
+
+
+def test_typo_prompt_includes_general_punctuation_formatting() -> None:
+    """Keep punctuation-only formatting defects in the active typo detector."""
+    raw = yaml.safe_load((PROMPT_DIR / "error_types.yaml").read_text(encoding="utf-8"))
+    typo = raw["types"]["typo"]
+    prompt = "\n".join(
+        str(typo[field]) for field in ("description", "example", "notes")
+    )
+
+    assert "PUNCTUATION FORMATTING IS IN SCOPE" in prompt
+    assert '"Sales,Marketing" -> "Sales, Marketing"' in prompt
+    assert '"Acme(Holdings)" -> "Acme (Holdings)"' in prompt
+    assert "phone / date / code" in prompt
+    assert "Do NOT route these cells away to" in prompt
+    assert "PURE NUMERIC VALUES ARE NEVER TYPOS" in prompt
+    assert 'do not change "6" to "6.00"' in prompt
+    assert '"199,5" to "199,50"' in prompt
+    assert "phone / date / numeric /" not in prompt
+    assert "Formatting-only variants" not in prompt
+    assert "Cross-row punctuation variation -> `inconsistency`" not in prompt

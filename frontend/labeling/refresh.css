@@ -420,6 +420,36 @@ header .actions .export-menu-body a:hover {
   border: 0;
 }
 header .actions .export-menu-body a[aria-disabled="true"] { opacity: 0.55; }
+
+/* Primary "eval bundle" item: the headline export, set apart from the
+   individual-file exports below it. */
+header .actions .export-menu-body a.export-primary {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-weight: 600;
+  background: var(--panel-2);
+  border: 1px solid var(--border-strong, var(--border));
+}
+header .actions .export-menu-body a.export-primary:hover { background: var(--elev); }
+.export-primary-row { display: flex; align-items: center; }
+.export-primary-tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  font-size: 9.5px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.5px;
+  border-radius: 999px;
+  background: var(--accent); color: #0b1120;
+}
+.export-caption { font-size: 10.5px; font-weight: 400; color: var(--muted); }
+.export-divider { height: 1px; margin: 4px 2px; background: var(--border); }
+.export-section-label {
+  font-size: 9.5px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.6px;
+  color: var(--muted);
+  padding: 2px 9px 0;
+}
 /* The per-error-type row (select + Download) spans the menu width. */
 .export-menu-body .export-single {
   display: flex;
@@ -558,3 +588,24 @@ header .actions .export-menu-body .export-single a {
 }
 .queue-empty .qs-clear { margin-left: 0; }   /* not pushed right here */
 .queue-empty .qe-hint { font-size: 11.5px; opacity: 0.85; }
+
+/* -------- sidebar queue search -------- */
+.queue-search-wrap { padding: 8px 10px 0; }
+.queue-search {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 9px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  transition: border-color var(--t-fast), box-shadow var(--t-fast);
+}
+.queue-search::placeholder { color: var(--muted); }
+.queue-search:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}

@@ -297,9 +297,57 @@ def load_drafts(drafts_path: Path) -> Dict[Tuple[str, str], dict]:
     return out
 
 
+def load_column_cluster_records(records_path: Path) -> Dict[Tuple[str, str], dict]:
+    """Return ``{(source, column): latest_record_doc}`` from a
+    ``column_clusters.jsonl`` file (the operator-curated clusters).
+
+    Mirrors :func:`load_drafts` but reads the SAVED label records, not
+    the LLM drafts. Latest-line-wins per ``(source, column)`` (matches
+    :class:`~src.labeling.column_cluster_store.ColumnClusterStore`).
+    These records are the source of truth for clusters the operator
+    ADDED or EDITED by hand -- those never appear in the drafts file.
+    """
+
+    out: Dict[Tuple[str, str], dict] = {}
+    if not records_path.exists():
+        return out
+    with records_path.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                doc = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            s = doc.get("source")
+            c = doc.get("column")
+            if not s or not c:
+                continue
+            out[(s, c)] = doc
+    return out
+
+
+def _cluster_value_strings(cluster: dict) -> List[str]:
+    """Pull the value strings out of a draft/record cluster's ``values``.
+
+    ``values`` may be a list of plain strings or
+    ``{"value": ..., "count": ...}`` dicts; blanks and non-strings are
+    dropped.
+    """
+
+    vals: List[str] = []
+    for v in cluster.get("values") or []:
+        vv = v.get("value") if isinstance(v, dict) else v
+        if isinstance(vv, str) and vv:
+            vals.append(vv)
+    return vals
+
+
 def build_cluster_index(
     drafts: Dict[Tuple[str, str], dict],
     labels: Dict[str, dict],
+    records: Optional[Dict[Tuple[str, str], dict]] = None,
 ) -> Dict[Tuple[str, str], List[ClusterCtx]]:
     """Materialise every draft cluster (any verdict) with its verdict
     looked up.
@@ -307,6 +355,18 @@ def build_cluster_index(
     Returns ``{(source, column): [ClusterCtx, ...]}`` ordered by the
     cluster's positional index in the draft document so ``local_id``
     matches ``c{idx}``.
+
+    When ``records`` (a ``column_clusters.jsonl`` map from
+    :func:`load_column_cluster_records`) is supplied, a ``status=labeled``
+    operator record is the SOURCE OF TRUTH for its ``(source, column)``:
+    its hand-curated, disjoint clusters REPLACE any draft-derived
+    clusters for that column (matching ``list_column_clusters``, which
+    shows the record and hides the drafts, and ``post_label``, which
+    validates verdicts against the record). This surfaces clusters the
+    operator ADDED by hand AND honours clusters the operator EDITED
+    (e.g. merging draft ``c1``+``c2`` into a wider ``c1``), instead of
+    letting a stale draft win on an id collision. Columns the operator
+    never curated keep their draft-backed clusters unchanged.
     """
 
     out: Dict[Tuple[str, str], List[ClusterCtx]] = {}
@@ -317,16 +377,7 @@ def build_cluster_index(
             local_id = f"c{idx}"
             target_id = f"colclust\x00{s}\x00{c}\x00{local_id}"
             global_id = f"{s}::{c}::{local_id}"
-            # Values may be a list of strings or a list of
-            # ``{"value": ..., "count": ...}`` dicts; normalise.
-            vals: List[str] = []
-            for v in cl.get("values") or []:
-                if isinstance(v, dict):
-                    vv = v.get("value")
-                else:
-                    vv = v
-                if isinstance(vv, str) and vv:
-                    vals.append(vv)
+            vals = _cluster_value_strings(cl)
             # Skip degenerate clusters.
             if len(vals) < 2:
                 continue
@@ -359,7 +410,89 @@ def build_cluster_index(
             ))
         if ctxs:
             out[(s, c)] = ctxs
+
+    if records:
+        _apply_record_clusters(out, records, labels)
     return out
+
+
+def _apply_record_clusters(
+    out: Dict[Tuple[str, str], List[ClusterCtx]],
+    records: Dict[Tuple[str, str], dict],
+    labels: Dict[str, dict],
+) -> None:
+    """Overlay operator-saved column-cluster records onto the draft index.
+
+    Mutates ``out`` in place. A ``column_clusters.jsonl`` record with
+    ``status="labeled"`` is the operator's disjoint, hand-curated
+    partition of the column -- only the column-board UI writes one, and
+    the schema guarantees a labelled record carries >= 1 cluster. It is
+    the source of truth for that ``(source, column)`` everywhere else in
+    the workbench (``list_column_clusters`` shows the record's clusters
+    and hides the drafts; ``post_label`` validates verdicts against the
+    record), so here we REPLACE any draft-derived clusters for that
+    column with the record's clusters.
+
+    This fixes the case where the operator EDITED a draft cluster's
+    membership (e.g. merged draft ``c1``+``c2``+``c3`` into a single
+    wider ``c1``): the suggester previously kept the draft's narrower
+    value-set on the id collision and silently dropped the values the
+    operator added, so those cells got no correction suggestion.
+
+    Non-labelled records carry no clusters (schema invariant) and leave
+    the draft-backed index untouched.
+    """
+
+    for (s, c), rec in records.items():
+        if rec.get("status") != "labeled":
+            continue
+        clusters_raw = rec.get("clusters") or []
+        if not clusters_raw:
+            continue
+        rec_ctxs: List[ClusterCtx] = []
+        for cl in clusters_raw:
+            local_id = cl.get("cluster_id")
+            if not isinstance(local_id, str) or not local_id:
+                continue
+            vals = _cluster_value_strings(cl)
+            if len(vals) < 2:
+                continue
+            target_id = f"colclust\x00{s}\x00{c}\x00{local_id}"
+            global_id = f"{s}::{c}::{local_id}"
+            label_rec = labels.get(target_id)
+            label_status = label_rec.get("status") if label_rec else None
+            # The operator's confirmed canonical lives on the record
+            # (``canonical_value``); the label may override it.
+            confirmed_canonical = (
+                (label_rec or {}).get("confirmed_canonical")
+                or cl.get("canonical_value")
+            )
+            rec_ctxs.append(ClusterCtx(
+                source=s,
+                column=c,
+                local_id=local_id,
+                target_id=target_id,
+                global_id=global_id,
+                kind=str(cl.get("kind") or "untagged"),
+                values=vals,
+                value_set=frozenset(vals),
+                llm_canonical=cl.get("llm_proposed_canonical"),
+                target_style="",
+                status=label_status,
+                confirmed_canonical=confirmed_canonical,
+                note=str((label_rec or {}).get("note") or ""),
+                annotator=(label_rec or {}).get("annotator"),
+                value_corrections=dict(
+                    (label_rec or {}).get("value_corrections") or {}
+                ),
+            ))
+        # A labelled record fully defines the column. Replace the
+        # draft-derived clusters; only fall through to leave the drafts
+        # untouched when the record yielded no usable (>= 2 value)
+        # cluster, which can't happen for a schema-valid labelled record
+        # but guards against malformed JSONL.
+        if rec_ctxs:
+            out[(s, c)] = rec_ctxs
 
 
 def resolve_csv_map(run_dir: Path) -> Dict[str, Path]:
@@ -1057,7 +1190,8 @@ def suggest_corrections_for_clusters(
 
     labels = load_labels(run_dir / "labels.jsonl")
     drafts = load_drafts(run_dir / "column_cluster_drafts.jsonl")
-    cluster_index = build_cluster_index(drafts, labels)
+    records = load_column_cluster_records(run_dir / "column_clusters.jsonl")
+    cluster_index = build_cluster_index(drafts, labels, records=records)
     csv_map = resolve_csv_map(run_dir)
 
     stats: Counter = Counter()

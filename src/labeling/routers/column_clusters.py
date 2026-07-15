@@ -14,16 +14,40 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, HTTPException, Query
+from pydantic import BaseModel
 
 from ..schema import (
     ColumnClusters,
     ColumnClustersIn,
     ColumnLabelStatus,
+    Label,
+    LabelStatus,
+    LabelTarget,
+    cell_target_id,
     column_cluster_target_id,
 )
 from ._context import RouterContext
 
 logger = logging.getLogger(__name__)
+
+# Error-type slug stamped onto operator-flagged missed inconsistency
+# values so the per-cell FN labels they produce bucket into the
+# inconsistency benchmark (not the generic ``_uncategorized`` FN bucket).
+_INCONSISTENCY_ET = "inconsistency"
+
+
+class FnValueIn(BaseModel):
+    """POST body for flagging a column value as a missed inconsistency.
+
+    The column board has no row grid, so the operator flags a distinct
+    *value*; the server fans the verdict out to every row holding it as
+    a cell-level FN label carrying ``error_types=["inconsistency"]``.
+    """
+
+    value: str
+    corrected_value: Optional[str] = None
+    note: str = ""
+    annotator: Optional[str] = None
 
 
 def register(app: FastAPI, router_ctx: RouterContext) -> None:
@@ -53,6 +77,161 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
                 continue
             counts[val] = counts.get(val, 0) + 1
         return counts, n_rows
+
+    def _rows_for_value(
+        ctx: "RunContext", source: str, column: str, value: str,
+    ) -> List[int]:
+        """Positional row indices in (source, column) whose value matches.
+
+        Positional (``enumerate`` over ``astype(str)``) so the indices
+        line up with ``GET /sources`` (which numbers rows by frame index,
+        a RangeIndex) and the export value-resolver (``DataFrame.iat``).
+        """
+        frame = ctx.load_frame(source)
+        if column not in frame.columns:
+            raise HTTPException(404, f"column not found in {source}: {column}")
+        series = frame[column].astype(str).tolist()
+        return [i for i, v in enumerate(series) if v == value]
+
+    def _list_fn_values(
+        run_id: str, source: str, column: str,
+    ) -> Dict[str, Any]:
+        """Group active inconsistency FN cell labels by current value."""
+        ctx = cache.get(run_id)
+        if source not in ctx.sources:
+            raise HTTPException(404, f"source not found: {source}")
+        frame = ctx.load_frame(source)
+        if column not in frame.columns:
+            raise HTTPException(404, f"column not found in {source}: {column}")
+        series = frame[column].astype(str).tolist()
+        n = len(series)
+        latest = ctx.store.latest_by_target()
+        by_value: Dict[str, Dict[str, Any]] = {}
+        for _tid, lab in latest.items():
+            if lab.target != LabelTarget.CELL or lab.status != LabelStatus.FN:
+                continue
+            if lab.source != source or lab.column != column:
+                continue
+            if _INCONSISTENCY_ET not in (lab.error_types or []):
+                continue
+            if lab.row is None:
+                continue
+            r = int(lab.row)
+            if not (0 <= r < n):
+                # Stale label: the CSV changed under us. Hide from the
+                # grouped view (the orphaned tombstone-able label remains
+                # in history but never reaches the benchmark via a live row).
+                continue
+            val = series[r]
+            entry = by_value.setdefault(val, {
+                "value": val,
+                "corrected_value": lab.corrected_value,
+                "note": lab.note or "",
+                "rows": [],
+                "annotators": [],
+            })
+            entry["rows"].append(r)
+            if lab.corrected_value and not entry["corrected_value"]:
+                entry["corrected_value"] = lab.corrected_value
+            if lab.annotator and lab.annotator not in entry["annotators"]:
+                entry["annotators"].append(lab.annotator)
+        items: List[Dict[str, Any]] = []
+        for entry in by_value.values():
+            entry["rows"].sort()
+            entry["n"] = len(entry["rows"])
+            items.append(entry)
+        items.sort(key=lambda e: (-e["n"], e["value"]))
+        return {"source": source, "column": column, "items": items}
+
+    def _flag_fn_value(
+        run_id: str, source: str, column: str, payload: FnValueIn,
+    ) -> Dict[str, Any]:
+        """Write a cell-level FN label for every row holding ``value``."""
+        ctx = cache.get(run_id)
+        if source not in ctx.sources:
+            raise HTTPException(404, f"source not found: {source}")
+        value = payload.value
+        if not value:
+            raise HTTPException(400, "value is required and must be non-empty")
+        rows = _rows_for_value(ctx, source, column, value)
+        if not rows:
+            raise HTTPException(
+                404, f"value not present in {source}/{column}: {value!r}",
+            )
+        who = (payload.annotator or annotator).strip() or annotator
+        corrected = (payload.corrected_value or "").strip() or None
+        records = [
+            Label(
+                target=LabelTarget.CELL,
+                target_id=cell_target_id(source, r, column),
+                source=source,
+                row=r,
+                column=column,
+                status=LabelStatus.FN,
+                corrected_value=corrected,
+                error_types=[_INCONSISTENCY_ET],
+                note=payload.note or "",
+                annotator=who,
+            )
+            for r in rows
+        ]
+        ctx.store.append_many(records)
+        return {
+            "source": source,
+            "column": column,
+            "value": value,
+            "corrected_value": corrected,
+            "rows": rows,
+            "n": len(rows),
+        }
+
+    def _clear_fn_value(
+        run_id: str, source: str, column: str, value: str,
+    ) -> Dict[str, Any]:
+        """Tombstone the inconsistency FN labels for ``value``'s rows."""
+        ctx = cache.get(run_id)
+        if source not in ctx.sources:
+            raise HTTPException(404, f"source not found: {source}")
+        if not value:
+            raise HTTPException(400, "value query parameter is required")
+        frame = ctx.load_frame(source)
+        if column not in frame.columns:
+            raise HTTPException(404, f"column not found in {source}: {column}")
+        series = frame[column].astype(str).tolist()
+        n = len(series)
+        latest = ctx.store.latest_by_target()
+        tombstones: List[Label] = []
+        for tid, lab in latest.items():
+            if lab.target != LabelTarget.CELL or lab.status != LabelStatus.FN:
+                continue
+            if lab.source != source or lab.column != column:
+                continue
+            if _INCONSISTENCY_ET not in (lab.error_types or []):
+                continue
+            if lab.row is None:
+                continue
+            r = int(lab.row)
+            if not (0 <= r < n) or series[r] != value:
+                continue
+            tombstones.append(Label(
+                target=LabelTarget.CELL,
+                target_id=tid,
+                source=source,
+                row=r,
+                column=column,
+                status=LabelStatus.UNLABELED,
+                error_types=[_INCONSISTENCY_ET],
+                note="(cleared inconsistency FN)",
+                annotator=annotator,
+            ))
+        if tombstones:
+            ctx.store.append_many(tombstones)
+        return {
+            "source": source,
+            "column": column,
+            "value": value,
+            "removed": len(tombstones),
+        }
 
     @app.get("/api/runs/{run_id}/inconsistency-columns")
     def list_inconsistency_columns(
@@ -405,6 +584,55 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
     ) -> Dict[str, Any]:
         return get_column_draft(run_id, source, column)
 
+    # ------------------------------------------------------------------
+    # Per-value missed-inconsistency (FN) flagging for the column board.
+    # The board shows distinct values, not rows, so the operator flags a
+    # *value*; the server fans it out to every row holding it as a
+    # cell-level FN label tagged ``error_types=["inconsistency"]`` (so it
+    # reaches the inconsistency benchmark) carrying the typed correction.
+    # Both URL shapes are mounted (``{column}/fn-values`` + the
+    # action-before-column ``fn-values/{column:path}`` the board calls)
+    # so slash-bearing column names route like /values and /clusters.
+    # ------------------------------------------------------------------
+
+    @app.get("/api/runs/{run_id}/columns/{source}/{column}/fn-values")
+    def get_fn_values(
+        run_id: str, source: str, column: str,
+    ) -> Dict[str, Any]:
+        return _list_fn_values(run_id, source, column)
+
+    @app.post("/api/runs/{run_id}/columns/{source}/{column}/fn-values")
+    def post_fn_values(
+        run_id: str, source: str, column: str, payload: FnValueIn,
+    ) -> Dict[str, Any]:
+        return _flag_fn_value(run_id, source, column, payload)
+
+    @app.delete("/api/runs/{run_id}/columns/{source}/{column}/fn-values")
+    def delete_fn_values(
+        run_id: str, source: str, column: str,
+        value: str = Query(..., description="distinct value to clear"),
+    ) -> Dict[str, Any]:
+        return _clear_fn_value(run_id, source, column, value)
+
+    @app.get("/api/runs/{run_id}/columns/{source}/fn-values/{column:path}")
+    def get_fn_values_alias(
+        run_id: str, source: str, column: str,
+    ) -> Dict[str, Any]:
+        return _list_fn_values(run_id, source, column)
+
+    @app.post("/api/runs/{run_id}/columns/{source}/fn-values/{column:path}")
+    def post_fn_values_alias(
+        run_id: str, source: str, column: str, payload: FnValueIn,
+    ) -> Dict[str, Any]:
+        return _flag_fn_value(run_id, source, column, payload)
+
+    @app.delete("/api/runs/{run_id}/columns/{source}/fn-values/{column:path}")
+    def delete_fn_values_alias(
+        run_id: str, source: str, column: str,
+        value: str = Query(..., description="distinct value to clear"),
+    ) -> Dict[str, Any]:
+        return _clear_fn_value(run_id, source, column, value)
+
     @app.get("/api/runs/{run_id}/column-clusters")
     def list_column_clusters(
         run_id: str,
@@ -433,11 +661,15 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
         draft clusters are *also* surfaced for columns whose
         ``column_clusters.jsonl`` record is missing or not in the
         ``labeled`` state. Synthetic items use ``c{idx+1}`` local
-        ids matching the draft order and carry
-        ``draft_pending: true``. The first verdict on such an item
-        lazy-promotes the column's full draft list to a real
-        record (see ``post_label``'s COLUMN_CLUSTER branch) so the
-        cluster_id assignment stays deterministic.
+        ids matching the draft order and carry ``draft_pending: true``
+        (an LLM-proposed cluster *structure* not yet saved as a
+        ``column_clusters.jsonl`` record). A verdict on such an item is
+        recorded as a column-cluster label keyed by the synthetic
+        ``target_id``; the draft is intentionally NOT promoted to a
+        record (see ``post_label``'s COLUMN_CLUSTER branch, which keeps
+        overlapping drafts independently votable). The operator's
+        verdict and any saved ``value_corrections`` persist regardless
+        of this flag.
 
         Filters:
           * ``source`` - exact CSV basename match.
@@ -628,6 +860,12 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
                         "llm_kind": dc.get("kind") or "untagged",
                         "llm_target_style": target_style,
                         "from_draft": True,
+                        # Always a draft: a per-cluster verdict is saved
+                        # as a label but never promotes the draft to a
+                        # column_clusters.jsonl record (only the column
+                        # board does that), so the cluster STRUCTURE
+                        # stays "unsaved". The verdict / value_corrections
+                        # persist independently of this flag.
                         "draft_pending": True,
                         "is_col_cluster": True,
                         "error_types": ["inconsistency"],

@@ -101,6 +101,13 @@ class RunInfo:
     display_name: str = ""
     starred: bool = False
     notes: str = ""
+    # Virtual-folder membership. ``""`` means "unfiled" (the default).
+    # Folders are purely an organisational grouping layer in the runs
+    # dashboard - the run directory itself never moves on disk, so
+    # run-id-keyed paths (labels, reports) stay valid. The set of folder
+    # definitions lives in ``outputs/folders.json``; this field is the
+    # per-run pointer into it (see ``_load_folders``).
+    folder_id: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -135,6 +142,7 @@ class RunInfo:
             "display_name": self.display_name,
             "starred": self.starred,
             "notes": self.notes,
+            "folder_id": self.folder_id,
         }
 
 
@@ -153,6 +161,7 @@ class RunInfo:
 _RUN_METADATA_FILE = "run_metadata.json"
 _MAX_DISPLAY_NAME = 120
 _MAX_NOTES = 2000
+_MAX_FOLDER_ID = 64
 
 
 def _load_run_metadata(run_dir: Path) -> Dict[str, Any]:
@@ -177,22 +186,26 @@ def _load_run_metadata(run_dir: Path) -> Dict[str, Any]:
     notes = raw.get("notes")
     if isinstance(notes, str):
         out["notes"] = notes[:_MAX_NOTES]
+    folder_id = raw.get("folder_id")
+    if isinstance(folder_id, str):
+        out["folder_id"] = folder_id.strip()[:_MAX_FOLDER_ID]
     return out
 
 
 def _save_run_metadata(run_dir: Path, meta: Dict[str, Any]) -> Dict[str, Any]:
     """Merge ``meta`` into the sidecar and write atomically.
 
-    Only known keys (``display_name``, ``starred``, ``notes``) are
-    persisted. Returns the full post-merge metadata dict. Writes use
-    a tmp-file + ``os.replace`` so a crashing server can't leave a
-    half-written JSON behind.
+    Only known keys (``display_name``, ``starred``, ``notes``,
+    ``folder_id``) are persisted. Returns the full post-merge metadata
+    dict. Writes use a tmp-file + ``os.replace`` so a crashing server
+    can't leave a half-written JSON behind.
     """
     current = _load_run_metadata(run_dir)
     merged: Dict[str, Any] = {
         "display_name": current.get("display_name", ""),
         "starred": bool(current.get("starred", False)),
         "notes": current.get("notes", ""),
+        "folder_id": current.get("folder_id", ""),
     }
     if "display_name" in meta:
         dn = meta["display_name"] or ""
@@ -206,12 +219,195 @@ def _save_run_metadata(run_dir: Path, meta: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(nt, str):
             raise ValueError("notes must be a string")
         merged["notes"] = nt[:_MAX_NOTES]
+    if "folder_id" in meta:
+        fid = meta["folder_id"] or ""
+        if not isinstance(fid, str):
+            raise ValueError("folder_id must be a string")
+        merged["folder_id"] = fid.strip()[:_MAX_FOLDER_ID]
 
     path = run_dir / _RUN_METADATA_FILE
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, path)
     return merged
+
+
+# ---------------------------------------------------------------------------
+# Virtual folders registry (``outputs/folders.json``)
+# ---------------------------------------------------------------------------
+#
+# Folders are an organisational grouping layer for the runs dashboard.
+# They do NOT move run directories on disk - membership is a ``folder_id``
+# string stored in each run's ``run_metadata.json`` sidecar (see above),
+# and the folder *definitions* (id -> name + collapse state) live in a
+# single ``outputs/folders.json`` registry. A run whose ``folder_id``
+# doesn't match any live folder is treated as unfiled, so deleting a
+# folder definition is enough to orphan its members back to "Unfiled".
+# Schema is deliberately small and forward-compatible: unknown keys are
+# dropped on read, a missing/corrupt file means "no folders".
+
+_FOLDERS_FILE = "folders.json"
+_MAX_FOLDER_NAME = 120
+
+# Serialises the load->mutate->save of the (single, shared) folders.json
+# registry. Sync FastAPI handlers run in a threadpool, so two folder
+# mutations can overlap; without this lock the second writer's full-list
+# overwrite would drop the first's change (lost update). Mirrors the
+# JobManager's threading.Lock convention for shared on-disk state.
+_FOLDERS_LOCK = threading.Lock()
+
+
+def _normalise_folder(raw: Any) -> Optional[Dict[str, Any]]:
+    """Coerce one stored folder record into a clean dict, or ``None``."""
+    if not isinstance(raw, dict):
+        return None
+    fid = raw.get("id")
+    if not isinstance(fid, str) or not fid.strip():
+        return None
+    name = raw.get("name")
+    name = name.strip()[:_MAX_FOLDER_NAME] if isinstance(name, str) else ""
+    created = raw.get("created")
+    return {
+        "id": fid.strip()[:_MAX_FOLDER_ID],
+        "name": name,
+        "created": created if isinstance(created, str) else None,
+        "collapsed": bool(raw.get("collapsed", False)),
+    }
+
+
+def _load_folders(outputs_dir: Path) -> List[Dict[str, Any]]:
+    """Read the folder registry; ``[]`` for a missing/corrupt file.
+
+    Accepts either ``{"folders": [...]}`` or a bare ``[...]`` on disk so
+    a hand-edited file in the older shape still loads. Order is preserved
+    (newest folders are stored first by :func:`_add_folder`).
+    """
+    path = Path(outputs_dir) / _FOLDERS_FILE
+    if not path.is_file():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.debug("folders.json parse fail for %s: %s", outputs_dir, exc)
+        return []
+    items = raw.get("folders") if isinstance(raw, dict) else raw
+    if not isinstance(items, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    seen: set = set()
+    for it in items:
+        folder = _normalise_folder(it)
+        if folder is None or folder["id"] in seen:
+            continue
+        seen.add(folder["id"])
+        out.append(folder)
+    return out
+
+
+def _save_folders(outputs_dir: Path, folders: List[Dict[str, Any]]) -> None:
+    """Atomically persist the folder registry (tmp-file + ``os.replace``)."""
+    path = Path(outputs_dir) / _FOLDERS_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cleaned = [f for f in (_normalise_folder(it) for it in folders) if f]
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps({"folders": cleaned}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    os.replace(tmp, path)
+
+
+def _add_folder(outputs_dir: Path, name: str) -> Dict[str, Any]:
+    """Create a new folder (newest-first) and return its record."""
+    with _FOLDERS_LOCK:
+        folders = _load_folders(outputs_dir)
+        existing = {f["id"] for f in folders}
+        fid = uuid.uuid4().hex[:12]
+        while fid in existing:
+            fid = uuid.uuid4().hex[:12]
+        folder = {
+            "id": fid,
+            "name": (name or "").strip()[:_MAX_FOLDER_NAME],
+            "created": datetime.now(timezone.utc).isoformat(),
+            "collapsed": False,
+        }
+        folders.insert(0, folder)
+        _save_folders(outputs_dir, folders)
+        return folder
+
+
+def _update_folder(
+    outputs_dir: Path,
+    folder_id: str,
+    *,
+    name: Optional[str] = None,
+    collapsed: Optional[bool] = None,
+) -> Optional[Dict[str, Any]]:
+    """Rename and/or set the collapse flag of one folder.
+
+    Returns the updated record, or ``None`` if no folder matched.
+    """
+    with _FOLDERS_LOCK:
+        folders = _load_folders(outputs_dir)
+        target: Optional[Dict[str, Any]] = None
+        for f in folders:
+            if f["id"] == folder_id:
+                target = f
+                break
+        if target is None:
+            return None
+        if name is not None:
+            target["name"] = name.strip()[:_MAX_FOLDER_NAME]
+        if collapsed is not None:
+            target["collapsed"] = bool(collapsed)
+        _save_folders(outputs_dir, folders)
+        return target
+
+
+def _remove_folder(outputs_dir: Path, folder_id: str) -> bool:
+    """Drop a folder definition. Returns ``True`` if one was removed.
+
+    Member runs are NOT touched here; an orphaned ``folder_id`` is
+    treated as unfiled on read. Callers that want member rows to fall
+    back into "Unfiled" cleanly should also clear each member's
+    ``folder_id`` sidecar (the API layer does this).
+    """
+    with _FOLDERS_LOCK:
+        folders = _load_folders(outputs_dir)
+        kept = [f for f in folders if f["id"] != folder_id]
+        if len(kept) == len(folders):
+            return False
+        _save_folders(outputs_dir, kept)
+        return True
+
+
+def dataset_label_from_config(cfg: Dict[str, Any]) -> Optional[str]:
+    """Derive a short dataset/corpus label from a run's ``config`` block.
+
+    Prefers the directory shared by *all* CSV paths since that's the
+    corpus name (e.g. ``curated_pbi_500_dedup``); falls back to the
+    basename for single-file runs. Returns ``None`` when the config
+    carries no CSV path. Shared by the runs-list parser and the
+    run-detail endpoint so both surfaces show the same label.
+    """
+    paths = cfg.get("csv_paths") or []
+    # Directory-mode runs record the corpus directory directly.
+    explicit_dir = cfg.get("csv_path")
+    if explicit_dir:
+        return Path(explicit_dir).name
+    if not paths:
+        return None
+    if len(paths) > 1:
+        # Multi-file runs: label by the directory common to *all* CSVs.
+        # ``paths[0].parent`` is wrong for nested corpora that keep each
+        # table in its own sub-dir (curated_pbi_500_dedup/<table>/<table>.csv
+        # -> we want "curated_pbi_500_dedup", not the per-table "<table>").
+        try:
+            return Path(os.path.commonpath([str(p) for p in paths])).name
+        except ValueError:
+            # Mixed drives / relative paths -- fall back to first parent.
+            return Path(paths[0]).parent.name
+    return Path(paths[0]).name
 
 
 def _parse_run_dir(path: Path) -> RunInfo:
@@ -237,6 +433,11 @@ def _parse_run_dir(path: Path) -> RunInfo:
             model = data.get("model") or cfg.get("model")
             mode = data.get("mode") or cfg.get("mode")
             issues = int(data.get("total_issues") or 0)
+            # Authoritative cluster count from the pipeline summary. Using
+            # it avoids json.loads-ing the (often multi-MB) clusters.json
+            # array on every runs-list request -- that array parse was the
+            # entire cost of a slow /api/runs (1.3 GB across ~150 runs).
+            clusters = int(data.get("clusters_total") or 0)
             # Discovery summaries store top-level mode/model (single_pass /
             # adaptive) and per-pass / per-arm aggregates.
             if is_relations:
@@ -249,17 +450,7 @@ def _parse_run_dir(path: Path) -> RunInfo:
             # parent directory of the CSV path(s) since that's the corpus
             # name (e.g. "curated_bing21_grouped"); fall back to the basename.
             paths = cfg.get("csv_paths") or []
-            csv_path = cfg.get("csv_path") or (paths[0] if paths else None)
-            if csv_path:
-                p = Path(csv_path)
-                # If many CSVs, label by their common parent dir; if a single
-                # file run, label by the file name.
-                if len(paths) > 1:
-                    # ``csv_path`` in single-file mode is the file; in
-                    # directory mode it's the directory itself.
-                    dataset = Path(cfg.get("csv_path") or p.parent).name
-                else:
-                    dataset = p.name
+            dataset = dataset_label_from_config(cfg)
             if not is_relations:
                 n_sources = int(cfg.get("source_count") or len(paths) or 0)
             ni = cfg.get("normalize_input")
@@ -269,13 +460,24 @@ def _parse_run_dir(path: Path) -> RunInfo:
                 normalize_input = bool(ni)
         except Exception as exc:  # noqa: BLE001
             logger.debug("summary.json parse fail for %s: %s", path, exc)
-    if clusters_path.exists():
-        # cheap count: iterate the JSON array as lines would not be guaranteed
-        try:
-            raw = json.loads(clusters_path.read_text(encoding="utf-8"))
-            clusters = len(raw) if isinstance(raw, list) else 0
-        except Exception:  # noqa: BLE001
-            pass
+    # Fallback cluster count when summary.json lacked ``clusters_total``
+    # (older runs / relation runs). Prefer a cheap line count of the
+    # line-delimited clusters.jsonl; only parse the clusters.json array as
+    # a last resort, since that array can be tens of MB.
+    if not clusters:
+        clusters_jsonl = path / "clusters.jsonl"
+        if clusters_jsonl.exists():
+            try:
+                with clusters_jsonl.open("r", encoding="utf-8") as fh:
+                    clusters = sum(1 for line in fh if line.strip())
+            except OSError:
+                pass
+        if not clusters and clusters_path.exists():
+            try:
+                raw = json.loads(clusters_path.read_text(encoding="utf-8"))
+                clusters = len(raw) if isinstance(raw, list) else 0
+            except Exception:  # noqa: BLE001
+                pass
     if is_relations and not n_relations and relations_path.exists():
         # Fallback: count lines in relations.jsonl when summary is absent.
         try:
@@ -413,6 +615,7 @@ def _parse_run_dir(path: Path) -> RunInfo:
         display_name=meta.get("display_name", ""),
         starred=bool(meta.get("starred", False)),
         notes=meta.get("notes", ""),
+        folder_id=meta.get("folder_id", ""),
     )
 
 
@@ -479,6 +682,96 @@ _RELATIONS_GLOB_KEYS = ("csv_glob",)
 _RELATION_DETECTION_PATH_KEYS = (
     "config", "discovery_run", "output_dir",
 )
+
+
+# Non-single-column types the cleaning runner detects in-process via a
+# dedicated handler rather than delegating to the relation-discovery
+# pipeline. Mirrors ``run_cleaning_detection.DEDICATED_HANDLER_TYPES``;
+# kept here so the launcher can decide routing without importing the
+# heavy CLI module. ``tests/test_relation_only_launch_routing.py`` guards
+# both copies against drift.
+_DEDICATED_HANDLER_TYPES = frozenset({"row_duplication", "inter_table_inconsistency"})
+
+
+def _scope_prefix(category: str) -> str:
+    """Lower-cased scope prefix of an error-type category (text before
+    the first ``/``). E.g. ``"Multi-Column / Intra-Record"`` ->
+    ``"multi-column"``. Mirrors ``run_cleaning_detection._scope_of``."""
+    head = (category or "").split("/", 1)[0]
+    return " ".join(head.lower().split())
+
+
+def _load_config_for_payload(
+    payload: Dict[str, Any], project_root: Path,
+) -> Dict[str, Any]:
+    """Load the experiment config a launch payload would use.
+
+    Honours an explicit ``payload['config']`` (resolved against the
+    project root) and falls back to the default ``config/experiment.yaml``.
+    Fails soft to ``{}`` on any read/parse error so routing decisions
+    never block a launch.
+    """
+    cfg = payload.get("config")
+    if cfg:
+        import yaml  # deferred
+
+        p = Path(str(cfg))
+        if not p.is_absolute():
+            p = project_root / p
+        try:
+            if p.is_file():
+                return yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+        except Exception:  # noqa: BLE001
+            return {}
+    return load_config_defaults(project_root)
+
+
+def _is_relation_only_detection(
+    payload: Dict[str, Any], project_root: Path,
+) -> bool:
+    """True when a *detection* launch should be handed off to the
+    relation-discovery pipeline instead.
+
+    The cleaning runner routes every non-single-column type that lacks a
+    dedicated in-process handler (``row_duplication`` /
+    ``inter_table_inconsistency``) to ``run_relation_discovery`` when
+    ``inter_column_pipeline.enabled``. If *all* selected types are routed
+    that way, the per-chunk detection run has nothing to do and produces
+    an empty report -- so we launch the relation pipeline (which does
+    discover -> validate -> detect in one invocation) instead.
+
+    Returns ``False`` for the default selection (no ``error_types`` -> the
+    full taxonomy, which includes single-column types), for any mixed
+    selection that still gives the per-chunk detector real work, and when
+    the inter-column pipeline is disabled.
+    """
+    raw = payload.get("error_types")
+    if not raw:
+        return False  # default = full taxonomy (has single-column work)
+    keys = [k.strip() for k in str(raw).split(",") if k.strip()]
+    if not keys:
+        return False
+    # Respect the master switch: when the inter-column pipeline is off the
+    # per-chunk detector owns these types, so detection is the right path.
+    config = _load_config_for_payload(payload, project_root)
+    inter_column_cfg = config.get("inter_column_pipeline") or {}
+    if not bool(inter_column_cfg.get("enabled", True)):
+        return False
+    category_by_key = {
+        str(t.get("key")): str(t.get("category") or "")
+        for t in load_taxonomy_keys(project_root)
+    }
+
+    def _routed_to_relations(key: str) -> bool:
+        category = category_by_key.get(key)
+        if category is None:
+            return False  # unknown key: let the detector report the error
+        return (
+            _scope_prefix(category) != "single-column"
+            and key not in _DEDICATED_HANDLER_TYPES
+        )
+
+    return all(_routed_to_relations(k) for k in keys)
 
 
 def _path_within(value: str, project_root: Path) -> Path:
@@ -698,6 +991,21 @@ class JobManager:
             path_keys=_DETECTION_PATH_KEYS,
             glob_keys=_DETECTION_GLOB_KEYS,
         )
+        # Auto-route relation-only selections to the relation pipeline.
+        # When every selected error type is a multi-column relation type
+        # (e.g. fd_violation), the per-chunk detector has nothing to run
+        # and would write an empty report; run_relation_discovery instead
+        # does discover -> validate -> detect in one invocation and emits
+        # the same clusters/issues artifacts the labelling UI consumes.
+        if _is_relation_only_detection(payload, self.project_root):
+            logger.info(
+                "launch_detection: every selected type is a relation "
+                "type (%s); routing to the relation-discovery pipeline "
+                "(discover -> validate -> detect) instead of the empty "
+                "per-chunk path.",
+                payload.get("error_types"),
+            )
+            return self.launch_relations(payload)
         # ``multi_table_from`` accepts either a bare run id (resolved
         # against ``outputs/``) or a project-root-relative path. The
         # run-id form must not be auto-converted to an absolute path

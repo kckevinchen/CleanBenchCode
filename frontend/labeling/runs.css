@@ -218,6 +218,7 @@ body.runs-page header .actions a:hover {
 }
 .runs-list .row .sub .tag.model { color: #a78bfa; border-color: rgba(167,139,250,0.3); }
 .runs-list .row .sub .tag.mode  { color: var(--accent); border-color: rgba(96,165,250,0.3); }
+.runs-list .row .sub .tag.dataset { color: #34d399; border-color: rgba(52,211,153,0.35); text-transform: none; }
 .runs-list .row .num {
   font-size: 15px; font-variant-numeric: tabular-nums; font-weight: 600;
   color: var(--text); text-align: right;
@@ -342,6 +343,122 @@ body.runs-page header .actions a:hover {
 .runs-empty-filtered {
   padding: 20px; text-align: center; color: var(--muted);
   font-size: 13px;
+  border: 1px dashed var(--border); border-radius: 8px;
+  background: var(--panel);
+}
+
+/* ---- Folders (virtual run grouping) ---- */
+
+.runs-new-folder {
+  font: inherit; font-size: 12px; font-weight: 500;
+  padding: 5px 12px;
+  background: var(--panel-2); color: var(--muted);
+  border: 1px solid var(--border); border-radius: 6px;
+  cursor: pointer;
+  transition: all 120ms ease;
+  white-space: nowrap;
+}
+.runs-new-folder:hover { color: var(--text); border-color: var(--accent); }
+
+.runs-bulk-move {
+  font: inherit; font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 5px; border: 1px solid var(--border);
+  background: var(--panel-2); color: var(--text);
+  cursor: pointer;
+  max-width: 180px;
+}
+.runs-bulk-move:focus { outline: none; border-color: var(--accent); }
+
+.folder-head {
+  display: flex; align-items: center; gap: 8px;
+  /* The parent #runs-list is display:grid with a 10px row gap that
+     already separates this header from the preceding body, so we only
+     add a little extra TOP margin to visually break between groups and
+     leave the bottom to the grid gap (item margins don't collapse with
+     grid gaps, so a bottom margin here would double up). */
+  margin: 8px 0 0;
+  padding: 7px 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+}
+.folder-head:first-child { margin-top: 0; }
+.folder-head.unfiled { border-left-color: var(--border); }
+.folder-head.collapsed { opacity: 0.92; }
+
+.folder-toggle {
+  flex: 0 0 auto;
+  font-size: 12px; line-height: 1;
+  width: 22px; height: 22px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; color: var(--muted);
+  border: 1px solid transparent; border-radius: 5px;
+  cursor: pointer;
+  transition: all 120ms ease;
+}
+.folder-toggle:hover { color: var(--text); background: var(--panel-2); }
+
+.folder-glyph { font-size: 13px; opacity: 0.85; flex: 0 0 auto; }
+
+.folder-head .folder-name {
+  font-size: 13.5px; font-weight: 600; color: var(--text);
+  cursor: pointer;
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid transparent; border-radius: 5px;
+  padding: 1px 6px; margin: -1px -6px;
+  max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.folder-head .folder-name[data-action]:hover {
+  border-color: var(--border); background: var(--panel-2);
+}
+.folder-head .folder-name.placeholder { color: var(--muted); font-style: italic; font-weight: 500; }
+.folder-head .folder-name .pencil { opacity: 0; font-size: 11px; transition: opacity 120ms ease; }
+.folder-head .folder-name:hover .pencil { opacity: 0.7; }
+
+.folder-count {
+  font-size: 11px; color: var(--muted); font-weight: 500;
+  padding: 1px 8px; border-radius: 999px;
+  background: var(--panel-2); border: 1px solid var(--border);
+}
+
+.folder-head-actions {
+  margin-left: auto;
+  display: inline-flex; gap: 6px;
+  opacity: 0; transition: opacity 120ms ease;
+}
+/* Reveal on hover AND on keyboard focus so the Rename/Delete buttons are
+   reachable without a pointer. */
+.folder-head:hover .folder-head-actions,
+.folder-head:focus-within .folder-head-actions { opacity: 1; }
+.folder-head-actions button {
+  font: inherit; font-size: 11.5px; font-weight: 500;
+  padding: 3px 9px;
+  border-radius: 5px; border: 1px solid var(--border);
+  background: var(--panel-2); color: var(--muted);
+  cursor: pointer;
+  transition: all 120ms ease;
+}
+.folder-head-actions button:hover { color: var(--text); border-color: var(--accent); }
+.folder-head-actions button.danger { color: #fca5a5; border-color: rgba(248,113,113,0.4); }
+.folder-head-actions button.danger:hover { background: #ef4444; color: #fff; border-color: #ef4444; }
+
+.folder-body {
+  display: flex; flex-direction: column;
+  /* Match the flat list's 10px row rhythm so spacing doesn't visibly
+     shift when folders are introduced. Vertical separation from the
+     surrounding header/next group is handled by the #runs-list grid gap
+     + .folder-head top margin, so no margin here. */
+  gap: 10px;
+  padding-left: 12px;
+  margin-left: 10px;
+  border-left: 1px dashed var(--border);
+}
+
+.folder-empty {
+  padding: 12px 14px; color: var(--muted);
+  font-size: 12.5px; font-style: italic;
   border: 1px dashed var(--border); border-radius: 8px;
   background: var(--panel);
 }

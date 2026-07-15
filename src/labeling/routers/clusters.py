@@ -9,16 +9,37 @@ record into the slim queue item the UI renders.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from fastapi import Body, FastAPI, HTTPException, Query
 
 from .. import correction_suggester
 from ...core.llm_client import LLMClient
+from .._helpers import _scalar
 from ..schema import Label, LabelStatus, LabelTarget
 from ._context import RouterContext
 
 logger = logging.getLogger(__name__)
+
+# Error types whose detections legitimately aggregate many rows into ONE
+# cluster, so surfacing the union of their ``affected_rows`` truthfully
+# tells the labeller "this single TP/FP click covers N rows": the relation
+# pipeline (FD / calculation / cross-table) plus row_duplication. The
+# single-column types (typo, inconsistency, semantic_incompatible,
+# numeric_outlier) are the opposite case - ``cluster_issues`` *fans* a
+# multi-row issue OUT into one cluster per affected row so each cell stays
+# individually labellable, yet every fanned cluster still carries the FULL
+# ``affected_rows`` list. Surfacing it there makes all N clusters re-claim
+# the same N rows, so one cell shows up N times in the queue. Gate the
+# surface to genuine aggregates; fanned clusters then each show only their
+# own row.
+_MULTIROW_AGGREGATE_TYPES = frozenset({
+    "row_duplication",
+    "fd_violation",
+    "row_calculation_inconsistency",
+    "string_calculation_inconsistency",
+    "inter_table_inconsistency",
+})
 
 
 def _cluster_summary(c: Mapping[str, Any]) -> Dict[str, Any]:
@@ -38,23 +59,24 @@ def _cluster_summary(c: Mapping[str, Any]) -> Dict[str, Any]:
     # affected-rows surface is what tells the labeller "this single
     # TP click covers N rows".
     affected_rows: List[int] = []
-    seen: set = set()
-    primary_row = c.get("row")
-    if isinstance(primary_row, (int, float)):
-        seen.add(int(primary_row))
-    for d in c.get("detections") or []:
-        if not isinstance(d, Mapping):
-            continue
-        for r in d.get("affected_rows") or ():
-            try:
-                seen.add(int(r))
-            except (TypeError, ValueError):
+    if set(error_types) & _MULTIROW_AGGREGATE_TYPES:
+        seen: set = set()
+        primary_row = c.get("row")
+        if isinstance(primary_row, (int, float)):
+            seen.add(int(primary_row))
+        for d in c.get("detections") or []:
+            if not isinstance(d, Mapping):
                 continue
-    # Only surface when there are MORE rows than just the primary;
-    # singleton clusters get an empty list so the existing UI guards
-    # (`affected_rows.length > 1`) keep their meaning.
-    if len(seen) > 1:
-        affected_rows = sorted(seen)
+            for r in d.get("affected_rows") or ():
+                try:
+                    seen.add(int(r))
+                except (TypeError, ValueError):
+                    continue
+        # Only surface when there are MORE rows than just the primary;
+        # singleton clusters get an empty list so the existing UI guards
+        # (`affected_rows.length > 1`) keep their meaning.
+        if len(seen) > 1:
+            affected_rows = sorted(seen)
     # Verdict / strategy: row_duplication clusters carry these on
     # each detection. We surface the strongest verdict (duplicate
     # beats near_duplicate) and the union of strategies so the queue
@@ -103,6 +125,116 @@ def _cluster_summary(c: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
+def make_anchor_value_fn(ctx: Any) -> Callable[..., Optional[str]]:
+    """Build a function that returns the ``_scalar`` anchor cell value of
+    a single-column, concrete-row, non-aggregate cluster.
+
+    The anchor value is the grouping key used to collapse the fanned
+    same-value detections (``cluster_issues`` fans one single-column
+    issue into one cluster per affected row) into ONE labellable defect
+    that is counted ONCE. Returns ``None`` for clusters that must NOT be
+    grouped: multi-column, row-less, multi-row aggregate types
+    (row_duplication / FD / calculation / cross-table), or when the
+    frame / cell can't be read. The per-source frame cache is closed
+    over so a caller iterating every cluster reads each CSV at most once.
+    """
+    frame_cache: Dict[str, Any] = {}
+
+    def anchor(
+        source: Optional[str],
+        row: Any,
+        columns: Any,
+        error_types: Any,
+    ) -> Optional[str]:
+        cols = list(columns or [])
+        if len(cols) != 1 or not isinstance(row, int):
+            return None
+        if set(error_types or []) & _MULTIROW_AGGREGATE_TYPES:
+            return None
+        src = source or ""
+        if src not in frame_cache:
+            try:
+                frame_cache[src] = ctx.load_frame(src) if src else None
+            except FileNotFoundError:
+                frame_cache[src] = None
+        frame = frame_cache[src]
+        if frame is None:
+            return None
+        col = cols[0]
+        if col not in frame.columns or not (0 <= row < len(frame)):
+            return None
+        return _scalar(frame.iat[row, frame.columns.get_loc(col)])
+
+    return anchor
+
+
+def group_cluster_ids_by_value(ctx: Any) -> List[List[str]]:
+    """Collapse fanned same-value clusters into per-issue groups.
+
+    Returns a list of groups, each a list of ``cluster_id`` strings.
+    Single-column clusters sharing a ``(source, column, anchor value)``
+    form one group (the user labels / counts the defect ONCE); every
+    other cluster (multi-column, row-less, aggregate type, empty value)
+    is its own singleton group. Mirrors the grouping ``list_clusters``
+    applies to the queue so the stats bar counts per-issue, not per
+    fanned row.
+    """
+    anchor = make_anchor_value_fn(ctx)
+    groups: Dict[Tuple[str, str, str], List[str]] = {}
+    # Clusters that don't value-group but DO resolve to the same canonical
+    # (source, row, columns) cell are collapsed too, mirroring the
+    # (source, row, frozenset(columns)) dedup ``list_clusters`` applies to
+    # the queue. Without this, multi-column / empty-value / aggregate-type
+    # duplicate-cell clusters count once in the queue but N times here, so
+    # the stats total drifts above the queue count.
+    cell_groups: Dict[Tuple[str, int, Tuple[str, ...]], List[str]] = {}
+    singletons: List[List[str]] = []
+    for c in ctx.clusters:
+        cid = c.get("cluster_id")
+        if not cid:
+            continue
+        cols = list(c.get("columns") or [])
+        val = anchor(
+            c.get("source"), c.get("row"), cols, c.get("error_types"),
+        )
+        if val is None or val == "":
+            row = c.get("row")
+            cols_key = tuple(sorted(x for x in cols if isinstance(x, str)))
+            # Same dedup gate as the queue: only when the column set is
+            # non-empty AND the row is concrete (row-less / column-less
+            # defects are dataset-wide flags that stay separate).
+            if cols_key and isinstance(row, int):
+                cell_groups.setdefault(
+                    (c.get("source") or "", row, cols_key), []
+                ).append(cid)
+            else:
+                singletons.append([cid])
+            continue
+        groups.setdefault((c.get("source") or "", cols[0], val), []).append(cid)
+    return list(groups.values()) + list(cell_groups.values()) + singletons
+
+
+# Status precedence for collapsing a group's many member verdicts into
+# the single verdict the group is COUNTED as: the most-advanced label
+# wins so a partly-labelled group (e.g. after same-value propagation)
+# reads as labelled. Shared by the queue grouping and the stats bar.
+GROUP_STATUS_RANK = {
+    "tp": 5, "partial": 4, "fp": 3, "fn": 2, "unsure": 1, "skip": 0,
+}
+
+
+def group_status(statuses: List[str]) -> str:
+    """Return the most-advanced status among a group's members, or
+    ``"unlabeled"`` when none carry a concrete verdict."""
+    best = "unlabeled"
+    best_rank = -1
+    for st in statuses:
+        r = GROUP_STATUS_RANK.get(st, -1)
+        if r > best_rank:
+            best_rank = r
+            best = st
+    return best
+
 
 def register(app: FastAPI, router_ctx: RouterContext) -> None:
     cache = router_ctx.cache
@@ -121,6 +253,18 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
         ctx = cache.get(run_id)
         latest = ctx.store.latest_by_target()
         filtered: List[Dict[str, Any]] = []
+
+        # Anchor value (= grouping key) for collapsing the fanned
+        # same-value detections into one labellable item. Shared with the
+        # stats bar via ``make_anchor_value_fn`` so the queue and the
+        # per-status counts agree on what "one issue" is.
+        _anchor = make_anchor_value_fn(ctx)
+
+        def _anchor_value(item_: Dict[str, Any]) -> Optional[str]:
+            return _anchor(
+                item_.get("source"), item_.get("row"),
+                item_.get("columns"), item_.get("error_types"),
+            )
 
         for c in ctx.clusters:
             if source and c.get("source") != source:
@@ -143,6 +287,7 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
                 item["note"] = label.note
                 item["annotator"] = label.annotator
                 item["ts"] = label.ts
+            item["_anchor_value"] = _anchor_value(item)
             filtered.append(item)
 
         # Dedup: collapse clusters that resolve to the SAME canonical
@@ -204,6 +349,100 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
             logger.debug(
                 "queue-dedup: collapsed %d duplicate cluster(s) on run=%s",
                 absorbed_count, run_id,
+            )
+
+        # ---- Group fanned single-column same-value detections --------
+        # Single-column types (typo / inconsistency / semantic /
+        # numeric_outlier) are fanned by ``cluster_issues`` into one
+        # cluster per affected row, so the SAME bad value in one column
+        # shows up as N queue rows (one primary + N-1 inferred). Collapse
+        # every cluster sharing a (source, column, cell value) into ONE
+        # representative queue item so the operator labels the defect
+        # ONCE and it counts ONCE. Auto-apply still fans the verdict back
+        # out to every underlying row on save (``/clusters/propagate-
+        # status`` for the flagged siblings + ``/labels/propagate-same-
+        # value`` for the LLM-missed rows), so no row is lost.
+        #
+        # Multi-row aggregate types (row_duplication / FD / calculation /
+        # cross-table) are excluded - they already aggregate many rows
+        # into ONE cluster and have their own affected-rows surface.
+        _status_rank = GROUP_STATUS_RANK
+        groups: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = {}
+        passthrough: List[Dict[str, Any]] = []
+        for item in filtered:
+            gval = item.get("_anchor_value")
+            cols = item.get("columns") or []
+            # Groupable only when we resolved a non-empty anchor value
+            # (which already implies single-column, concrete row, and a
+            # non-aggregate type via ``_anchor_value``). Empty values are
+            # never grouped - they would collapse every blank cell in the
+            # column together.
+            if gval is None or gval == "":
+                item.pop("_anchor_value", None)
+                passthrough.append(item)
+                continue
+            groups.setdefault(
+                (item.get("source") or "", cols[0], gval), []
+            ).append(item)
+
+        grouped_reps: List[Dict[str, Any]] = []
+        for members in groups.values():
+            if len(members) == 1:
+                rep = members[0]
+                rep.pop("_anchor_value", None)
+                grouped_reps.append(rep)
+                continue
+            # Representative = the member best suited to anchor the group:
+            # prefer a primary (non-inferred) detection so the detail pane
+            # shows a real detection, then the most-advanced label, then
+            # the lowest row for a stable cursor order.
+            def _rep_rank(it: Dict[str, Any]) -> tuple:
+                row_ = it.get("row")
+                return (
+                    1 if it.get("inferred") else 0,
+                    -_status_rank.get(it.get("label_status") or "unlabeled", -1),
+                    row_ if isinstance(row_, int) else (1 << 30),
+                    str(it.get("cluster_id") or ""),
+                )
+
+            rep = min(members, key=_rep_rank)
+            rows_sorted = sorted({
+                m.get("row") for m in members if isinstance(m.get("row"), int)
+            })
+            rep["group_member_ids"] = [
+                m.get("cluster_id") for m in members if m.get("cluster_id")
+            ]
+            rep["group_rows"] = rows_sorted
+            rep["group_size"] = len(rep["group_member_ids"])
+            # Group verdict = the most-advanced label across members so a
+            # partly-labelled group (e.g. post-propagation) reads as
+            # labelled and the dominant verdict colours the queue dot.
+            best_member = max(
+                members,
+                key=lambda m: _status_rank.get(
+                    m.get("label_status") or "unlabeled", -1
+                ),
+            )
+            best_status = best_member.get("label_status") or "unlabeled"
+            rep["label_status"] = best_status
+            if best_status != "unlabeled" and best_member is not rep:
+                for k in ("corrected_value", "note", "annotator", "ts"):
+                    if k in best_member:
+                        rep[k] = best_member[k]
+            # Surface the full row span so the queue shows a "xN" badge
+            # ("one TP/FP click labels them all") and the detail pane can
+            # list the covered rows.
+            if len(rows_sorted) > 1:
+                rep["affected_rows"] = rows_sorted
+            rep.pop("_anchor_value", None)
+            grouped_reps.append(rep)
+
+        grouped_count = len(filtered) - (len(passthrough) + len(grouped_reps))
+        filtered = passthrough + grouped_reps
+        if grouped_count:
+            logger.debug(
+                "queue-group: collapsed %d fanned same-value cluster(s) on "
+                "run=%s", grouped_count, run_id,
             )
 
         # Sort by location so the operator sees clusters in the same
@@ -425,10 +664,19 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
         return dict(latest.value_corrections or {})
 
     @app.post(
-        "/api/runs/{run_id}/clusters/{cluster_id}/suggest-corrections"
+        "/api/runs/{run_id}/column-cluster-suggest-corrections"
     )
     def suggest_cluster_corrections(
-        run_id: str, cluster_id: str,
+        run_id: str,
+        cluster_id: str = Query(
+            ...,
+            description=(
+                "Column-cluster target id "
+                "(colclust\\x00src\\x00col\\x00cN). Passed as a query "
+                "param, not a path segment, so column names containing "
+                "'/' (e.g. 'Shipping State/Province') don't break routing."
+            ),
+        ),
         payload: Dict[str, Any] = Body(default_factory=dict),
     ) -> Dict[str, Any]:
         """Run the LLM correction suggester for ONE column-cluster.
@@ -512,10 +760,18 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
         }
 
     @app.get(
-        "/api/runs/{run_id}/clusters/{cluster_id}/corrections"
+        "/api/runs/{run_id}/column-cluster-corrections"
     )
     def get_cluster_corrections(
-        run_id: str, cluster_id: str,
+        run_id: str,
+        cluster_id: str = Query(
+            ...,
+            description=(
+                "Column-cluster target id "
+                "(colclust\\x00src\\x00col\\x00cN). Query param (not a "
+                "path segment) so '/'-containing column names route."
+            ),
+        ),
     ) -> Dict[str, Any]:
         """Return the latest persisted ``value_corrections`` for a cluster
         plus any cached LLM suggestions (no LLM calls).
@@ -575,10 +831,18 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
         }
 
     @app.post(
-        "/api/runs/{run_id}/clusters/{cluster_id}/corrections"
+        "/api/runs/{run_id}/column-cluster-corrections"
     )
     def save_cluster_corrections(
-        run_id: str, cluster_id: str,
+        run_id: str,
+        cluster_id: str = Query(
+            ...,
+            description=(
+                "Column-cluster target id "
+                "(colclust\\x00src\\x00col\\x00cN). Query param (not a "
+                "path segment) so '/'-containing column names route."
+            ),
+        ),
         payload: Dict[str, Any] = Body(...),
     ) -> Dict[str, Any]:
         """Persist a ``value_corrections`` mapping for one cluster.

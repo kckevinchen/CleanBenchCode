@@ -145,6 +145,72 @@ def build_report(
     if gt_dashboard_path.is_file():
         good_turing = json.loads(gt_dashboard_path.read_text(encoding="utf-8"))
 
+    # Fold in the final, complete per-arm estimates so the report's
+    # per-arm saturation table counts EVERY arm. ``gt_dashboard.json`` is
+    # written during detection and only carries the chunk-scan arms
+    # (scope_kind="column"); the column-clustering post-pass that owns
+    # ``inconsistency`` appends its arms (scope_kind="column_clustering")
+    # to ``per_arm_estimates.json`` afterward -- and for an
+    # inconsistency-only run there is no dashboard at all. Merge the
+    # on-disk arms in and synthesise a minimal GT payload when needed so
+    # inconsistency saturation shows up in the report like every other
+    # adaptive type.
+    per_arm_path = run_dir / "good_turing" / "per_arm_estimates.json"
+    if per_arm_path.is_file():
+        try:
+            disk = json.loads(per_arm_path.read_text(encoding="utf-8")) or {}
+        except Exception:  # noqa: BLE001
+            disk = {}
+        disk_arms = [dict(a) for a in (disk.get("arms") or []) if isinstance(a, dict)]
+        for a in disk_arms:
+            # Normalise the column-clustering scope_id ("source::column")
+            # to the [source, column] array the report table renders.
+            sid = a.get("scope_id")
+            if isinstance(sid, str) and "::" in sid:
+                a["scope_id"] = sid.split("::", 1)
+            # Backward-compat for runs written before the schema was
+            # aligned: derive a normalised status + the per-chunk field
+            # names from the column-clustering fields so older runs count
+            # too (re-running the run is not required).
+            if not a.get("status") and a.get("stopped_reason"):
+                a["status"] = (
+                    "exhausted" if a.get("stopped_reason") == "k_max"
+                    else "saturated"
+                )
+            if a.get("num_runs") is None and a.get("runs_completed") is not None:
+                a["num_runs"] = a.get("runs_completed")
+            if a.get("n_observed") is None and a.get("n_species_observed") is not None:
+                a["n_observed"] = a.get("n_species_observed")
+        if disk_arms:
+            if good_turing is None:
+                good_turing = {"enabled": True, "gt_mode": "adaptive"}
+            existing = good_turing.get("per_arm") or {}
+            existing_arms = [
+                a for a in (existing.get("arms") or []) if isinstance(a, dict)
+            ]
+            have_kinds = {a.get("scope_kind") for a in existing_arms}
+            # Add only arm kinds the dashboard didn't already carry (so the
+            # richer dashboard rows for chunk arms are preserved).
+            extra = [a for a in disk_arms if a.get("scope_kind") not in have_kinds]
+            merged_arms = existing_arms + extra
+            good_turing["per_arm"] = {
+                "scope_kind": (
+                    existing.get("scope_kind")
+                    or (merged_arms[0].get("scope_kind") if merged_arms else None)
+                ),
+                "num_runs_completed": (
+                    existing.get("num_runs_completed")
+                    or disk.get("num_runs_completed")
+                ),
+                "arms": merged_arms,
+            }
+            if good_turing.get("num_runs_completed") is None:
+                _runs = [
+                    int(a.get("num_runs") or a.get("runs_completed") or 0)
+                    for a in merged_arms
+                ]
+                good_turing["num_runs_completed"] = max(_runs) if _runs else None
+
     csv_paths = summary.get("config", {}).get("csv_paths") or []
     source_frames = _load_source_frames(csv_paths)
 

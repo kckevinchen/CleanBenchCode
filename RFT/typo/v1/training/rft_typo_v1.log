@@ -1,0 +1,830 @@
+2026-05-19 07:39:26,593 INFO demo_rft: Using endpoint https://dmxaz-test-aoai.openai.azure.com/ (auto-resolved).
+2026-05-19 07:39:26,598 INFO demo_rft: Staged 80 typo records: outputs/typo_rft/synth_llm_v1/train.jsonl -> outputs/rft_typo_v1/typo_train.jsonl
+2026-05-19 07:39:26,599 INFO demo_rft: Staged 20 typo records: outputs/typo_rft/synth_llm_v1/valid.jsonl -> outputs/rft_typo_v1/typo_valid.jsonl
+2026-05-19 07:39:26,599 INFO demo_rft: Using AzureCliCredential (run `az login` if this fails).
+2026-05-19 07:39:27,202 INFO azure.identity._internal.decorators: AzureCliCredential.get_token_info succeeded
+2026-05-19 07:39:28,902 INFO httpx: HTTP Request: POST https://dmxaz-test-aoai.openai.azure.com/openai/files?api-version=2025-04-01-preview "HTTP/1.1 201 Created"
+2026-05-19 07:39:28,903 INFO demo_rft: Uploaded typo_train.jsonl -> file-3dc27942fd2f420abd84eacd17b48268
+2026-05-19 07:39:29,274 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/files/file-3dc27942fd2f420abd84eacd17b48268?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:39:29,275 INFO demo_rft: File file-3dc27942fd2f420abd84eacd17b48268 status=pending
+2026-05-19 07:39:35,090 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/files/file-3dc27942fd2f420abd84eacd17b48268?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:39:35,091 INFO demo_rft: File file-3dc27942fd2f420abd84eacd17b48268 status=processed
+2026-05-19 07:39:35,717 INFO httpx: HTTP Request: POST https://dmxaz-test-aoai.openai.azure.com/openai/files?api-version=2025-04-01-preview "HTTP/1.1 201 Created"
+2026-05-19 07:39:35,718 INFO demo_rft: Uploaded typo_valid.jsonl -> file-c995e1a114894275b3d94a709575ec98
+2026-05-19 07:39:35,893 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/files/file-c995e1a114894275b3d94a709575ec98?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:39:35,894 INFO demo_rft: File file-c995e1a114894275b3d94a709575ec98 status=pending
+2026-05-19 07:39:41,581 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/files/file-c995e1a114894275b3d94a709575ec98?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:39:41,582 INFO demo_rft: File file-c995e1a114894275b3d94a709575ec98 status=processed
+2026-05-19 07:39:41,582 INFO demo_rft: Using AzureCliCredential (run `az login` if this fails).
+2026-05-19 07:39:41,992 INFO azure.identity._internal.decorators: AzureCliCredential.get_token_info succeeded
+2026-05-19 07:39:43,018 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/models?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:39:43,860 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/files/file-3dc27942fd2f420abd84eacd17b48268?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:39:43,861 INFO demo_rft: File file-3dc27942fd2f420abd84eacd17b48268 status=processed
+2026-05-19 07:39:44,131 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/files/file-c995e1a114894275b3d94a709575ec98?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:39:44,131 INFO demo_rft: File file-c995e1a114894275b3d94a709575ec98 status=processed
+2026-05-19 07:39:44,457 INFO httpx: HTTP Request: POST https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs?api-version=2025-04-01-preview "HTTP/1.1 201 Created"
+2026-05-19 07:39:44,638 INFO demo_rft: Submitted RFT job: ftjob-2c29f8a30e184e5eb4e34a438b527584 (status=pending)
+2026-05-19 07:39:44,638 INFO demo_rft: Using AzureCliCredential (run `az login` if this fails).
+2026-05-19 07:39:45,053 INFO azure.identity._internal.decorators: AzureCliCredential.get_token_info succeeded
+2026-05-19 07:39:45,809 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:39:46,312 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 07:40:46,963 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:40:47,369 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 07:41:48,107 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:41:48,438 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 07:42:49,105 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:42:49,495 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 07:43:50,203 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:43:50,560 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 07:44:51,250 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:44:51,591 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 07:45:52,493 INFO azure.identity._internal.decorators: AzureCliCredential.get_token_info succeeded
+2026-05-19 07:45:53,176 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:45:53,550 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 07:46:54,238 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:46:54,580 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 07:47:55,280 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:47:55,621 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 07:48:56,294 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:48:56,623 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 07:49:57,346 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:49:57,803 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 07:50:58,505 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:50:58,849 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 07:51:59,522 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:51:59,852 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 07:53:00,526 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:53:01,584 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 07:54:02,352 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:54:02,730 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 07:55:03,416 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:55:03,750 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 07:56:04,433 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:56:04,775 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 07:57:05,445 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:57:05,897 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 07:58:06,587 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:58:06,920 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 07:59:07,607 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 07:59:07,945 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:00:08,603 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:00:08,924 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:01:09,591 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:01:09,922 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:02:11,154 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:02:11,501 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:03:12,472 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:03:12,801 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:04:13,476 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:04:13,802 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:05:14,567 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:05:14,897 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:06:15,618 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:06:15,962 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:07:16,607 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:07:16,927 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:08:17,602 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:08:17,948 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:09:18,638 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:09:19,071 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:10:19,774 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:10:20,113 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:11:20,780 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:11:21,109 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:12:21,993 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:12:22,320 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:13:22,993 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:13:23,326 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:14:24,008 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:14:24,535 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:15:25,220 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:15:25,560 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:16:26,221 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:16:26,603 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:17:27,308 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:17:27,652 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:18:28,320 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:18:28,656 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:19:29,313 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:19:29,641 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:20:30,307 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:20:30,640 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:21:31,333 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:21:31,838 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:22:32,505 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:22:32,916 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:23:33,581 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:23:34,655 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:24:35,328 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:24:35,658 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:25:36,343 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:25:36,976 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:26:37,687 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:26:38,028 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:27:38,854 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:27:39,260 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:28:39,930 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:28:40,260 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:29:40,996 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:29:41,335 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:30:42,006 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:30:42,414 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:31:43,085 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:31:43,415 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:32:44,078 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:32:44,532 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:33:45,201 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:33:45,531 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:34:46,216 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:34:46,652 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:35:47,337 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:35:47,682 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:36:48,372 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:36:48,779 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:37:49,464 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:37:49,806 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:38:50,660 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:38:51,003 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:39:51,719 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:39:56,471 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:40:57,191 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:40:57,550 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:41:58,220 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:41:58,549 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:42:59,457 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:42:59,971 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:44:01,441 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:44:01,922 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:45:02,600 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:45:03,010 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:46:03,698 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:46:04,036 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:47:04,708 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:47:05,039 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:48:05,733 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:48:06,086 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:49:06,814 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:49:07,167 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:50:07,886 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:50:08,224 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:51:08,867 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:51:09,189 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:52:09,890 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:52:10,277 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:53:10,963 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:53:11,463 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:54:12,383 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+
+Sample staged record:
+{
+  "messages": [
+    {
+      "role": "developer",
+      "content": "You are a data-quality reviewer evaluating one cell of a CSV column. Decide whether the cell is a typo, clean, or ambiguous under the rulebook below. Reply with a single JSON object only -- no Markdown fences, no surrounding text.\n\nA cell is a TYPO only when, judging from the cell value and column header alone, you can name the specific defect AND the intended correction is unambiguous. Three flavours qualify:\n  - spelling: a one- or two-character distortion of a word that     plausibly belongs in this column (e.g., 'Acomodate' ->     'Accommodate'; 'Pilot Mountatin' -> 'Pilot Mountain').\n  - whitespace: internal repeated spaces, embedded tab or newline     (e.g., 'New  York'). Leading/trailing whitespace is stripped     in preprocessing and must NOT be flagged.\n  - punctuation: missing comma+space between tokens, doubled     commas, stray hyphens (e.g., 'Address,State' ->     'Address, State'; '(575-) 894-8350' -> '(575) 894-8350').\nUse AMBIGUOUS when the cell looks suspicious but the rulebook cannot uniquely resolve it from cell + header alone:\n  - Truncated values whose full form you cannot recover     ('CLARION SAFETY SYSTE', 'Education in Unorganized Terr').\n  - Contraction-style abbreviations ('Twp', 'Gl Hearn Limited').\n  - Multiple equally plausible corrections.\nUse CLEAN for everything else, especially:\n  - Recognised proper nouns, brand names, person names.\n  - Fixed-length codes (zip, SKU, FIPS, ISBN, version strings).\n  - Pure numeric values -- never typos by our definition.\n  - Date-shaped strings -- never typos by our definition.\n  - Standard idioms with elided punctuation ('New Years Day').\nWhen in doubt, prefer AMBIGUOUS over TYPO.\n\nOutput JSON keys (strict):\n  label:      'typo' | 'clean' | 'ambiguous'\n  correction: intended spelling as a string (only when               label=='typo'); otherwise null.\n  flavour:    'spelling' | 'whitespace' | 'punctuation' (only               when label=='typo'); otherwise null.\n  rationale:  one short sentence naming the defect or stating               why the cell is clean / ambiguous."
+    },
+    {
+      "role": "user",
+      "content": "Column header: BUREAU_TITLE\nSource CSV: 569025e9882c4f47b9499acfafc9b36b.csv\nOther distinct values in this column (sample of 13):\n  - 'Centers for Medicare and Medicaid Services'\n  - 'Administration for Children and Families'\n  - 'Indian Health Service'\n  - 'Food and Drug Administration'\n  - 'Health Resources and Services Administration'\n  - 'National Institutes of Health'\n  - 'Departmental Management'\n  - 'Program Support Center'\n  - 'Administration for Community Living'\n  - 'Substance Abuse and Mental Health Services Administration'\n  - 'Centers for Disease Control and Prevention'\n  - 'Agency for Healthcare Research and Quality'\n  - 'Office of the Inspector General'\n\nCandidate value to judge:\n  'Substance Abuse and Mental Health Svcs Administration'\n\nReturn the JSON object."
+    }
+  ],
+  "gold_label": "\"ambiguous\"",
+  "gold_correction": "null",
+  "candidate_value": "\"Substance Abuse and Mental Health Svcs Administration\"",
+  "column": "\"BUREAU_TITLE\"",
+  "source": "\"569025e9882c4f47b9499acfafc9b36b.csv\""
+}
+
+Job ID: ftjob-2c29f8a30e184e5eb4e34a438b527584
+Watch with: python -m experiments.demo_rft status --job-id ftjob-2c29f8a30e184e5eb4e34a438b527584
+
+[  0] status=pending trained_tokens=None fine_tuned_model=None
+  [07:39:44] info    Job enqueued. Waiting for jobs ahead to complete.
+
+[  1] status=pending trained_tokens=None fine_tuned_model=None
+
+[  2] status=pending trained_tokens=None fine_tuned_model=None
+
+[  3] status=pending trained_tokens=None fine_tuned_model=None
+
+[  4] status=pending trained_tokens=None fine_tuned_model=None
+
+[  5] status=pending trained_tokens=None fine_tuned_model=None
+
+[  6] status=pending trained_tokens=None fine_tuned_model=None
+
+[  7] status=pending trained_tokens=None fine_tuned_model=None
+
+[  8] status=running trained_tokens=None fine_tuned_model=None
+
+[  9] status=running trained_tokens=None fine_tuned_model=None
+
+[ 10] status=running trained_tokens=None fine_tuned_model=None
+
+[ 11] status=running trained_tokens=None fine_tuned_model=None
+
+[ 12] status=running trained_tokens=None fine_tuned_model=None
+
+[ 13] status=running trained_tokens=None fine_tuned_model=None
+
+[ 14] status=running trained_tokens=None fine_tuned_model=None
+
+[ 15] status=running trained_tokens=None fine_tuned_model=None
+
+[ 16] status=running trained_tokens=None fine_tuned_model=None
+
+[ 17] status=running trained_tokens=None fine_tuned_model=None
+
+[ 18] status=running trained_tokens=None fine_tuned_model=None
+
+[ 19] status=running trained_tokens=None fine_tuned_model=None
+
+[ 20] status=running trained_tokens=None fine_tuned_model=None
+
+[ 21] status=running trained_tokens=None fine_tuned_model=None
+
+[ 22] status=running trained_tokens=None fine_tuned_model=None
+
+[ 23] status=running trained_tokens=None fine_tuned_model=None
+
+[ 24] status=running trained_tokens=None fine_tuned_model=None
+
+[ 25] status=running trained_tokens=None fine_tuned_model=None
+
+[ 26] status=running trained_tokens=None fine_tuned_model=None
+
+[ 27] status=running trained_tokens=None fine_tuned_model=None
+
+[ 28] status=running trained_tokens=None fine_tuned_model=None
+
+[ 29] status=running trained_tokens=None fine_tuned_model=None
+
+[ 30] status=running trained_tokens=None fine_tuned_model=None
+
+[ 31] status=running trained_tokens=None fine_tuned_model=None
+
+[ 32] status=running trained_tokens=None fine_tuned_model=None
+
+[ 33] status=running trained_tokens=None fine_tuned_model=None
+
+[ 34] status=running trained_tokens=None fine_tuned_model=None
+
+[ 35] status=running trained_tokens=None fine_tuned_model=None
+
+[ 36] status=running trained_tokens=None fine_tuned_model=None
+
+[ 37] status=running trained_tokens=None fine_tuned_model=None
+
+[ 38] status=running trained_tokens=None fine_tuned_model=None
+
+[ 39] status=running trained_tokens=None fine_tuned_model=None
+
+[ 40] status=running trained_tokens=None fine_tuned_model=None
+
+[ 41] status=running trained_tokens=None fine_tuned_model=None
+
+[ 42] status=running trained_tokens=None fine_tuned_model=None
+
+[ 43] status=running trained_tokens=None fine_tuned_model=None
+
+[ 44] status=running trained_tokens=None fine_tuned_model=None
+
+[ 45] status=running trained_tokens=None fine_tuned_model=None
+
+[ 46] status=running trained_tokens=None fine_tuned_model=None
+
+[ 47] status=running trained_tokens=None fine_tuned_model=None
+
+[ 48] status=running trained_tokens=None fine_tuned_model=None
+
+[ 49] status=pending trained_tokens=None fine_tuned_model=None
+
+[ 50] status=pending trained_tokens=None fine_tuned_model=None
+
+[ 51] status=pending trained_tokens=None fine_tuned_model=None
+
+[ 52] status=pending trained_tokens=None fine_tuned_model=None
+
+[ 53] status=pending trained_tokens=None fine_tuned_model=None
+
+[ 54] status=pending trained_tokens=None fine_tuned_model=None
+
+[ 55] status=running trained_tokens=None fine_tuned_model=None
+
+[ 56] status=running trained_tokens=None fine_tuned_model=None
+
+[ 57] status=running trained_tokens=None fine_tuned_model=None
+
+[ 58] status=running trained_tokens=None fine_tuned_model=None
+
+[ 59] status=running trained_tokens=None fine_tuned_model=None
+
+[ 60] status=running trained_tokens=None fine_tuned_model=None
+
+[ 61] status=running trained_tokens=None fine_tuned_model=None
+
+[ 62] status=running trained_tokens=None fine_tuned_model=None
+
+[ 63] status=running trained_tokens=None fine_tuned_model=None
+
+[ 64] status=running trained_tokens=None fine_tuned_model=None
+
+[ 65] status=running trained_tokens=None fine_tuned_model=None
+
+[ 66] status=running trained_tokens=None fine_tuned_model=None
+
+[ 67] status=running trained_tokens=None fine_tuned_model=None
+
+[ 68] status=running trained_tokens=None fine_tuned_model=None
+
+[ 69] status=running trained_tokens=None fine_tuned_model=None
+
+[ 70] status=running trained_tokens=None fine_tuned_model=None
+
+[ 71] status=running trained_tokens=None fine_tuned_model=None
+
+[ 72] status=running trained_tokens=None fine_tuned_model=None
+
+[ 73] status=running trained_tokens=None fine_tuned_model=None2026-05-19 08:54:12,719 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:55:13,486 INFO azure.identity._internal.decorators: AzureCliCredential.get_token_info succeeded
+2026-05-19 08:55:14,192 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:55:14,605 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:56:15,287 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:56:15,628 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:57:16,314 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:57:16,649 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:58:17,346 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:58:17,738 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 08:59:18,529 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 08:59:18,870 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:00:19,682 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:00:20,026 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:01:20,754 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:01:21,154 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:02:21,823 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:02:22,218 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:03:22,897 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:03:23,230 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:04:23,914 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:04:24,250 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:05:26,119 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:05:28,256 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:06:28,947 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:06:29,288 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:07:29,962 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:07:30,294 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:08:30,973 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:08:31,306 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:09:31,962 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:09:32,536 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:10:33,196 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:10:33,519 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:11:34,219 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:11:34,609 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:12:35,294 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:12:35,632 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:13:36,289 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:13:36,673 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:14:37,335 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:14:37,775 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:15:38,462 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:15:38,950 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:16:39,679 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:16:40,153 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:17:40,801 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:17:41,181 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:18:41,916 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:18:42,377 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:19:43,082 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:19:43,556 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:20:45,201 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:20:45,798 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:21:46,489 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:21:46,961 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:22:47,635 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:22:48,039 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:23:48,719 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:23:49,278 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:24:49,935 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:24:50,360 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:25:51,100 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:25:51,541 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:26:52,253 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:26:53,010 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:27:53,723 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:27:54,149 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:28:54,855 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:28:55,531 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:29:56,205 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:29:56,618 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:30:57,355 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:30:57,742 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:31:58,431 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:31:58,930 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:32:59,662 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:33:00,135 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:34:00,825 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:34:01,262 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:35:01,958 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:35:02,318 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:36:03,001 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:36:03,534 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:37:04,207 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:37:04,652 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:38:05,301 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:38:05,684 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:39:06,384 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:39:06,740 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:40:07,402 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:40:07,843 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:41:10,621 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:41:11,036 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:42:11,721 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:42:12,115 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:43:12,785 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:43:13,193 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:44:13,859 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:44:14,309 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:45:14,986 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:45:15,362 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:46:16,077 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:46:16,700 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:47:17,346 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:47:17,728 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:48:18,495 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:48:18,883 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:49:19,560 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:49:19,968 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:50:20,649 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:50:21,257 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:51:21,918 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:51:22,468 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:52:23,177 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:52:23,797 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:53:24,639 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:53:25,121 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:54:25,828 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:54:26,276 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:55:26,966 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:55:27,330 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:56:27,992 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:56:28,389 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:57:29,071 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:57:29,469 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:58:30,112 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:58:30,453 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 09:59:31,188 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 09:59:31,601 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:00:32,440 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:00:33,021 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:01:33,902 INFO azure.identity._internal.decorators: AzureCliCredential.get_token_info succeeded
+2026-05-19 10:01:34,681 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:01:35,151 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:02:35,834 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:02:36,367 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:03:37,377 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:03:37,959 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:04:38,636 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:04:39,035 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:05:39,705 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:05:40,317 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:06:41,006 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:06:41,392 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:07:42,671 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:07:43,211 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:08:43,875 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:08:44,284 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:09:44,972 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:09:45,527 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:10:46,208 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:10:46,685 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:11:47,375 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:11:47,733 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:12:48,402 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:12:48,819 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:13:49,518 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:13:49,952 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:14:50,636 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:14:51,036 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:15:51,694 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:15:52,140 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:16:52,799 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:16:53,229 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:17:54,012 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:17:54,434 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:18:55,115 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:18:55,624 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:19:56,288 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:19:56,713 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:20:57,392 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:20:57,973 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:21:58,667 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:21:59,020 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:22:59,707 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:23:00,071 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:24:00,755 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:24:01,200 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:25:01,877 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:25:02,229 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:26:02,872 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:26:03,214 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:27:07,953 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:27:08,364 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:28:09,044 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:28:09,464 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:29:10,201 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:29:10,617 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:30:13,790 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:30:14,143 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:31:14,805 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:31:15,146 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:32:15,853 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:32:16,271 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:33:16,963 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:33:17,402 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:34:18,052 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:34:18,425 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:35:19,103 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:35:19,521 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:36:20,211 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:36:20,611 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:37:21,302 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:37:21,681 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:38:22,362 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:38:22,846 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:39:23,566 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:39:24,124 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:40:24,814 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:40:26,329 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:41:27,266 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:41:27,622 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:42:28,325 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:42:28,806 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:43:29,509 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:43:29,936 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:44:30,593 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:44:31,018 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:45:31,720 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:45:32,099 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:46:32,791 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:46:33,215 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:47:33,913 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:47:34,376 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:48:35,074 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:48:35,502 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:49:36,184 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:49:36,777 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:50:37,460 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:50:37,830 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:51:38,705 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:51:39,109 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:52:39,818 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:52:40,498 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:53:41,172 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:53:41,603 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:54:42,282 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:54:42,674 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:55:43,353 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:55:43,753 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+2026-05-19 10:56:44,432 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584?api-version=2025-04-01-preview "HTTP/1.1 200 OK"
+2026-05-19 10:56:44,874 INFO httpx: HTTP Request: GET https://dmxaz-test-aoai.openai.azure.com/openai/fine_tuning/jobs/ftjob-2c29f8a30e184e5eb4e34a438b527584/events?api-version=2025-04-01-preview&after=ftevent-94582bba3a284f01befbe08a603314f9&limit=20 "HTTP/1.1 200 OK"
+
+
+[ 74] status=running trained_tokens=None fine_tuned_model=None
+
+[ 75] status=running trained_tokens=None fine_tuned_model=None
+
+[ 76] status=running trained_tokens=None fine_tuned_model=None
+
+[ 77] status=running trained_tokens=None fine_tuned_model=None
+
+[ 78] status=running trained_tokens=None fine_tuned_model=None
+
+[ 79] status=running trained_tokens=None fine_tuned_model=None
+
+[ 80] status=running trained_tokens=None fine_tuned_model=None
+
+[ 81] status=running trained_tokens=None fine_tuned_model=None
+
+[ 82] status=running trained_tokens=None fine_tuned_model=None
+
+[ 83] status=running trained_tokens=None fine_tuned_model=None
+
+[ 84] status=running trained_tokens=None fine_tuned_model=None
+
+[ 85] status=running trained_tokens=None fine_tuned_model=None
+
+[ 86] status=running trained_tokens=None fine_tuned_model=None
+
+[ 87] status=running trained_tokens=None fine_tuned_model=None
+
+[ 88] status=running trained_tokens=None fine_tuned_model=None
+
+[ 89] status=running trained_tokens=None fine_tuned_model=None
+
+[ 90] status=running trained_tokens=None fine_tuned_model=None
+
+[ 91] status=running trained_tokens=None fine_tuned_model=None
+
+[ 92] status=running trained_tokens=None fine_tuned_model=None
+
+[ 93] status=running trained_tokens=None fine_tuned_model=None
+
+[ 94] status=running trained_tokens=None fine_tuned_model=None
+
+[ 95] status=running trained_tokens=None fine_tuned_model=None
+
+[ 96] status=running trained_tokens=None fine_tuned_model=None
+
+[ 97] status=running trained_tokens=None fine_tuned_model=None
+
+[ 98] status=running trained_tokens=None fine_tuned_model=None
+
+[ 99] status=running trained_tokens=None fine_tuned_model=None
+
+[100] status=running trained_tokens=None fine_tuned_model=None
+
+[101] status=running trained_tokens=None fine_tuned_model=None
+
+[102] status=running trained_tokens=None fine_tuned_model=None
+
+[103] status=running trained_tokens=None fine_tuned_model=None
+
+[104] status=running trained_tokens=None fine_tuned_model=None
+
+[105] status=running trained_tokens=None fine_tuned_model=None
+
+[106] status=running trained_tokens=None fine_tuned_model=None
+
+[107] status=running trained_tokens=None fine_tuned_model=None
+
+[108] status=running trained_tokens=None fine_tuned_model=None
+
+[109] status=running trained_tokens=None fine_tuned_model=None
+
+[110] status=running trained_tokens=None fine_tuned_model=None
+
+[111] status=running trained_tokens=None fine_tuned_model=None
+
+[112] status=running trained_tokens=None fine_tuned_model=None
+
+[113] status=running trained_tokens=None fine_tuned_model=None
+
+[114] status=running trained_tokens=None fine_tuned_model=None
+
+[115] status=running trained_tokens=None fine_tuned_model=None
+
+[116] status=running trained_tokens=None fine_tuned_model=None
+
+[117] status=running trained_tokens=None fine_tuned_model=None
+
+[118] status=running trained_tokens=None fine_tuned_model=None
+
+[119] status=running trained_tokens=None fine_tuned_model=None
+
+[120] status=running trained_tokens=None fine_tuned_model=None
+
+[121] status=running trained_tokens=None fine_tuned_model=None
+
+[122] status=running trained_tokens=None fine_tuned_model=None
+
+[123] status=running trained_tokens=None fine_tuned_model=None
+
+[124] status=running trained_tokens=None fine_tuned_model=None
+
+[125] status=running trained_tokens=None fine_tuned_model=None
+
+[126] status=running trained_tokens=None fine_tuned_model=None
+
+[127] status=running trained_tokens=None fine_tuned_model=None
+
+[128] status=running trained_tokens=None fine_tuned_model=None
+
+[129] status=running trained_tokens=None fine_tuned_model=None
+
+[130] status=running trained_tokens=None fine_tuned_model=None
+
+[131] status=running trained_tokens=None fine_tuned_model=None
+
+[132] status=running trained_tokens=None fine_tuned_model=None
+
+[133] status=running trained_tokens=None fine_tuned_model=None
+
+[134] status=running trained_tokens=None fine_tuned_model=None
+
+[135] status=running trained_tokens=None fine_tuned_model=None
+
+[136] status=running trained_tokens=None fine_tuned_model=None
+
+[137] status=running trained_tokens=None fine_tuned_model=None
+
+[138] status=running trained_tokens=None fine_tuned_model=None
+
+[139] status=running trained_tokens=None fine_tuned_model=None
+
+[140] status=running trained_tokens=None fine_tuned_model=None
+
+[141] status=running trained_tokens=None fine_tuned_model=None
+
+[142] status=running trained_tokens=None fine_tuned_model=None
+
+[143] status=running trained_tokens=None fine_tuned_model=None
+
+[144] status=running trained_tokens=None fine_tuned_model=None
+
+[145] status=running trained_tokens=None fine_tuned_model=None
+
+[146] status=running trained_tokens=None fine_tuned_model=None
+
+[147] status=running trained_tokens=None fine_tuned_model=None
+
+[148] status=running trained_tokens=None fine_tuned_model=None
+
+[149] status=running trained_tokens=None fine_tuned_model=None
+
+[150] status=running trained_tokens=None fine_tuned_model=None
+
+[151] status=running trained_tokens=None fine_tuned_model=None
+
+[152] status=running trained_tokens=None fine_tuned_model=None
+
+[153] status=running trained_tokens=None fine_tuned_model=None
+
+[154] status=running trained_tokens=None fine_tuned_model=None
+
+[155] status=running trained_tokens=None fine_tuned_model=None
+
+[156] status=running trained_tokens=None fine_tuned_model=None
+
+[157] status=running trained_tokens=None fine_tuned_model=None
+
+[158] status=running trained_tokens=None fine_tuned_model=None
+
+[159] status=running trained_tokens=None fine_tuned_model=None
+
+[160] status=running trained_tokens=None fine_tuned_model=None
+
+[161] status=running trained_tokens=None fine_tuned_model=None
+
+[162] status=running trained_tokens=None fine_tuned_model=None
+
+[163] status=running trained_tokens=None fine_tuned_model=None
+
+[164] status=running trained_tokens=None fine_tuned_model=None
+
+[165] status=running trained_tokens=None fine_tuned_model=None
+
+[166] status=running trained_tokens=None fine_tuned_model=None
+
+[167] status=running trained_tokens=None fine_tuned_model=None
+
+[168] status=running trained_tokens=None fine_tuned_model=None
+
+[169] status=running trained_tokens=None fine_tuned_model=None
+
+[170] status=running trained_tokens=None fine_tuned_model=None
+
+[171] status=running trained_tokens=None fine_tuned_model=None
+
+[172] status=running trained_tokens=None fine_tuned_model=None
+
+[173] status=running trained_tokens=None fine_tuned_model=None
+
+[174] status=running trained_tokens=None fine_tuned_model=None
+
+[175] status=running trained_tokens=None fine_tuned_model=None
+
+[176] status=running trained_tokens=None fine_tuned_model=None
+
+[177] status=running trained_tokens=None fine_tuned_model=None
+
+[178] status=running trained_tokens=None fine_tuned_model=None
+
+[179] status=running trained_tokens=None fine_tuned_model=None
+
+[180] status=running trained_tokens=None fine_tuned_model=None
+
+[181] status=running trained_tokens=None fine_tuned_model=None
+
+[182] status=running trained_tokens=None fine_tuned_model=None
+
+[183] status=running trained_tokens=None fine_tuned_model=None
+
+[184] status=running trained_tokens=None fine_tuned_model=None
+
+[185] status=running trained_tokens=None fine_tuned_model=None
+
+[186] status=running trained_tokens=None fine_tuned_model=None
+
+[187] status=running trained_tokens=None fine_tuned_model=None
+
+[188] status=running trained_tokens=None fine_tuned_model=None
+
+[189] status=running trained_tokens=None fine_tuned_model=None
+
+[190] status=running trained_tokens=None fine_tuned_model=None
+
+[191] status=running trained_tokens=None fine_tuned_model=None
+
+[192] status=running trained_tokens=None fine_tuned_model=None
+
+[193] status=succeeded trained_tokens=65975 fine_tuned_model=o4-mini-2025-04-16.ft-2c29f8a30e184e5eb4e34a438b527584-typo-rft-v1

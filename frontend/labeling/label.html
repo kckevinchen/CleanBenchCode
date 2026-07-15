@@ -20,7 +20,7 @@
   <!-- UI/UX refinement layer: loaded last so its rules win by source order.
        Restyles existing markup only (no DOM/JS changes); drop this one line
        to revert to the base look. -->
-  <link rel="stylesheet" href="./refresh.css?v=5" />
+  <link rel="stylesheet" href="./refresh.css?v=6" />
 </head>
 <body>
   <header>
@@ -62,6 +62,14 @@
   </header>
 
   <aside class="sidebar" id="sidebar">
+    <!-- Free-text queue search (also focusable with the "/" key). Treated
+         as another filter in label.js, so the summary count, empty-state
+         and per-type counts all reflect it. -->
+    <div class="queue-search-wrap">
+      <input type="search" id="queue-search" class="queue-search"
+             placeholder="Search queue  ( / )" aria-label="Search the queue"
+             autocomplete="off" />
+    </div>
     <div class="filters">
       <div class="filter-cell filter-cell-wide">
         <span>Source</span>
@@ -330,6 +338,10 @@
                 aria-selected="false" data-trivial-tab="phone">
           Phone format
         </button>
+        <button type="button" class="trivial-tab" role="tab"
+                aria-selected="false" data-trivial-tab="rowdup">
+          Identical rows
+        </button>
       </div>
       <div class="cc-modal-body" id="identify-trivial-body"
            data-active-tab="whitespace">
@@ -366,7 +378,7 @@
     </div>
   </div>
 
-  <script type="module" src="./label.js?v=9"></script>
+  <script type="module" src="./label.js?v=13"></script>
   <!-- Header export dropdown behaviour (outside-click / Esc to close).
        Standalone module so it stays out of label.js; CSP-safe ('self'). -->
   <script type="module" src="./header_menu.js?v=1"></script>

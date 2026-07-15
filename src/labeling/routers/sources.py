@@ -84,7 +84,7 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
         # Cell -> {state, cluster_ids:[], note, error_types:[], annotators:[]}
         cells: Dict[str, Dict[str, Any]] = {}
 
-        rank = {"tp": 5, "partial": 4, "fp": 3, "fn": 2, "unsure": 1}
+        rank = {"tp": 5, "partial": 4, "fp": 3, "fn": 2, "unsure": 1, "skip": 0}
 
         def _bump(key: str, state: str, **extra: Any) -> None:
             cur = cells.get(key)
@@ -105,19 +105,24 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
                     if cid not in cur["cluster_ids"]:
                         cur["cluster_ids"].append(cid)
 
-        # Cluster-derived states.
+        # Cluster-derived states. Pass 1: own-anchor verdicts (the
+        # cluster's primary row) are authoritative. Track their cells so a
+        # fanned-out verdict (pass 2) can never override one.
+        anchor_keys: set = set()
+        verdicted: List[Any] = []  # (cluster, label, status, cid) for pass 2
         for c in ctx.clusters:
             if c.get("source") != name:
-                continue
-            row = c.get("row")
-            if not isinstance(row, int):
                 continue
             cid = c.get("cluster_id", "")
             label = latest.get(cid)
             if label is None or label.target != LabelTarget.CLUSTER:
                 continue
             st = label.status.value
-            if st in ("skip",):
+            if st == "skip":
+                continue
+            verdicted.append((c, label, st, cid))
+            row = c.get("row")
+            if not isinstance(row, int):
                 continue
             for col in (c.get("columns") or []):
                 key = f"{row}\x00{col}"
@@ -130,19 +135,108 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
                     label_source="cluster",
                     corrected_value=label.corrected_value,
                 )
+                anchor_keys.add(key)
 
-        # Cell-level FN labels.
+        # Pass 2: a cluster verdict also covers every row in its
+        # detections' ``affected_rows`` -- the same fan-out the benchmark
+        # exporter does. Without this, cells captured via a multi-row
+        # cluster look UNLABELLED in the viewer even though they're errors
+        # in the benchmark. An own-anchor verdict (pass 1) always wins, so
+        # an over-broad ``affected_rows`` can't stamp over a cell's own
+        # cluster verdict.
+        for c, label, st, cid in verdicted:
+            # Fan the SAME column set the benchmark exporter uses: the
+            # cluster verdict's columns (label-side wins -- re-clustering
+            # can shift ``cluster.columns`` after the verdict was
+            # recorded), NOT each detection's own columns. Using
+            # per-detection columns made the viewer mark different cells
+            # than the export for multi-column relation detections.
+            fan_cols = [
+                x for x in (
+                    list(label.columns) if label.columns
+                    else (c.get("columns") or [])
+                )
+                if isinstance(x, str)
+            ]
+            if not fan_cols:
+                continue
+            anchor_row = c.get("row")
+            affected: set = set()
+            for det in c.get("detections") or ():
+                for ar in det.get("affected_rows") or ():
+                    if isinstance(ar, int):
+                        affected.add(ar)
+            for ar in affected:
+                if ar == anchor_row:
+                    continue
+                for col in fan_cols:
+                    key = f"{ar}\x00{col}"
+                    if key in anchor_keys:
+                        continue
+                    _bump(
+                        key, st,
+                        cluster_ids=[cid],
+                        error_types=c.get("error_types") or [],
+                        note=label.note,
+                        annotator=label.annotator,
+                        label_source="cluster",
+                        # Per-cell fix is resolved at export time, not
+                        # stored on the cluster, so don't surface the
+                        # anchor's (possibly wrong) fix on a peer cell.
+                        corrected_value=None,
+                    )
+
+        # Pass 3: per-row verdict overrides. An explicit override on a
+        # single (source, row, column) cell -- how the operator labels
+        # one row of an fd_violation conflict group independently --
+        # supersedes the cluster's fanned-out verdict for that cell. It
+        # must outrank even a ``tp`` fan-out, so we set the cell DIRECTLY
+        # rather than via ``_bump`` (which is rank-gated). The cluster_ids
+        # of any prior entry are preserved so the UI still links the cell
+        # to its FD cluster. ``unlabeled`` tombstones are already filtered
+        # by ``active_overrides``.
+        for (src, r, col), rec in ctx.row_verdict_store.active_overrides().items():
+            if src != name:
+                continue
+            key = f"{int(r)}\x00{col}"
+            prior = cells.get(key)
+            cells[key] = {
+                "state": rec.status.value,
+                "cluster_ids": list(prior["cluster_ids"]) if prior else [],
+                "error_types": list(prior["error_types"]) if prior else [],
+                "note": rec.note or (prior.get("note", "") if prior else ""),
+                "annotator": rec.annotator,
+                "label_source": "row-verdict",
+                "corrected_value": rec.corrected_value,
+            }
+
+        # Cell-level labels. These were FN-only historically, but the
+        # trivial-convert flow and the FN detail panel now also stamp
+        # ``partial`` / ``unsure`` / ``skip`` / ``tp`` / ``fp`` verdicts
+        # directly on a cell (e.g. a punctuation cell converted to
+        # ``partial`` with an LLM fix, or marked ``fp`` = "reviewed, not an
+        # error"). Surface the same statuses the FN list (``/fn-cells``)
+        # shows so the CSV grid tint matches the queue -- otherwise a non-FN
+        # cell label has NO grid presence and its tint silently vanishes the
+        # next time ``/cells`` is reloaded (e.g. after marking a sibling
+        # cell). ``fp`` is a RECORDED "not an error" verdict (a clean
+        # hard-negative), kept visible; only ``unlabeled`` (an explicit
+        # retract) clears the cell, and it is already dropped by
+        # ``latest_by_target``.
+        _cell_label_states = {
+            LabelStatus.FN, LabelStatus.TP, LabelStatus.PARTIAL,
+            LabelStatus.UNSURE, LabelStatus.SKIP, LabelStatus.FP,
+        }
         for tid, lab in latest.items():
             if lab.target != LabelTarget.CELL or lab.source != name:
                 continue
             if lab.row is None or not lab.column:
                 continue
-            if lab.status != LabelStatus.FN:
-                # Cell labels only carry FN today; ignore others.
+            if lab.status not in _cell_label_states:
                 continue
             key = f"{int(lab.row)}\x00{lab.column}"
             _bump(
-                key, "fn",
+                key, lab.status.value,
                 error_types=[],
                 note=lab.note,
                 annotator=lab.annotator,
@@ -223,14 +317,16 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
                     cluster_cover[key] = st
 
         items: List[Dict[str, Any]] = []
-        # Statuses we surface in the FN list: the original FN claim
-        # plus the verdicts the operator can attach to that claim via
-        # the FN detail panel (tp/partial/unsure/skip). FP and
-        # UNLABELED tombstone the cell and never appear here
-        # (``latest_by_target`` already drops unlabeled).
+        # Statuses we surface in the FN list: the original FN claim plus
+        # every verdict the operator can attach to that claim via the FN
+        # detail panel (tp/partial/unsure/skip/fp). ``fp`` = "reviewed, not
+        # an error" is a RECORDED verdict and must stay in the queue so the
+        # operator doesn't lose track of a cell they just decided on (and
+        # can flip it back). Only ``unlabeled`` (an explicit retract)
+        # removes the cell -- and ``latest_by_target`` already drops it.
         _fn_visible_statuses = {
             LabelStatus.FN, LabelStatus.TP, LabelStatus.PARTIAL,
-            LabelStatus.UNSURE, LabelStatus.SKIP,
+            LabelStatus.UNSURE, LabelStatus.SKIP, LabelStatus.FP,
         }
         for tid, lab in latest.items():
             if lab.target != LabelTarget.CELL:

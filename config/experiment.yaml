@@ -356,11 +356,15 @@ inter_column_pipeline:
   # table-scan). The gate is recall-focused: it only drops rules that
   # are *certainly* not useful, leaving everything else for the
   # labeller to triage.
-  # Lower bound: drop "false rules" where the majority of rows already
-  # violate the proposed relation. 0.5 = drop rules where more than 50%
-  # of rows violate (the relation is almost certainly hallucinated).
-  # Raise toward 0.85 to be stricter; lower toward 0 to keep every rule.
-  min_pass_rate: 0.5
+  # Lower bound: a real inter-column rule (especially a functional
+  # dependency) holds for essentially every row -- the few rows that
+  # violate it are the actual errors. A rule violated by a meaningful
+  # fraction of rows is not a real rule, and its "violations" are
+  # legitimate variation (false positives). 0.90 = only compile rules
+  # that already hold on >=90% of rows. Lower toward 0.5 to keep weaker
+  # / approximate rules (high recall, very low precision); raise toward
+  # 0.99 to flag only near-perfect rules.
+  min_pass_rate: 0.90
   # Upper bound: drop "fully satisfied" rules where the relation holds
   # for every row -- there is no error to detect. Use `1.0` to keep
   # pass_rate=1.0 rules (no-op but cheap); the default trims them.

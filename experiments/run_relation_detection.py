@@ -309,11 +309,13 @@ def _build_argparser() -> argparse.ArgumentParser:
         help="Skip the Phase-B cluster synthesis (no canonical_fix).",
     )
     p.add_argument(
-        "--violations-min-pass-rate", type=float, default=0.5,
+        "--violations-min-pass-rate", type=float, default=0.90,
         help=(
-            "Drop rules with pass_rate below this (default 0.5: rules "
-            "where more than 50%% of rows already violate the relation "
-            "are almost certainly hallucinated)."
+            "Drop rules with pass_rate below this (default 0.90: a real "
+            "rule holds on essentially every row and the few violations "
+            "are the actual errors; a rule violated by >10%% of rows is "
+            "not a real rule and its 'violations' are legitimate "
+            "variation). Lower toward 0.5 for high-recall/low-precision."
         ),
     )
     p.add_argument(

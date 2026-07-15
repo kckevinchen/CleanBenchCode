@@ -56,8 +56,11 @@
           <button class="runs-chip" data-filter="starred" role="tab" aria-selected="false">★ Starred</button>
           <button class="runs-chip" data-filter="unstarred" role="tab" aria-selected="false">Unstarred</button>
         </div>
+        <button id="runs-new-folder" class="runs-new-folder" title="Create an empty folder to organise runs">🗀 New folder</button>
         <div class="runs-bulk" id="runs-bulk" hidden>
           <span class="runs-bulk-count" id="runs-bulk-count">0 selected</span>
+          <select id="runs-bulk-move" class="runs-bulk-move" aria-label="Move selected runs to a folder"></select>
+          <button id="runs-bulk-duplicate" title="Duplicate the selected run(s) into fresh copies">Duplicate</button>
           <button id="runs-bulk-clear" class="ghost">Clear</button>
           <button id="runs-bulk-delete" class="danger">Delete selected</button>
         </div>
@@ -128,10 +131,6 @@
             <span>Concurrency</span>
             <input id="concurrency" type="number" min="1" placeholder="(auto)" />
           </label>
-          <label class="checkbox">
-            <input id="no-synthesis" type="checkbox" />
-            <span>Disable Phase-B synthesis</span>
-          </label>
           <label>
             <span>Synthesis effort</span>
             <select id="synthesis-effort">
@@ -140,12 +139,6 @@
               <option value="medium">medium</option>
               <option value="high">high</option>
             </select>
-          </label>
-          <label class="checkbox">
-            <input id="synthesise-singletons" type="checkbox" checked />
-            <span>Synthesise single-detection clusters
-              <span class="muted">(LLM emits a canonical fix even when only one detector fired; uncheck for the cheaper multi-type-only behaviour)</span>
-            </span>
           </label>
         </fieldset>
 
@@ -656,7 +649,7 @@
           <legend>Filters &amp; toggles</legend>
           <label>
             <span>Min pass-rate <span class="muted">(drop hallucinated rules)</span></span>
-            <input id="rd-min-pass-rate" type="number" step="0.01" min="0" max="1" placeholder="0.85" />
+            <input id="rd-min-pass-rate" type="number" step="0.01" min="0" max="1" placeholder="0.90" />
           </label>
           <label>
             <span>Max pass-rate <span class="muted">(drop fully-satisfied)</span></span>
@@ -1102,7 +1095,7 @@
             <div class="flow-body">
               <h3>Phase B · LLM synthesis <span class="muted">(optional)</span></h3>
               <p>For every multi-type cluster, one extra LLM call picks a <code>primary_error_type</code>, classifies the rest as <code>supporting</code>, emits canonical explanation + fix + confidence, and flags <code>is_likely_false_positive</code>.</p>
-              <p class="muted">Skip via <code>--no-synthesis</code> (checkbox in the launcher).</p>
+              <p class="muted">Skip via the <code>--no-synthesis</code> CLI flag.</p>
             </div>
           </div>
 
@@ -1157,7 +1150,7 @@
 
           <article class="concept-card">
             <h4>Labelling + benchmark</h4>
-            <p>From <strong>Runs</strong>, click <em>Label</em> on any run to open the per-cluster annotation UI. <em>Benchmark</em> exports a per-cell <code>benchmark.jsonl</code> ready for downstream eval.</p>
+            <p>From <strong>Runs</strong>, click <em>Label</em> on any run to open the per-cell annotation UI. Its <em>Export</em> dropdown writes a per-cell <code>benchmark.jsonl</code> (and a per-error-type bundle) ready for downstream eval.</p>
           </article>
 
           <article class="concept-card">

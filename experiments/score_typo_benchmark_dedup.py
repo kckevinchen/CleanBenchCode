@@ -9,7 +9,7 @@ import json
 import sys
 from pathlib import Path
 
-from RFT.typo_v5._task import is_v5_trivial_correction
+from RFT._common.typo_task import is_v5_trivial_correction
 
 BENCHMARK = Path("benchmark/benchmark_typo_20260512T213238Z_gpt5-family.jsonl")
 

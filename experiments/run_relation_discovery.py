@@ -859,13 +859,14 @@ def _build_argparser() -> argparse.ArgumentParser:
     p.add_argument(
         "--violations-min-pass-rate",
         type=float,
-        default=0.5,
+        default=0.90,
         help=(
             "Reject rules whose validated pass_rate is below this "
-            "threshold (default 0.5: drop rules where the majority of "
-            "rows already violate the proposed relation -- those are "
-            "almost certainly hallucinated). Raise toward 0.85 to be "
-            "stricter; lower toward 0 to keep every rule."
+            "threshold (default 0.90: a real rule holds on essentially "
+            "every row and the few violations are the actual errors; a "
+            "rule violated by >10%% of rows is not a real rule and its "
+            "'violations' are legitimate variation). Lower toward 0.5 "
+            "for high-recall/low-precision."
         ),
     )
     p.add_argument(

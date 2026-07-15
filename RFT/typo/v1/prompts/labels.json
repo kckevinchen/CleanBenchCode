@@ -1,0 +1,12 @@
+{
+  "labels": [
+    "typo",
+    "clean",
+    "ambiguous"
+  ],
+  "flavours": [
+    "spelling",
+    "whitespace",
+    "punctuation"
+  ]
+}

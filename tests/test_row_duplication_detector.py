@@ -865,3 +865,95 @@ class TestWholeTableMode:
         reports = det.run({"t.csv": df})
         assert reports == []
         assert llm.calls == []
+
+    # -- per-CSV Good-Turing arms (whole_table adaptive support) ---------
+
+    def _dup_response(self) -> str:
+        return json.dumps({"issues": [{
+            "verdict": "duplicate", "affected_rows": [0, 1],
+            "explanation": "same key",
+        }]})
+
+    def test_records_saturated_per_csv_arm(self, taxonomy) -> None:
+        """A multi-pass whole_table run that finds the same species every
+        pass saturates -> one per-CSV arm with status 'saturated'."""
+        df = pd.DataFrame({"K1": ["a", "a", "b"], "K2": ["x", "x", "y"]})
+        digest = build_table_digest(df, source="t.csv")
+        llm = _FakeLLM(responses=[self._dup_response()] * 5)
+        det = RowDuplicationDetector(
+            llm=llm, taxonomy=taxonomy, model="stub",
+            settings=AdjudicatorSettings(detection_mode="whole_table"),
+            digests={"t.csv": digest},
+            arm_config=ArmConfig(
+                k_max=4, k_min=2, epsilon=0.05, epsilon_chao1=0.05,
+                stop_when="gt", require_two_consecutive=True,
+            ),
+        )
+        det.run({"t.csv": df})
+        assert len(det.whole_table_arms) == 1
+        arm = det.whole_table_arms[0]
+        assert arm["scope_kind"] == "row_duplication"
+        assert arm["scope_id"] == "t.csv"
+        assert arm["error_type"] == "row_duplication"
+        assert arm["status"] == "saturated"
+        assert arm["stopped_reason"] != "k_max"
+        assert arm["runs_completed"] >= 2
+        assert arm["num_runs"] == arm["runs_completed"]
+        # One distinct species: (duplicate, {0,1}).
+        assert arm["n_species_observed"] == 1
+        assert arm["n_observed"] == 1
+
+    def test_records_exhausted_per_csv_arm(self, taxonomy) -> None:
+        """k_max=1 hits the budget cap -> arm status 'exhausted'."""
+        df = pd.DataFrame({"K1": ["a", "a", "b"], "K2": ["x", "x", "y"]})
+        digest = build_table_digest(df, source="t.csv")
+        llm = _FakeLLM(responses=[self._dup_response()])
+        det = RowDuplicationDetector(
+            llm=llm, taxonomy=taxonomy, model="stub",
+            settings=AdjudicatorSettings(detection_mode="whole_table"),
+            digests={"t.csv": digest},
+            arm_config=ArmConfig(
+                k_max=1, k_min=1, epsilon=0.05, epsilon_chao1=0.05,
+                stop_when="gt", require_two_consecutive=False,
+            ),
+        )
+        det.run({"t.csv": df})
+        assert len(det.whole_table_arms) == 1
+        arm = det.whole_table_arms[0]
+        assert arm["status"] == "exhausted"
+        assert arm["stopped_reason"] == "k_max"
+        assert arm["runs_completed"] == 1
+
+    def test_collision_mode_records_no_arm(self, taxonomy) -> None:
+        """The deterministic collision adjudicator never enters
+        _run_whole_table, so it records no per-CSV arm."""
+        df = pd.DataFrame({"Email": ["a@x", "a@x", "b@x"]})
+        digest = build_table_digest(df, source="t.csv")
+        det = RowDuplicationDetector(
+            llm=_FakeLLM(responses=["{}"] * 5), taxonomy=taxonomy, model="stub",
+            settings=AdjudicatorSettings(
+                detection_mode="collision_adjudication",
+                adjudicate_groups=False,
+            ),
+            digests={"t.csv": digest},
+        )
+        det.run({"t.csv": df})
+        assert det.whole_table_arms == []
+
+    def test_over_cap_records_no_arm(self, taxonomy) -> None:
+        """An over-cap frame never calls run_adaptive -> no arm."""
+        df = pd.DataFrame({"K": list(range(10))})
+        digest = build_table_digest(df, source="big.csv")
+        det = RowDuplicationDetector(
+            llm=_FakeLLM(), taxonomy=taxonomy, model="stub",
+            settings=AdjudicatorSettings(
+                detection_mode="whole_table", whole_table_max_rows=5,
+            ),
+            digests={"big.csv": digest},
+            arm_config=ArmConfig(
+                k_max=1, k_min=1, epsilon=0.05, epsilon_chao1=0.05,
+                stop_when="gt", require_two_consecutive=False,
+            ),
+        )
+        det.run({"big.csv": df})
+        assert det.whole_table_arms == []

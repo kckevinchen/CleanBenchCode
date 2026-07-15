@@ -1,11 +1,16 @@
-"""Append-only JSONL store for per-cell note overrides.
+"""Append-only JSONL store for per-cell corrected-value overrides.
 
 One file, ``<run_dir>/cell_notes.jsonl``, keyed by (source, row, column)
-with latest-wins. Each record overlays the cluster label's ``note`` for a
-single cell at export time. A record whose ``note`` is empty (after
-stripping) is a tombstone -- :meth:`active_overrides` drops it so the
-exporter falls back to the cluster note. See
-:mod:`src.labeling._jsonl_store` for the shared IO/index/self-healing.
+with latest-wins. The ``note`` field carries the operator's literal
+per-cell FIX: at export time it supersedes the cluster's
+``corrected_value`` for that single ERROR cell, so each affected row of a
+fan-out cluster can get its own correction (see
+:func:`src.labeling.export.materialize_label_benchmark`). A record whose
+``note`` is empty (after stripping) is a tombstone -- :meth:`active_overrides`
+drops it so the exporter falls back to the cluster fix. The ``note`` name
+is retained for storage/endpoint back-compat; per-cell *notes* are no
+longer a feature. See :mod:`src.labeling._jsonl_store` for the shared
+IO/index/self-healing.
 """
 
 from __future__ import annotations

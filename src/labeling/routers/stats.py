@@ -14,10 +14,90 @@ from typing import Any, Dict, List, Tuple
 from fastapi import FastAPI
 
 from ..column_cluster_queue import iter_column_cluster_targets
+from ..multi_table_label_store import MultiTableLabelStore
 from ..schema import LabelStats, LabelStatus, LabelTarget
 from ._context import RouterContext
+from .clusters import group_cluster_ids_by_value, group_status
 
 logger = logging.getLogger(__name__)
+
+
+# Multi-table verdict vocab -> the cluster verdict vocab the stats bar
+# uses (mirrors ``MT_TO_CLUSTER_STATUS`` in frontend/labeling/label.js).
+_MT_TO_CLUSTER_STATUS = {
+    "confirmed_inconsistency": "tp",
+    "not_a_violation": "fp",
+    "benign_variation": "partial",
+    "unsure": "unsure",
+}
+
+
+def _multi_table_label_buckets(
+    run_dir,
+) -> Tuple[Dict[str, int], Dict[str, Dict[str, int]]]:
+    """Per-status counts for multi-table findings, in the cluster verdict
+    vocabulary (tp/fp/partial/unsure/unlabeled).
+
+    Multi-table inconsistency findings live on the same label page as
+    cell/column clusters, so the stats bar must include them - otherwise
+    a multi-table-only run shows an all-zero bar. Each distinct
+    ``violation_id`` is one labellable finding; its verdict comes from
+    ``multi_table_labels.jsonl`` (unlabeled when absent).
+    """
+    def _zero() -> Dict[str, int]:
+        return {"tp": 0, "fp": 0, "partial": 0, "unsure": 0,
+                "skip": 0, "unlabeled": 0, "total": 0}
+
+    overall = _zero()
+    by_source: Dict[str, Dict[str, int]] = {}
+    viol_path = run_dir / "multi_table_violations.jsonl"
+    if not viol_path.exists():
+        return overall, by_source
+
+    # Distinct findings (one per violation_id) + the sheet of the first
+    # row record (attributes the finding to a source bucket).
+    first_source: Dict[str, str] = {}
+    order: List[str] = []
+    try:
+        with viol_path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:  # noqa: BLE001
+                    continue
+                vid = rec.get("violation_id")
+                if not vid or vid in first_source:
+                    continue
+                first_source[vid] = rec.get("sheet", "")
+                order.append(vid)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("stats: multi-table violation read failed: %s", exc)
+        return overall, by_source
+
+    try:
+        latest = MultiTableLabelStore(
+            run_dir / "multi_table_labels.jsonl"
+        ).latest_by_violation()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("stats: multi-table label read failed: %s", exc)
+        latest = {}
+
+    for vid in order:
+        lab = latest.get(vid)
+        key = (
+            _MT_TO_CLUSTER_STATUS.get(lab.status.value, "unlabeled")
+            if lab is not None else "unlabeled"
+        )
+        overall[key] += 1
+        overall["total"] += 1
+        src = first_source.get(vid, "")
+        b = by_source.setdefault(src, _zero())
+        b[key] += 1
+        b["total"] += 1
+    return overall, by_source
 
 
 def register(app: FastAPI, router_ctx: RouterContext) -> None:
@@ -28,22 +108,67 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
         ctx = cache.get(run_id)
         latest = ctx.store.latest_by_target()
 
-        def _bucket(cluster_ids: List[str]) -> LabelStats:
+        # The label queue collapses the fanned same-value detections
+        # (one cluster per affected row) into ONE labellable defect, so
+        # the stats bar must count PER ISSUE, not per fanned cluster:
+        # each group of cluster_ids contributes a single tally whose
+        # status is the most-advanced verdict across its members (mirrors
+        # ``list_clusters``). ``cid_to_group`` maps each member id to the
+        # representative id of its group so the per-source buckets can
+        # collapse identically while attributing the group to a source.
+        groups = group_cluster_ids_by_value(ctx)
+        group_of: Dict[str, str] = {}
+        for member_ids in groups:
+            rep = member_ids[0]
+            for cid in member_ids:
+                group_of[cid] = rep
+
+        def _group_status_for(member_ids: List[str]) -> str:
+            return group_status([
+                (latest[cid].status.value if latest.get(cid) else "unlabeled")
+                for cid in member_ids
+            ])
+
+        # Pre-compute each group's collapsed status once.
+        rep_status: Dict[str, str] = {
+            member_ids[0]: _group_status_for(member_ids) for member_ids in groups
+        }
+
+        def _bucket(rep_ids: List[str]) -> LabelStats:
             counts = {"tp": 0, "fp": 0, "partial": 0, "unsure": 0, "skip": 0, "unlabeled": 0}
-            for cid in cluster_ids:
-                label = latest.get(cid)
-                key = label.status.value if label else "unlabeled"
-                counts[key] = counts.get(key, 0) + 1
-            return LabelStats(total=len(cluster_ids), **counts)
+            for rep in rep_ids:
+                # Grouped cluster reps carry a pre-collapsed status;
+                # non-grouped ids (column-cluster queue targets) fall back
+                # to their own latest label.
+                if rep in rep_status:
+                    key = rep_status[rep]
+                else:
+                    lab = latest.get(rep)
+                    key = lab.status.value if lab else "unlabeled"
+                # ``fn`` is a cell-only verdict; a group whose strongest
+                # member status is fn (rare) is reported as labelled via
+                # the separate fn pill, so fold it into ``unlabeled`` here
+                # to keep the cluster buckets to the 6 cluster verdicts.
+                if key not in counts:
+                    key = "unlabeled"
+                counts[key] += 1
+            return LabelStats(total=len(rep_ids), **counts)
 
         by_source: Dict[str, List[str]] = {}
         all_ids: List[str] = []
+        seen_reps: set = set()
         for c in ctx.clusters:
             cid = c.get("cluster_id")
             if not cid:
                 continue
-            all_ids.append(cid)
-            by_source.setdefault(c.get("source", ""), []).append(cid)
+            rep = group_of.get(cid, cid)
+            # Count each group ONCE, attributed to the source of the
+            # cluster that first introduces the group.
+            if rep in seen_reps:
+                continue
+            seen_reps.add(rep)
+            all_ids.append(rep)
+            by_source.setdefault(c.get("source", ""), []).append(rep)
 
         # Column-cluster (inconsistency) queue items also live on the
         # label page, so the stats bar must include them. Enumerate
@@ -86,16 +211,42 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
         for lab in latest.values():
             if lab.target != LabelTarget.CELL or lab.status != LabelStatus.FN:
                 continue
-            if lab.row is None or not lab.column:
+            # ``column=""`` is a ROW-LEVEL FN (the row-duplication trivial
+            # tagger writes these for LLM-missed exact-duplicate rows); it
+            # still exports as a benchmark error, so it must be counted
+            # here too. Only a missing row/source is uncountable.
+            if lab.row is None or not lab.source:
                 continue
             fn_total += 1
             fn_by_source[lab.source] = fn_by_source.get(lab.source, 0) + 1
-            if (lab.source, int(lab.row), lab.column) in covered:
+            # A row-level FN (no column) can't be shadowed by a per-cell
+            # cluster verdict, so the ``covered`` lookup only applies when
+            # the FN names a concrete column.
+            if lab.column and (lab.source, int(lab.row), lab.column) in covered:
                 fn_shadowed += 1
 
+        # Multi-table inconsistency findings share the label page, so
+        # fold their per-status counts into the bar (an MT-only run would
+        # otherwise show an all-zero bar).
+        mt_overall, mt_by_source = _multi_table_label_buckets(ctx.run_dir)
+        overall_stats = _bucket(all_ids).model_dump()
+        for k, v in mt_overall.items():
+            overall_stats[k] = overall_stats.get(k, 0) + v
+        source_stats = {
+            src: _bucket(ids).model_dump() for src, ids in by_source.items()
+        }
+        for src, mt_c in mt_by_source.items():
+            base = source_stats.setdefault(
+                src,
+                {"total": 0, "tp": 0, "fp": 0, "partial": 0,
+                 "unsure": 0, "skip": 0, "unlabeled": 0},
+            )
+            for k, v in mt_c.items():
+                base[k] = base.get(k, 0) + v
+
         return {
-            "overall": _bucket(all_ids).model_dump(),
-            "by_source": {src: _bucket(ids).model_dump() for src, ids in by_source.items()},
+            "overall": overall_stats,
+            "by_source": source_stats,
             "fn": {
                 "total": fn_total,
                 "shadowed": fn_shadowed,

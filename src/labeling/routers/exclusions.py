@@ -15,7 +15,7 @@ them by appending ``UNLABELED`` tombstones.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
 
@@ -81,6 +81,37 @@ def _cluster_in_scope(cluster: Dict[str, Any], exclusion: Exclusion) -> bool:
         cols = cluster.get("columns") or []
         wanted = {str(c) for c in exclusion.columns or [] if c is not None}
         return any(str(c) in wanted for c in cols)
+    return False
+
+
+def _cell_in_scope(
+    source: str, row: Optional[int], column: Optional[str], exclusion: Exclusion,
+) -> bool:
+    """Return True iff a CELL-target label at ``(source, row, column)`` falls
+    within ``exclusion``'s scope.
+
+    Mirrors :func:`_cluster_in_scope` but for the per-cell FN labels the
+    trivial taggers write (and any cell-level verdict the converter stamps).
+    A ROWS-scope exclusion matches by row; a COLUMNS-scope by column; a
+    CSV-scope matches every cell in the source.
+    """
+    if source != exclusion.source:
+        return False
+    if exclusion.scope == ExclusionScope.CSV:
+        return True
+    if exclusion.scope == ExclusionScope.ROWS:
+        if not isinstance(row, int):
+            return False
+        try:
+            wanted = {int(r) for r in exclusion.rows or []}
+        except (TypeError, ValueError):
+            return False
+        return row in wanted
+    if exclusion.scope == ExclusionScope.COLUMNS:
+        if not column:
+            return False
+        wanted = {str(c) for c in exclusion.columns or [] if c is not None}
+        return str(column) in wanted
     return False
 
 
@@ -161,6 +192,38 @@ def _cascade_skip_for_exclusion(
             annotator=ann,
         ))
 
+    # --- Cell-target labels --------------------------------------------
+    # FN cells (and any cell-level verdict the trivial converter stamped) are
+    # NOT clusters, so the cluster loop above misses them. Convert every
+    # in-scope CELL label that is not already ``skip`` so an excluded cell is
+    # consistently ``skip`` regardless of whether it was tagged before or
+    # after the exclusion. ``unlabeled`` tombstones are left alone.
+    for tid, existing in latest.items():
+        if existing.target != LabelTarget.CELL:
+            continue
+        if existing.status in (LabelStatus.SKIP, LabelStatus.UNLABELED):
+            continue
+        if not _cell_in_scope(
+            existing.source or "", existing.row, existing.column, exclusion,
+        ):
+            continue
+        prev = (existing.note or "").strip()
+        batch.append(Label(
+            target=LabelTarget.CELL,
+            target_id=tid,
+            source=existing.source,
+            row=existing.row,
+            column=existing.column,
+            columns=list(existing.columns) if existing.columns else [],
+            status=LabelStatus.SKIP,
+            corrected_value=existing.corrected_value,
+            corrected_values=(
+                dict(existing.corrected_values) if existing.corrected_values else {}
+            ),
+            note=f"{prev} {note}".strip() if prev else note,
+            annotator=ann,
+        ))
+
     # --- Column clusters (inconsistency) -------------------------------
     # CSV / COLUMNS scopes cascade to the column-cluster queue too. A
     # ROWS-scope exclusion is a per-cell statement and does not touch
@@ -224,7 +287,7 @@ def _revert_skip_for_exclusion(
     candidates: Dict[str, Label] = {}
     for rec in run_ctx.store.all():
         if rec.target not in (
-            LabelTarget.CLUSTER, LabelTarget.COLUMN_CLUSTER,
+            LabelTarget.CLUSTER, LabelTarget.COLUMN_CLUSTER, LabelTarget.CELL,
         ):
             continue
         if rec.status != LabelStatus.SKIP:

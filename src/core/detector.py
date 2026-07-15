@@ -29,6 +29,7 @@ from .data_loader import CsvChunk
 from .error_taxonomy import ErrorTaxonomy, ErrorType
 from .llm_client import LLMClient, LLMResponse
 from .table_digest import TableDigest
+from .value_types import is_pure_numeric_value, numeric_values_equal
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +166,86 @@ def parse_llm_json(text: str) -> tuple[List[Dict[str, Any]], Optional[str]]:
     return [], "failed to parse JSON from response"
 
 
+def _issue_targets_pure_numeric_cells(
+    issue: Dict[str, Any],
+    chunk: CsvChunk,
+) -> bool:
+    """Whether a typo finding targets only pure numeric cells in ``chunk``."""
+    raw_row = issue.get("row")
+    if isinstance(raw_row, bool):
+        return False
+    try:
+        row = int(raw_row)
+    except (TypeError, ValueError):
+        return False
+    if row not in chunk.frame.index:
+        return False
+
+    raw_columns = issue.get("columns") or []
+    if isinstance(raw_columns, str):
+        raw_columns = [raw_columns]
+    if not isinstance(raw_columns, list):
+        return False
+
+    frame_columns = [str(column) for column in chunk.frame.columns]
+    if chunk.is_single_column and len(frame_columns) == 1:
+        columns = frame_columns
+    else:
+        by_folded = {column.strip().casefold(): column for column in frame_columns}
+        columns = []
+        for raw_column in raw_columns:
+            candidate = str(raw_column)
+            if candidate in frame_columns:
+                columns.append(candidate)
+                continue
+            resolved = by_folded.get(candidate.strip().casefold())
+            if resolved is not None:
+                columns.append(resolved)
+
+    if not columns:
+        return False
+    values = [chunk.frame.loc[row, column] for column in columns]
+    if all(is_pure_numeric_value(value) for value in values):
+        return True
+
+    corrected = issue.get("corrected_value")
+    if isinstance(corrected, dict):
+        by_folded = {
+            str(column).strip().casefold(): value
+            for column, value in corrected.items()
+        }
+        corrected_values = [
+            corrected.get(column, by_folded.get(column.strip().casefold()))
+            for column in columns
+        ]
+    elif len(columns) == 1 and corrected is not None:
+        corrected_values = [corrected]
+    else:
+        return False
+
+    return all(
+        corrected_value is not None
+        and numeric_values_equal(value, corrected_value)
+        for value, corrected_value in zip(values, corrected_values, strict=True)
+    )
+
+
+def _filter_pure_numeric_typo_issues(
+    issues: List[Dict[str, Any]],
+    chunk: CsvChunk,
+    error_type: ErrorType,
+) -> tuple[List[Dict[str, Any]], int]:
+    """Drop typo findings on pure numbers; numeric presentation is not a typo."""
+    if error_type.key != "typo":
+        return issues, 0
+    kept = [
+        issue
+        for issue in issues
+        if not _issue_targets_pure_numeric_cells(issue, chunk)
+    ]
+    return kept, len(issues) - len(kept)
+
+
 # ---------------------------------------------------------------------------
 # Per-error-type detector
 # ---------------------------------------------------------------------------
@@ -273,6 +354,13 @@ class PerTypeCleaningDetector:
 
         if response.ok:
             issues, parse_err = parse_llm_json(response.text)
+            issues, filtered_numeric = _filter_pure_numeric_typo_issues(
+                issues,
+                chunk,
+                error_type,
+            )
+            if filtered_numeric:
+                report.metadata["filtered_pure_numeric_typo_issues"] = filtered_numeric
             # Stamp each issue with its error-type identity (category is also
             # useful for downstream aggregation).
             for issue in issues:
@@ -427,6 +515,15 @@ class PerTypeCleaningDetector:
         # Stable ordering: first by chunk index, then by taxonomy order.
         # `jobs` was already built in that order, so `results` preserves it.
         final: List[ChunkReport] = [r for r in results if r is not None]
+        filtered_numeric = sum(
+            int(report.metadata.get("filtered_pure_numeric_typo_issues") or 0)
+            for report in final
+        )
+        if filtered_numeric:
+            logger.info(
+                "Suppressed %d typo finding(s) on pure numeric cells",
+                filtered_numeric,
+            )
         return final
 
 

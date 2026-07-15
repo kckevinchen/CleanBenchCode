@@ -114,6 +114,14 @@ class LabelIn(BaseModel):
     # in lieu of calling the LLM, so a saved value here is treated
     # as the operator's final word.
     value_corrections: Dict[str, Union[str, List[str]]] = Field(default_factory=dict)
+    # Error-type attribution for cell-level FN labels. Empty for the
+    # legacy generic FN flow (those export with empty ``error_types``
+    # and bucket as ``_uncategorized``). The column-board per-value FN
+    # flow sets ``["inconsistency"]`` so an operator-flagged missed
+    # value lands in the inconsistency benchmark bucket exactly like a
+    # cluster-derived inconsistency cell. Ignored for non-CELL targets,
+    # whose error types come from the enclosing cluster/issue.
+    error_types: List[str] = Field(default_factory=list)
     note: str = ""
     # Annotator defaults to the server's --annotator flag if omitted.
     annotator: Optional[str] = None
@@ -197,6 +205,43 @@ class BenchmarkCell(BaseModel):
     cluster_kinds: List[str] = Field(default_factory=list)
     annotators: List[str] = Field(default_factory=list)
     note: str = ""
+    # True for a "low value" false positive: a FLAGGED (cluster-backed)
+    # ``clean`` cell (the operator REJECTED the flag) whose LLM fix
+    # (``llm_suggested_value``) differs from ``original_value`` only by
+    # SPACING or a SINGLE PUNCTUATION mark (case-insensitive) -- a
+    # cosmetic, and wrong, flag. Always False for ``error`` cells (a
+    # confirmed typo is a real TP, never low value), for ambiguous cells,
+    # and for FN cells (never flagged). Downstream evals may exclude these.
+    low_value: bool = False
+
+
+class IgnoreRecord(BaseModel):
+    """One immunity record in ``benchmark.ignored.jsonl``.
+
+    Tells an eval which cells (absent from ``benchmark.jsonl``) must NOT
+    count as a false positive / false negative. Merges the two immunity
+    sources into one stream:
+
+      * ``reason="skip"``      - a per-cell deferral. ``row`` + ``column``
+        are populated; ``original_value`` carries the CSV cell.
+      * ``reason="exclusion"`` - an operator scope exclusion, expressed
+        with ``None`` row/column as WILDCARDS so whole-file / row / column
+        immunity stays compact:
+            - ``scope="csv"``     -> ``row=None, column=None`` (whole file)
+            - ``scope="rows"``    -> ``row=R,    column=None`` (whole row R)
+            - ``scope="columns"`` -> ``row=None, column=C``    (whole column C)
+
+    Consumer rule: ignore a benchmark cell ``(s, r, c)`` if any record
+    matches it - exact ``(s, r, c)``, or its row (``column=None``), or its
+    column (``row=None``), or its file (both ``None``).
+    """
+
+    source: str
+    row: Optional[int] = None
+    column: Optional[str] = None
+    original_value: Optional[str] = None
+    reason: str                     # "skip" | "exclusion"
+    scope: Optional[str] = None     # exclusion only: "csv" | "rows" | "columns"
 
 
 # ---------------------------------------------------------------------
@@ -305,7 +350,13 @@ class Exclusion(ExclusionIn):
 
 
 class CellNoteIn(BaseModel):
-    """POST /api/runs/{run_id}/cell-notes payload."""
+    """POST /api/runs/{run_id}/cell-notes payload.
+
+    Despite the ``note`` field name (kept for back-compat), this carries a
+    per-cell CORRECTED-VALUE override: the literal fix that supersedes the
+    cluster's corrected_value for one error cell at export time. Empty
+    ``note`` = tombstone (fall back to the cluster fix).
+    """
 
     source: str
     row: int
@@ -316,6 +367,33 @@ class CellNoteIn(BaseModel):
 
 class CellNote(CellNoteIn):
     """Persisted cell-note override record."""
+
+    annotator: str
+    ts: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
+class RowVerdictIn(BaseModel):
+    """POST /api/runs/{run_id}/row-verdicts payload.
+
+    A per-``(source, row, column)`` verdict override. Used to label one
+    row of an ``fd_violation`` conflict group independently of the
+    enclosing cluster, whose verdict otherwise fans out identically to
+    every conflicting row. The override wins for its single cell at
+    export time and in the viewer. A ``status`` of ``unlabeled`` is a
+    tombstone that reverts the cell to the cluster's fanned-out default.
+    """
+
+    source: str
+    row: int
+    column: str
+    status: LabelStatus
+    corrected_value: Optional[str] = None
+    note: str = ""
+    annotator: Optional[str] = None
+
+
+class RowVerdict(RowVerdictIn):
+    """Persisted per-row verdict override record."""
 
     annotator: str
     ts: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())

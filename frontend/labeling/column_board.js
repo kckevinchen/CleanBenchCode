@@ -25,6 +25,17 @@ import { $, api, escapeHtml as escape } from "./shared/utils.js";
 
 function fmt(n) { return new Intl.NumberFormat().format(n); }
 
+// Encode a column name for use as a trailing ``{column:path}`` URL segment.
+// We use ``encodeURI`` (not ``encodeURIComponent``) so a literal ``/`` in a
+// column name (e.g. ``Project Name/Description``) survives for the backend's
+// ``:path`` converter -- but ``encodeURI`` leaves ``#`` and ``?`` UNescaped,
+// and in a URL those start the fragment / query, which truncates the column
+// server-side (e.g. ``Key#1 Email`` -> the server only ever sees ``Key`` and
+// 404s). Encode those two delimiters explicitly while keeping ``/`` literal.
+function encColPath(column) {
+  return encodeURI(column).replace(/#/g, "%23").replace(/\?/g, "%3F");
+}
+
 const _PARAMS = new URLSearchParams(location.search);
 const RUN_ID = _PARAMS.get("run") || "";
 // Optional deep-link: ?source=<src>&column=<col> auto-opens that
@@ -62,6 +73,14 @@ const state = {
   draft: null,          // {agreement avg/runs_completed/...} | null
   loadedRecord: null,   // server-known record at last load
   activeClusterIdx: 0,  // for j/k navigation + 1/2 verdict shortcuts
+  // Operator-flagged "missed inconsistency" values for the active
+  // column: ``[{value, corrected_value, note, rows, n, annotators}]``.
+  // Distinct from clusters -- a single wrong value (or one whose fix
+  // isn't present in the column) can't be a >=2-value StdCluster, so we
+  // persist it as per-row cell-level FN labels tagged
+  // ``error_types=["inconsistency"]`` (see column_clusters router).
+  fnValues: [],
+  fnEditing: null,      // value currently being flag-edited (inline) | null
   dirty: false,
   saving: false,
 };
@@ -245,6 +264,8 @@ async function openColumn(source, column) {
   state.values = [];
   state.clusters = [];
   state.selection.clear();
+  state.fnValues = [];
+  state.fnEditing = null;
   state.dirty = false;
   state.draft = null;
   state.loadedRecord = null;
@@ -264,23 +285,22 @@ async function openColumn(source, column) {
     // contain ``/`` (e.g. ``Project Name/Description``) still route.
     // The backend's ``{column:path}`` converter accepts slashes only
     // when ``column`` is the trailing path segment, hence the
-    // ``…/columns/{source}/<action>/{column}`` order.
-    // We deliberately do NOT call ``encodeURIComponent`` on the
-    // column here because the browser's ``fetch`` will escape any
-    // unsafe characters in the URL, and ``encodeURIComponent``
-    // would turn ``/`` into ``%2F`` which Starlette then decodes
-    // back to ``/`` before path matching -- same 404 problem.
-    // The literal ``/`` is what the ``:path`` converter wants.
+    // ``…/columns/{source}/<action>/{column}`` order. ``encColPath``
+    // keeps ``/`` literal for the ``:path`` converter while escaping the
+    // ``#`` / ``?`` delimiters that would otherwise truncate the column.
     const ru = encodeURIComponent(RUN_ID);
-    const valuesUrl = `/api/runs/${ru}/columns/${sEnc}/values/${encodeURI(column)}?limit=5000`;
-    const clustersUrl = `/api/runs/${ru}/columns/${sEnc}/clusters/${encodeURI(column)}`;
-    const draftUrl = `/api/runs/${ru}/columns/${sEnc}/draft/${encodeURI(column)}`;
-    const [vals, recs, draftBlob] = await Promise.all([
+    const valuesUrl = `/api/runs/${ru}/columns/${sEnc}/values/${encColPath(column)}?limit=5000`;
+    const clustersUrl = `/api/runs/${ru}/columns/${sEnc}/clusters/${encColPath(column)}`;
+    const draftUrl = `/api/runs/${ru}/columns/${sEnc}/draft/${encColPath(column)}`;
+    const fnUrl = `/api/runs/${ru}/columns/${sEnc}/fn-values/${encColPath(column)}`;
+    const [vals, recs, draftBlob, fnBlob] = await Promise.all([
       api(valuesUrl),
       api(clustersUrl),
       api(draftUrl),
+      api(fnUrl).catch(() => ({ items: [] })),
     ]);
     state.values = vals.values || [];
+    state.fnValues = Array.isArray(fnBlob.items) ? fnBlob.items : [];
     $("#cb-stats").innerHTML =
       `${fmt(vals.n_distinct)} distinct · ${fmt(vals.n_rows)} rows` +
       (vals.n_empty ? ` · ${fmt(vals.n_empty)} empty` : "") +
@@ -497,6 +517,7 @@ function bindCenterEvents() {
   bindQueueDelegation();
   bindValueListDelegation();
   bindClusterListDelegation();
+  bindFnListDelegation();
 }
 
 // Keyboard shortcuts: j/k navigate the cluster cards, 1/2 verdict
@@ -543,11 +564,19 @@ function bindKeyboardShortcuts() {
 function rerenderCenter() {
   rerenderValues();
   rerenderClusters();
+  rerenderFnList();
   $("#cb-status").value = state.status;
   $("#cb-drop-reason").value = state.drop_reason;
   $("#cb-note").value = state.note;
   $("#cb-drop-reason-cell").hidden = !state.status.startsWith("dropped_");
   setSaveMsg("");
+}
+
+function fnValueMembership() {
+  // Returns Map<value, {corrected_value, n}> for flagged FN values.
+  const m = new Map();
+  for (const f of state.fnValues) m.set(f.value, f);
+  return m;
 }
 
 function valueClusterMembership() {
@@ -563,6 +592,7 @@ function rerenderValues() {
   const list = $("#cb-value-list");
   const q = ($("#cb-value-search").value || "").trim().toLowerCase();
   const membership = valueClusterMembership();
+  const fnMembership = fnValueMembership();
   const rows = [];
   const singletons = [];
   for (const v of state.values) {
@@ -573,17 +603,40 @@ function rerenderValues() {
   }
   const renderRow = (v) => {
     const inCluster = membership.get(v.value);
+    const fn = fnMembership.get(v.value);
     const sel = state.selection.has(v.value);
+    const editing = state.fnEditing === v.value;
     const cls = "cb-value-row"
       + (sel ? " selected" : "")
+      + (fn ? " fn-flagged" : "")
       + (inCluster && !sel ? " in-cluster" : "");
     const cref = inCluster
       ? `<span class="v-cluster-ref">→ ${escape(inCluster)}</span>` : "";
+    const fnRef = fn
+      ? `<span class="v-fn-ref" title="Flagged as a missed inconsistency (FN)${
+          fn.corrected_value ? ` · fix: ${escape(fn.corrected_value)}` : ""
+        }">⚑ FN${fn.corrected_value ? ` → ${escape(fn.corrected_value)}` : ""}</span>`
+      : "";
+    // The ⚑ button flags the value as a missed inconsistency. It must
+    // not toggle cluster-selection, so the delegated handler
+    // stop-checks it before the row-level toggle.
+    const flagBtn = `<button type="button" class="v-fn-flag" data-value="${escape(v.value)}"
+        title="Flag this value as a missed inconsistency (FN) and set its corrected value">⚑</button>`;
+    const editor = editing
+      ? `<div class="v-fn-editor" data-value="${escape(v.value)}">
+           <input type="text" class="v-fn-input" value="${escape(fn?.corrected_value ?? v.value)}"
+             placeholder="corrected value" autocomplete="off" />
+           <button type="button" class="v-fn-save" data-value="${escape(v.value)}">Save fix</button>
+           <button type="button" class="v-fn-cancel">Cancel</button>
+         </div>`
+      : "";
     return `<div class="${cls}" data-value="${escape(v.value)}">
       <span class="v-text">${escape(v.value || "(empty)")}</span>
       ${cref}
+      ${fnRef}
       <span class="v-count">${fmt(v.count)}</span>
-    </div>`;
+      ${flagBtn}
+    </div>${editor}`;
   };
   let html = rows.map(renderRow).join("");
   if (singletons.length) {
@@ -596,11 +649,132 @@ function rerenderValues() {
     html = `<div class="muted">no values match the filter</div>`;
   }
   list.innerHTML = html;
+  // Keep focus in the inline editor when one is open so the operator
+  // can type the fix immediately after clicking ⚑ — but don't hijack
+  // focus from the value-search box if they're filtering with an
+  // editor still open.
+  if (state.fnEditing != null
+      && document.activeElement !== $("#cb-value-search")) {
+    const inp = list.querySelector(".v-fn-editor .v-fn-input");
+    if (inp && document.activeElement !== inp) { inp.focus(); inp.select(); }
+  }
   // Per-row click handlers are installed once by bindValueListDelegation()
   // during bootstrap; no per-rerender rebinding needed.
   const actions = $("#cb-value-actions");
   actions.hidden = !state.selection.size;
   $("#cb-selected-count").textContent = `${state.selection.size} selected`;
+}
+
+// --------------------------------------------------------- FN values
+
+function rerenderFnList() {
+  const box = $("#cb-fn-list");
+  if (!box) return;
+  const items = state.fnValues || [];
+  if (!items.length) {
+    box.innerHTML = `<div class="muted cb-fn-empty">No values flagged as missed yet. Click ⚑ next to a value to flag it and set its corrected value.</div>`;
+    return;
+  }
+  box.innerHTML = items.map((f) => {
+    const fix = f.corrected_value
+      ? `<span class="cb-fn-fix">→ ${escape(f.corrected_value)}</span>`
+      : `<span class="cb-fn-fix muted">(no fix set)</span>`;
+    return `<div class="cb-fn-row" data-value="${escape(f.value)}">
+      <span class="cb-fn-val" title="${escape(f.value)}">${escape(f.value || "(empty)")}</span>
+      ${fix}
+      <span class="cb-fn-count" title="rows marked FN">${fmt(f.n || (f.rows || []).length)} row(s)</span>
+      <button type="button" class="cb-fn-edit" data-value="${escape(f.value)}" title="Edit the corrected value">edit</button>
+      <button type="button" class="cb-fn-remove" data-value="${escape(f.value)}" title="Clear this FN flag">×</button>
+    </div>`;
+  }).join("");
+}
+
+function _fnBaseUrl() {
+  if (!state.active) return null;
+  const ru = encodeURIComponent(RUN_ID);
+  const sEnc = encodeURIComponent(state.active.source);
+  return `/api/runs/${ru}/columns/${sEnc}/fn-values/${encColPath(state.active.column)}`;
+}
+
+async function reloadFnValues() {
+  const url = _fnBaseUrl();
+  if (!url) return;
+  try {
+    const blob = await api(url);
+    state.fnValues = Array.isArray(blob.items) ? blob.items : [];
+  } catch (e) {
+    setSaveMsg(`FN reload failed: ${e.message}`, "error");
+  }
+}
+
+function startFnEdit(value) {
+  state.fnEditing = value;
+  rerenderValues();
+}
+
+function cancelFnEdit() {
+  state.fnEditing = null;
+  rerenderValues();
+}
+
+// Persist a missed-inconsistency flag for ``value`` with the typed
+// corrected value. The flag is written immediately (per-row cell FN
+// labels) so it surfaces in the flagged list without a separate Save.
+async function submitFnFlag(value, corrected) {
+  const url = _fnBaseUrl();
+  if (!url) return;
+  try {
+    await api(url, {
+      method: "POST",
+      body: JSON.stringify({
+        value,
+        corrected_value: (corrected || "").trim() || null,
+        note: "",
+      }),
+    });
+    state.fnEditing = null;
+    await reloadFnValues();
+    rerenderCenter();
+    setSaveMsg(`flagged "${value}" as missed (FN).`, "ok");
+  } catch (e) {
+    setSaveMsg(`flag failed: ${e.message}`, "error");
+  }
+}
+
+async function removeFnValue(value) {
+  const url = _fnBaseUrl();
+  if (!url) return;
+  try {
+    await api(`${url}?value=${encodeURIComponent(value)}`, { method: "DELETE" });
+    if (state.fnEditing === value) state.fnEditing = null;
+    await reloadFnValues();
+    rerenderCenter();
+    setSaveMsg(`cleared FN flag on "${value}".`, "ok");
+  } catch (e) {
+    setSaveMsg(`clear failed: ${e.message}`, "error");
+  }
+}
+
+function bindFnListDelegation() {
+  const box = $("#cb-fn-list");
+  if (!box) return;
+  box.addEventListener("click", (ev) => {
+    const t = ev.target;
+    if (!(t instanceof Element)) return;
+    const removeBtn = t.closest(".cb-fn-remove");
+    if (removeBtn && box.contains(removeBtn)) {
+      removeFnValue(removeBtn.dataset.value);
+      return;
+    }
+    const editBtn = t.closest(".cb-fn-edit");
+    if (editBtn && box.contains(editBtn)) {
+      startFnEdit(editBtn.dataset.value);
+      // Scroll the value into view so the inline editor is visible.
+      const row = $("#cb-value-list")
+        .querySelector(`.cb-value-row[data-value="${CSS.escape(editBtn.dataset.value)}"]`);
+      if (row) row.scrollIntoView({ block: "center" });
+    }
+  });
 }
 
 function toggleSelect(value) {
@@ -775,6 +949,15 @@ function rerenderClusters() {
       : "";
     const isAcc = c.verdict === "accept";
     const isRej = c.verdict === "reject";
+    // Discoverability hint for value-removal, shown only on the active
+    // card (so it sits next to the rows the operator is editing without
+    // repeating on every card). The "✕" chip mirrors the per-row button.
+    const removeHint = isActive
+      ? `<div class="cc-values-hint">Click the <span class="cc-x-chip">✕</span>
+           on a value to drop it from this cluster (it won't be flagged as
+           inconsistent), then <strong>Save</strong>. Use the radio to set the
+           canonical form.</div>`
+      : "";
     return `
       <div class="cb-cluster-card${c.from_draft ? " from-draft" : ""}${isActive ? " active" : ""}${isAcc ? " verdict-accept" : ""}${isRej ? " verdict-reject" : ""}" data-ci="${ci}">
         <header class="cc-head">
@@ -794,6 +977,7 @@ function rerenderClusters() {
         </header>
         ${targetStyleLine}
         ${overlapLine}
+        ${removeHint}
         <div class="cb-cluster-values">${valueRows}</div>
         <div class="cb-cluster-meta">${c.values.length} values · ${c.from_draft ? "LLM proposal" : "operator-created"}${c.support_runs && c.support_runs.length ? ` · supported by runs ${c.support_runs.join(", ")}` : ""}</div>
       </div>
@@ -931,9 +1115,52 @@ function bindValueListDelegation() {
   const list = $("#cb-value-list");
   if (!list) return;
   list.addEventListener("click", (ev) => {
-    const row = ev.target instanceof Element
-      ? ev.target.closest(".cb-value-row") : null;
+    const t = ev.target;
+    if (!(t instanceof Element)) return;
+    // FN inline-editor controls take priority over the row-level
+    // select toggle so clicking them never adds the value to a cluster.
+    const flagBtn = t.closest(".v-fn-flag");
+    if (flagBtn && list.contains(flagBtn)) {
+      ev.stopPropagation();
+      const v = flagBtn.dataset.value;
+      if (state.fnEditing === v) cancelFnEdit();
+      else startFnEdit(v);
+      return;
+    }
+    const saveBtn = t.closest(".v-fn-save");
+    if (saveBtn && list.contains(saveBtn)) {
+      ev.stopPropagation();
+      const editor = saveBtn.closest(".v-fn-editor");
+      const inp = editor ? editor.querySelector(".v-fn-input") : null;
+      submitFnFlag(saveBtn.dataset.value, inp ? inp.value : "");
+      return;
+    }
+    const cancelBtn = t.closest(".v-fn-cancel");
+    if (cancelBtn && list.contains(cancelBtn)) {
+      ev.stopPropagation();
+      cancelFnEdit();
+      return;
+    }
+    // Clicks inside the editor input shouldn't toggle selection.
+    if (t.closest(".v-fn-editor")) {
+      ev.stopPropagation();
+      return;
+    }
+    const row = t.closest(".cb-value-row");
     if (row && list.contains(row)) toggleSelect(row.dataset.value);
+  });
+  // Enter saves the inline FN fix; Escape cancels.
+  list.addEventListener("keydown", (ev) => {
+    const inp = ev.target instanceof Element ? ev.target.closest(".v-fn-input") : null;
+    if (!inp) return;
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      const editor = inp.closest(".v-fn-editor");
+      submitFnFlag(editor.dataset.value, inp.value);
+    } else if (ev.key === "Escape") {
+      ev.preventDefault();
+      cancelFnEdit();
+    }
   });
 }
 
@@ -985,10 +1212,10 @@ async function onSave() {
     const sEnc = encodeURIComponent(state.active.source);
     const ru = encodeURIComponent(RUN_ID);
     // Same path-converter trick as openColumn: action before column,
-    // ``encodeURI`` (not ``encodeURIComponent``) on the column so a
-    // literal ``/`` in the name survives to the router.
+    // ``encColPath`` keeps a literal ``/`` for the ``:path`` router while
+    // escaping the ``#`` / ``?`` delimiters that would truncate the column.
     await api(
-      `/api/runs/${ru}/columns/${sEnc}/clusters/${encodeURI(state.active.column)}`,
+      `/api/runs/${ru}/columns/${sEnc}/clusters/${encColPath(state.active.column)}`,
       { method: "POST", body: JSON.stringify(payload) },
     );
     state.dirty = false;

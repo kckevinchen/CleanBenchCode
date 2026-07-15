@@ -57,6 +57,12 @@ const state = {
   selectedRuns: new Set(),
   runsFilter: localStorage.getItem("dq-ws-runs-filter") || "all",
   runsQuery: "",
+  // Virtual folders (see /api/folders). ``folders`` is the server-side
+  // definition list (newest first); membership is each run's
+  // ``folder_id``. ``unfiledCollapsed`` is local-only UI state for the
+  // synthetic "Unfiled" group (which has no server record).
+  folders: [],
+  unfiledCollapsed: localStorage.getItem("dq-ws-unfiled-collapsed") === "1",
 };
 
 // --------------------------------------------------------- bootstrap
@@ -90,6 +96,7 @@ async function bootstrap() {
 async function refreshWorkspace() {
   const ws = await api("/api/runs");
   state.workspace = ws;
+  state.folders = ws.folders || [];
   $("#ws-meta").textContent = `${ws.project_root} · annotator ${ws.annotator} · ${ws.runs.length} runs`;
   // Drop any stale bulk-selection ids that no longer exist on disk
   // (e.g. another tab deleted them) so the toolbar count stays honest.
@@ -136,6 +143,26 @@ function initRunsToolbar() {
     renderRuns(state.workspace?.runs || []);
   });
   $("#runs-bulk-delete").addEventListener("click", onBulkDelete);
+  $("#runs-bulk-duplicate").addEventListener("click", onBulkDuplicate);
+
+  // "New folder" (empty) - always available from the toolbar.
+  $("#runs-new-folder")?.addEventListener("click", () => createFolder(null));
+
+  // Bulk "Move to…" picker. It's a one-shot <select>: pick a target,
+  // we act, then snap it back to the placeholder so it reads as a verb,
+  // not a persistent state. Options are rebuilt on every render so a
+  // freshly-created folder shows up without a reload.
+  const move = $("#runs-bulk-move");
+  if (move) {
+    move.addEventListener("change", () => {
+      const v = move.value;
+      move.value = "";
+      if (!v) return;
+      if (v === "__new__") createFolder([...state.selectedRuns]);
+      else if (v === "__unfiled__") assignSelectedToFolder(null);
+      else if (v.startsWith("folder:")) assignSelectedToFolder(v.slice("folder:".length));
+    });
+  }
 }
 
 function applyRunsFilter(runs) {
@@ -167,11 +194,17 @@ function sortRuns(runs) {
   });
 }
 
+function renderRunRow(r) {
+  if (r.kind === "relations") return renderRelationsRunRow(r);
+  return renderDetectionRunRow(r);
+}
+
 function renderRuns(runs) {
   $("#runs-count").textContent = `(${runs.length})`;
   const tb = $("#runs-toolbar");
   if (tb) tb.hidden = runs.length === 0;
   updateBulkBar();
+  populateBulkMove();
 
   const box = $("#runs-list");
   if (!runs.length) {
@@ -189,11 +222,129 @@ function renderRuns(runs) {
     box.innerHTML = `<div class="runs-empty-filtered">No runs match the current filter.</div>`;
     return;
   }
-  box.innerHTML = visible.map((r) => {
-    if (r.kind === "relations") return renderRelationsRunRow(r);
-    return renderDetectionRunRow(r);
-  }).join("");
+  // No folders defined → preserve the original flat list verbatim so
+  // the dashboard looks identical until the operator opts into folders.
+  if (!state.folders.length) {
+    box.innerHTML = visible.map(renderRunRow).join("");
+    wireRowActions(box);
+    return;
+  }
+  renderGroupedRuns(box, visible);
+  wireFolderActions(box);
   wireRowActions(box);
+}
+
+// Partition the (already filtered + sorted) runs into their folders plus
+// the synthetic "Unfiled" bucket. A run whose ``folder_id`` doesn't match
+// any live folder is treated as unfiled, so a stale pointer (e.g. after a
+// folder was deleted in another tab) degrades gracefully.
+function groupRunsByFolder(visible) {
+  const live = new Set(state.folders.map((f) => f.id));
+  const byFolder = new Map();   // folder_id -> runs[]
+  const unfiled = [];
+  for (const r of visible) {
+    const fid = r.folder_id || "";
+    if (fid && live.has(fid)) {
+      if (!byFolder.has(fid)) byFolder.set(fid, []);
+      byFolder.get(fid).push(r);
+    } else {
+      unfiled.push(r);
+    }
+  }
+  return { byFolder, unfiled };
+}
+
+function renderGroupedRuns(box, visible) {
+  const { byFolder, unfiled } = groupRunsByFolder(visible);
+  // When a search query or non-"all" star filter is active, hide folders
+  // that have no matching runs so the result stays focused. In the
+  // default unfiltered view we always show every folder (even empty
+  // ones) so they remain manageable.
+  const filtering = !!state.runsQuery || state.runsFilter !== "all";
+  const parts = [];
+  // Run-ids hidden purely because their group is collapsed (NOT because
+  // they were filtered out). We prune these from the bulk selection
+  // below so "Delete/Move selected" can never act on a run the operator
+  // can't currently see.
+  const hiddenByCollapse = [];
+  for (const f of state.folders) {
+    const rows = byFolder.get(f.id) || [];
+    if (filtering && rows.length === 0) continue;
+    // While filtering, force-expand any folder that HAS matches so the
+    // search results aren't swallowed by a persisted collapse state.
+    const open = !f.collapsed || (filtering && rows.length > 0);
+    parts.push(renderFolderHeader(f, rows.length, open));
+    if (open) {
+      parts.push(`<div class="folder-body" id="folder-body-${escape(f.id)}" role="group">`);
+      parts.push(
+        rows.length
+          ? rows.map(renderRunRow).join("")
+          : `<div class="folder-empty">Empty folder — select runs and use “Move to…” to file them here.</div>`,
+      );
+      parts.push(`</div>`);
+    } else {
+      for (const r of rows) hiddenByCollapse.push(r.run_id);
+    }
+  }
+  // "Unfiled" group: only shown when it actually holds runs. Force-expand
+  // while filtering for the same reason as folders above.
+  if (unfiled.length) {
+    const open = !state.unfiledCollapsed || filtering;
+    parts.push(renderUnfiledHeader(unfiled.length, open));
+    if (open) {
+      parts.push(`<div class="folder-body" id="folder-body-unfiled" role="group">`);
+      parts.push(unfiled.map(renderRunRow).join(""));
+      parts.push(`</div>`);
+    } else {
+      for (const r of unfiled) hiddenByCollapse.push(r.run_id);
+    }
+  }
+  box.innerHTML = parts.join("");
+
+  // Drop now-hidden runs from the selection so the bulk bar count and
+  // the destructive bulk actions stay honest about what's visible.
+  let pruned = false;
+  for (const id of hiddenByCollapse) {
+    if (state.selectedRuns.delete(id)) pruned = true;
+  }
+  if (pruned) updateBulkBar();
+}
+
+function renderFolderHeader(f, count, open) {
+  const id = escape(f.id);
+  const name = f.name || "(unnamed folder)";
+  const caret = open ? "▾" : "▸";
+  const cls = f.name ? "folder-name" : "folder-name placeholder";
+  return `
+    <div class="folder-head ${open ? "" : "collapsed"}" data-folder="${id}">
+      <button class="folder-toggle" data-action="folder-toggle" data-folder="${id}"
+        aria-expanded="${open ? "true" : "false"}" aria-controls="folder-body-${id}"
+        title="${open ? "Collapse folder" : "Expand folder"}">${caret}</button>
+      <span class="folder-glyph" aria-hidden="true">🗀</span>
+      <span class="${cls}" role="button" tabindex="0"
+        data-action="folder-rename" data-folder="${id}" title="Click to rename">
+        ${escape(name)}<span class="pencil" aria-hidden="true">✎</span>
+      </span>
+      <span class="folder-count">${escape(String(count))} run${count === 1 ? "" : "s"}</span>
+      <span class="folder-head-actions">
+        <button data-action="folder-rename" data-folder="${id}" title="Rename folder">Rename</button>
+        <button class="danger" data-action="folder-delete" data-folder="${id}"
+          title="Delete folder (its runs are kept and moved to Unfiled)">Delete</button>
+      </span>
+    </div>`;
+}
+
+function renderUnfiledHeader(count, open) {
+  const caret = open ? "▾" : "▸";
+  return `
+    <div class="folder-head unfiled ${open ? "" : "collapsed"}">
+      <button class="folder-toggle" data-action="unfiled-toggle"
+        aria-expanded="${open ? "true" : "false"}" aria-controls="folder-body-unfiled"
+        title="${open ? "Collapse" : "Expand"}">${caret}</button>
+      <span class="folder-glyph" aria-hidden="true">▤</span>
+      <span class="folder-name">Unfiled</span>
+      <span class="folder-count">${escape(String(count))} run${count === 1 ? "" : "s"}</span>
+    </div>`;
 }
 
 // Returns the leading `<button class="row-select">…</button>
@@ -250,41 +401,47 @@ function renderDetectionRunRow(r) {
     r.has_column_cluster_drafts || r.has_column_cluster_labels;
   const hasCellLevel = r.has_clusters || r.has_multi_table;
   const hasAnyFindings = hasColumnClusters || hasCellLevel;
-  const mtSuffix = r.has_multi_table
-    ? ` <span class="muted">(+${escape(String(r.n_multi_table_findings ?? 0))} MT)</span>`
-    : "";
-  const ccDrafts = Number(r.n_column_cluster_drafts ?? 0);
-  const ccLabels = Number(r.n_column_cluster_labels ?? 0);
-  const ccTotal = ccDrafts + ccLabels;
-  const ccSuffix = hasColumnClusters
-    ? ` <span class="muted">(+${escape(String(ccTotal))} inconsistency)</span>`
-    : "";
-  let labelLink;
-  if (hasAnyFindings) {
-    labelLink = `<a class="primary" href="./label.html?run=${encodeURIComponent(r.run_id)}" title="Label every finding in this run (cells + multi-table + inconsistency clusters)">Label${mtSuffix}${ccSuffix}</a>`;
-  } else {
-    labelLink = `<span class="muted">(no findings)</span>`;
-  }
+  // Fold every error type's finding count into the single "clusters"
+  // numeric column instead of tacking "+N MT / +N inconsistency"
+  // suffixes onto the Label button. ``r.clusters`` is the cell-level
+  // total (typo / semantic / row-dup …); inconsistency column-clusters
+  // and multi-table findings are counted separately by the registry.
+  // The column shows the grand total with a hover breakdown so the
+  // per-type detail isn't lost.
+  const cellClusters = Number(r.clusters ?? 0);
+  const mtFindings = Number(r.n_multi_table_findings ?? 0);
+  const ccTotal =
+    Number(r.n_column_cluster_drafts ?? 0) + Number(r.n_column_cluster_labels ?? 0);
+  const clustersTotal = cellClusters + ccTotal + mtFindings;
+  const breakdown = [
+    cellClusters ? `${cellClusters} cell` : "",
+    ccTotal ? `${ccTotal} inconsistency` : "",
+    mtFindings ? `${mtFindings} MT` : "",
+  ].filter(Boolean).join(" + ");
+  // Only attach the tooltip when the total is actually a mix; a lone
+  // "812 cell" hover over "812" is just noise. ``breakdown`` is always
+  // non-empty when either of these is positive, so the flag is enough.
+  const showBreakdown = ccTotal > 0 || mtFindings > 0;
+  const clustersCell =
+    `<div class="num"${showBreakdown ? ` title="${escape(breakdown)}"` : ""}>` +
+    `<span class="label">clusters</span>${escape(String(clustersTotal))}</div>`;
+  const labelLink = hasAnyFindings
+    ? `<a class="primary" href="./label.html?run=${encodeURIComponent(r.run_id)}" title="Label every finding in this run (cells + multi-table + inconsistency clusters)">Label</a>`
+    : `<span class="muted">(no findings)</span>`;
   const reportLink = r.has_report
     ? `<a href="/api/runs/${encodeURIComponent(r.run_id)}/report" target="_blank" rel="noopener">Report</a>`
     : `<button data-action="build-report" data-run="${escape(r.run_id)}">Build report</button>`;
-  const exportLink = r.has_clusters
-    ? `<a href="/api/runs/${encodeURIComponent(r.run_id)}/export/benchmark" download>Benchmark</a>`
-    : "";
-  const exportByTypeLink = r.has_clusters
-    ? `<a href="/api/runs/${encodeURIComponent(r.run_id)}/export/benchmark-by-type" download title="One JSONL per error_type, bundled as a ZIP">By type</a>`
-    : "";
   const verifyBtn = r.has_clusters
     ? (r.has_web_verifications
         ? `<button data-action="verify-web" data-run="${escape(r.run_id)}" title="Verify all labelled cells on the web (re-run / extend coverage)" class="verify-web-btn"><span class="verify-web-icon">⌕</span> Verified <span class="verify-web-count">${escape(String(r.n_web_verifications ?? 0))}</span></button>`
         : `<button data-action="verify-web" data-run="${escape(r.run_id)}" title="Run experiments.run_web_verify on every gate-eligible cluster" class="verify-web-btn"><span class="verify-web-icon">⌕</span> Verify on web</button>`)
     : "";
-  const tagSpan = (cls, value) => value
-    ? `<span class="tag ${cls}">${escape(value)}</span>`
+  const tagSpan = (cls, value, title) => value
+    ? `<span class="tag ${cls}"${title ? ` title="${escape(title)}"` : ""}>${escape(value)}</span>`
     : "";
   const tags = [
+    tagSpan("dataset", r.dataset, `dataset: ${r.dataset || ""}`),
     tagSpan("model", r.model),
-    tagSpan("mode", r.mode),
   ].join("");
   const { checkbox, starBtn, nameBlock, selected } = renderRowLead(r, tags);
   const rowClass = [
@@ -297,14 +454,12 @@ function renderDetectionRunRow(r) {
       ${checkbox}
       ${starBtn}
       ${nameBlock}
-      <div class="num"><span class="label">clusters</span>${escape(String(r.clusters ?? 0))}</div>
+      ${clustersCell}
       <div class="num"><span class="label">issues</span>${escape(String(r.issues ?? 0))}</div>
       <div class="num"><span class="label">labelled</span>${r.has_labels ? "yes" : "–"}</div>
       <div class="actions">
         ${labelLink}
         ${reportLink}
-        ${exportLink}
-        ${exportByTypeLink}
         ${verifyBtn}
         <button class="danger" data-action="delete-run" data-run="${escape(r.run_id)}" title="Delete this run">Delete</button>
       </div>
@@ -508,6 +663,57 @@ async function deleteSingleRun(btn) {
   }
 }
 
+// Bulk "Duplicate" (top-bar action). Acts on the current bulk
+// selection; for a single selected run it reads like the old per-row
+// Duplicate. The clean-slate vs. keep-labels choice is asked once and
+// applied to every selected run. The backend ``/duplicate`` endpoint is
+// single-run, so we fan out sequentially (the N here is a small UI
+// selection) and report a clean "M duplicated" summary.
+async function onBulkDuplicate() {
+  const ids = [...state.selectedRuns];
+  if (!ids.length) return;
+  const runs = ids.map(findRun).filter(Boolean);
+  if (!runs.length) return;
+  const label = runs.length === 1
+    ? (runs[0].display_name ? `"${runs[0].display_name}" (${runs[0].run_id})` : `"${runs[0].run_id}"`)
+    : `${runs.length} runs`;
+  // OK = keep existing labels; Cancel leads to a second confirm so we
+  // never silently discard annotation work.
+  const resetLabels = !confirm(
+    `Duplicate ${label}?\n\n` +
+    "Click OK to copy WITH existing labels, or Cancel to choose a clean-slate copy (no labels carried over)."
+  );
+  if (resetLabels && !confirm(
+    `Create clean-slate ${runs.length === 1 ? "copy" : "copies"} of ${label} (no labels carried over)?`
+  )) {
+    return;
+  }
+  const btn = $("#runs-bulk-duplicate");
+  btn.disabled = true;
+  btn.textContent = "Duplicating…";
+  let okN = 0, failN = 0, lastId = null;
+  for (const r of runs) {
+    try {
+      const res = await api(`/api/runs/${encodeURIComponent(r.run_id)}/duplicate`, {
+        method: "POST",
+        body: JSON.stringify({ reset_labels: resetLabels }),
+      });
+      okN += 1;
+      lastId = res.run_id;
+    } catch (e) {
+      failN += 1;
+    }
+  }
+  btn.disabled = false;
+  btn.textContent = "Duplicate";
+  toast(
+    okN === 1 && !failN ? `duplicated → ${lastId}` : `duplicated ${okN}${failN ? ` · ${failN} failed` : ""}`,
+    failN ? 4000 : 1800,
+  );
+  state.selectedRuns.clear();
+  refreshWorkspace();
+}
+
 function updateBulkBar() {
   const bar = $("#runs-bulk");
   if (!bar) return;
@@ -555,6 +761,161 @@ async function onBulkDelete() {
   btn.textContent = "Delete selected";
   toast(`deleted ${okN}${failN ? ` · ${failN} failed` : ""}`);
   refreshWorkspace();
+}
+
+// --------------------------------------------------------- runs: folders
+//
+// Folders are a virtual grouping layer: creating one and filing runs
+// into it never moves a run directory on disk (run-ids stay valid for
+// labels / reports). The server holds folder definitions in
+// outputs/folders.json; each run carries a ``folder_id`` pointer.
+
+// Rebuild the bulk "Move to…" picker from the current folder list. Runs
+// as a one-shot verb control: choosing a target acts immediately and the
+// caller snaps the <select> back to its placeholder.
+function populateBulkMove() {
+  const sel = $("#runs-bulk-move");
+  if (!sel) return;
+  const opts = [`<option value="" selected>Move to…</option>`];
+  for (const f of state.folders) {
+    opts.push(`<option value="folder:${escape(f.id)}">${escape(f.name || "(unnamed folder)")}</option>`);
+  }
+  opts.push(`<option value="__unfiled__">— Remove from folder —</option>`);
+  opts.push(`<option value="__new__">＋ New folder from selection…</option>`);
+  sel.innerHTML = opts.join("");
+}
+
+// Create a folder. ``runIds`` may be an array of ids to file into the new
+// folder immediately (bulk-bar path) or ``null`` for an empty folder
+// (toolbar path).
+async function createFolder(runIds) {
+  const name = (prompt("New folder name:", "") || "").trim();
+  if (name === "") return;   // empty / cancelled -> no-op
+  try {
+    const body = { name };
+    if (Array.isArray(runIds) && runIds.length) body.run_ids = runIds;
+    const res = await api("/api/folders", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    const moved = res.moved || 0;
+    toast(moved ? `folder “${name}” created · ${moved} moved` : `folder “${name}” created`);
+    if (moved) state.selectedRuns.clear();
+    await refreshWorkspace();
+  } catch (e) {
+    toast(`create folder failed: ${e.message}`, 3500);
+  }
+}
+
+// Move the bulk-selected runs into ``folderId`` (null/"" -> Unfiled).
+async function assignSelectedToFolder(folderId) {
+  const ids = [...state.selectedRuns];
+  if (!ids.length) return;
+  try {
+    const res = await api("/api/folders/assign", {
+      method: "POST",
+      body: JSON.stringify({ run_ids: ids, folder_id: folderId || null }),
+    });
+    toast(folderId ? `moved ${res.moved} to folder` : `removed ${res.moved} from folder`);
+    state.selectedRuns.clear();
+    await refreshWorkspace();
+  } catch (e) {
+    toast(`move failed: ${e.message}`, 3500);
+  }
+}
+
+function findFolder(folderId) {
+  return state.folders.find((f) => f.id === folderId);
+}
+
+function wireFolderActions(box) {
+  // Collapse / expand a folder. Optimistic: flip locally + re-render,
+  // then persist the collapse flag server-side so it survives reload.
+  box.querySelectorAll('[data-action="folder-toggle"]').forEach((b) => {
+    b.addEventListener("click", async () => {
+      const f = findFolder(b.dataset.folder);
+      if (!f) return;
+      const next = !f.collapsed;
+      f.collapsed = next;             // optimistic
+      renderRuns(state.workspace?.runs || []);
+      try {
+        await api(`/api/folders/${encodeURIComponent(f.id)}`, {
+          method: "PATCH",
+          body: JSON.stringify({ collapsed: next }),
+        });
+      } catch (e) {
+        f.collapsed = !next;          // rollback
+        renderRuns(state.workspace?.runs || []);
+        toast(`folder update failed: ${e.message}`, 3000);
+      }
+    });
+  });
+
+  // The synthetic "Unfiled" group has no server record - its collapse
+  // state is local-only (persisted to localStorage).
+  box.querySelectorAll('[data-action="unfiled-toggle"]').forEach((b) => {
+    b.addEventListener("click", () => {
+      state.unfiledCollapsed = !state.unfiledCollapsed;
+      localStorage.setItem("dq-ws-unfiled-collapsed", state.unfiledCollapsed ? "1" : "0");
+      renderRuns(state.workspace?.runs || []);
+    });
+  });
+
+  box.querySelectorAll('[data-action="folder-rename"]').forEach((el) => {
+    el.addEventListener("click", () => renameFolder(el.dataset.folder));
+  });
+  // The folder-name span is a role="button" (not a real <button>), so it
+  // needs explicit Enter/Space handling to be keyboard-operable. The real
+  // Rename <button> already activates on Enter/Space natively.
+  box.querySelectorAll('.folder-name[data-action="folder-rename"]').forEach((el) => {
+    el.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") {
+        ev.preventDefault();
+        renameFolder(el.dataset.folder);
+      }
+    });
+  });
+
+  box.querySelectorAll('[data-action="folder-delete"]').forEach((b) => {
+    b.addEventListener("click", () => deleteFolder(b.dataset.folder));
+  });
+}
+
+async function renameFolder(folderId) {
+  const f = findFolder(folderId);
+  if (!f) return;
+  const name = prompt("Rename folder:", f.name || "");
+  if (name === null) return;                 // cancelled
+  const next = name.trim();
+  if (next === (f.name || "")) return;       // unchanged
+  try {
+    await api(`/api/folders/${encodeURIComponent(folderId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name: next }),
+    });
+    toast(`renamed folder`);
+    await refreshWorkspace();
+  } catch (e) {
+    toast(`rename failed: ${e.message}`, 3500);
+  }
+}
+
+async function deleteFolder(folderId) {
+  const f = findFolder(folderId);
+  if (!f) return;
+  const label = f.name ? `“${f.name}”` : "this folder";
+  if (!confirm(
+    `Delete folder ${label}?\n\nThe runs inside it are NOT deleted — they move back to “Unfiled”.`
+  )) return;
+  try {
+    const res = await api(`/api/folders/${encodeURIComponent(folderId)}`, {
+      method: "DELETE",
+    });
+    toast(`folder deleted${res.unfiled ? ` · ${res.unfiled} unfiled` : ""}`);
+    await refreshWorkspace();
+  } catch (e) {
+    toast(`delete folder failed: ${e.message}`, 3500);
+  }
 }
 
 // --------------------------------------------------------- web-verify modal
@@ -904,15 +1265,6 @@ function applyConfigDefaults(defaults) {
   setPlaceholder("concurrency", llm.concurrency == null ? "auto" : llm.concurrency);
   markDefaultOption("reasoning-effort", llm.reasoning_effort);
   markDefaultOption("synthesis-effort", llm.synthesis_effort);
-  // Checkbox meaning is inverted: `no-synthesis` is ON when
-  // enable_synthesis is FALSE.
-  setChecked("no-synthesis", llm.enable_synthesis === false);
-  // `synthesise-singletons` mirrors the YAML default directly. Treat
-  // missing/null as the new default-ON behaviour.
-  setChecked(
-    "synthesise-singletons",
-    llm.synthesise_singletons !== false,
-  );
 
   // ----- Experiment + GT -----
   markDefaultOption("mode", exp.mode);
@@ -1078,13 +1430,6 @@ function collectParams() {
     model: val("model"),
     reasoning_effort: val("reasoning-effort"),
     concurrency: num("concurrency"),
-    no_synthesis: check("no-synthesis") || null,
-    // The checkbox is positively phrased ("Synthesise single-detection
-    // clusters"), so the CLI flag fires only when the user OPTS OUT.
-    no_synthesise_singletons:
-      $("#synthesise-singletons") && !check("synthesise-singletons")
-        ? true
-        : null,
     synthesis_effort: val("synthesis-effort"),
     normalize_input: check("normalize-input") || null,
     normalize_fold_punctuation: check("normalize-fold-punctuation") || null,
@@ -1122,6 +1467,8 @@ function collectParams() {
     params.multi_table_semantic_rows = num("mt-semantic-rows");
     params.multi_table_semantic_max_pages = num("mt-semantic-max-pages");
     params.no_multi_table_verify = check("mt-no-verify") || null;
+    // Multi-table discovery follows the global ``mode`` (adaptive/single);
+    // no separate per-discovery knobs.
   }
 
   if (params.mode === "adaptive") {
@@ -1183,8 +1530,6 @@ function previewCommand() {
     multi_table_semantic_max_pages: "--multi-table-semantic-max-pages",
   };
   const boolMap = {
-    no_synthesis: ["--no-synthesis", null],
-    no_synthesise_singletons: ["--no-synthesise-singletons", null],
     normalize_input: ["--normalize-input", null],
     normalize_fold_punctuation: ["--normalize-fold-punctuation", null],
     normalize_lowercase: ["--normalize-lowercase", null],
@@ -1541,40 +1886,29 @@ function renderRelationsRunRow(r) {
   // approve / reject the discovered relations; the detection runner
   // (``experiments/run_relation_detection``) consumes those verdicts
   // when compiling per-cell violations.
-  const reviewLink = `<a class="primary" href="./relations_review.html?run=${encodeURIComponent(r.run_id)}" title="Approve or reject the discovered relations before running detection">Review${r.n_relations ? ` (${escape(String(r.n_relations))})` : ""}</a>`;
+  const reviewLink = `<a class="primary" href="./relations_review.html?run=${encodeURIComponent(r.run_id)}" title="Approve or reject the discovered relations before running detection">Review</a>`;
   // Unified Label CTA: relations runs can produce per-row violation
   // clusters (from the post-validation violation-compilation step in
   // run_relation_discovery) AND multi-table findings. Both are hosted
   // by the same label.html surface as detection runs, so a single
   // link routes there. The suffixes show what's inside.
-  const clusterSuffix = r.has_clusters
-    ? ` <span class="muted">(${escape(String(r.clusters ?? 0))} clusters)</span>`
-    : "";
-  const mtSuffix = r.has_multi_table
-    ? ` <span class="muted">(+${escape(String(r.n_multi_table_findings ?? 0))} MT)</span>`
-    : "";
+  // Counts move into the Label tooltip rather than visible suffix text,
+  // so the button reads as a clean verb (consistent with detection rows).
+  const labelCounts = [
+    r.has_clusters ? `${Number(r.clusters ?? 0)} relation clusters` : "",
+    r.has_multi_table ? `${Number(r.n_multi_table_findings ?? 0)} multi-table findings` : "",
+  ].filter(Boolean).join(", ");
   const labelLink = (r.has_clusters || r.has_multi_table)
-    ? `<a class="primary" href="./label.html?run=${encodeURIComponent(r.run_id)}" title="Label findings in this run (relation violations + cross-sheet)">Label${clusterSuffix}${mtSuffix}</a>`
+    ? `<a class="primary" href="./label.html?run=${encodeURIComponent(r.run_id)}" title="Label findings in this run (relation violations + cross-sheet)${labelCounts ? ` — ${escape(labelCounts)}` : ""}">Label</a>`
     : "";
   const tag = (cls, value, title) => value
     ? `<span class="tag ${cls}"${title ? ` title="${escape(title)}"` : ""}>${escape(String(value))}</span>`
     : "";
   const tags = [
     `<span class="tag" style="background:rgba(167,139,250,0.14);color:#c4b5fd;border-color:rgba(167,139,250,0.45);">relations</span>`,
+    tag("dataset", r.dataset, `dataset: ${r.dataset || ""}`),
     tag("model", r.model),
-    r.mode ? tag("mode", r.mode) : "",
-    r.n_passes != null
-      ? tag("", `passes ${r.n_passes}`, "adaptive passes")
-      : "",
-    r.n_arms != null && r.n_saturated_arms != null
-      ? tag("", `${r.n_saturated_arms}/${r.n_arms} sat`, "saturated arms / total arms")
-      : "",
   ].filter(Boolean).join("");
-  // Third stat slot: passes count when adaptive, otherwise show the
-  // adaptive flag is off so the row stays the same width as detection rows.
-  const thirdStat = r.n_passes != null
-    ? `<div class="num"><span class="label">passes</span>${escape(String(r.n_passes))}</div>`
-    : `<div class="num"><span class="label">mode</span>single</div>`;
   const { checkbox, starBtn, nameBlock, selected } = renderRowLead(r, tags);
   const rowClass = [
     "row",
@@ -1588,7 +1922,6 @@ function renderRelationsRunRow(r) {
       ${nameBlock}
       <div class="num"><span class="label">relations</span>${escape(String(r.n_relations ?? 0))}</div>
       <div class="num"><span class="label">sources</span>${escape(String(r.n_sources ?? 0))}</div>
-      ${thirdStat}
       <div class="actions">
         ${reviewLink}
         ${labelLink}
