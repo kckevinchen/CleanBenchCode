@@ -91,11 +91,15 @@ The Runs page discovers run directories automatically.
 To launch a run from the UI:
 
 1. Open **Launch new run**.
-2. Choose the dataset CSV or directory in **Dataset**.
+2. For the first live run, choose one small dataset CSV in **Dataset**. Expand
+   to directory mode after you have checked the output and token volume.
 3. For directory mode, keep **CSV glob** as `*.csv` unless you need a narrower
    pattern.
-4. Select only the error types relevant to the benchmark you are building.
-5. Choose **single** mode for a first pass. The configured adaptive mode can run
+4. Select only `typo`, set **Max chunks** to `1`, and enable **Skip Phase-B
+   synthesis** for the smoke run. Dedicated inconsistency, row-duplication, and
+   multi-table paths have separate call patterns and are not bounded by the
+   generic chunk limit.
+5. Choose **single** mode for the first pass. The configured adaptive mode can run
    up to several perturbed LLM passes per arm and is better suited to a later
    coverage study.
 6. Select **Preview command** and confirm the resolved CSV path, error types,
@@ -229,8 +233,9 @@ intentional and documented.
 
 Open **Export** and choose **Eval bundle (recommended)**. The ZIP contains:
 
-- `benchmark.jsonl`: one authoritative record per labeled cell, with
-  `label` in `error`, `clean`, or `ambiguous`.
+- `benchmark.jsonl`: one authoritative record per `(source, row, column)`, with
+   `label` in `error`, `clean`, or `ambiguous`. Row-level findings such as
+   duplication use `column=""` as a sentinel.
 - `benchmark.ignored.jsonl`: exact cells and wildcard row/column/CSV exclusions
   that receive false-positive and false-negative immunity.
 - `MANIFEST.txt`: file descriptions and the cell-level micro-F1 scoring rules.
@@ -240,10 +245,13 @@ Other UI exports are useful for narrower workflows:
 - **Export benchmark**: `benchmark.jsonl` only.
 - **Per-type benchmark**: one JSONL per error type in a ZIP.
 - **Single error type**: one selected error-type JSONL.
-- **Export source CSVs**: source files with active exclusions removed.
+- **Export source CSVs**: source files with active exclusions removed. When
+   rows are removed, `_ROW_MAP.json` maps each exported row position back to
+   its original zero-based benchmark row.
 
 Keep the eval bundle and source export together when handing the benchmark to a
-training or evaluation pipeline.
+training or evaluation pipeline. Apply `_ROW_MAP.json` before joining
+predictions from a row-filtered source CSV to benchmark coordinates.
 
 ## Resume, duplicate, and back up work
 

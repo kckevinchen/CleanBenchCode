@@ -7,6 +7,8 @@ back-compat with old labels that only carry the scalar ``column`` /
 
 from __future__ import annotations
 
+import json
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -224,7 +226,7 @@ class TestCrossPipelineDeduplication:
         )
         clean = BenchmarkCell(
             source="a.csv", row=2, column="name", original_value="Alice",
-            label="clean", error_types=["inconsistency"],
+            label="clean", error_types=["inconsistency"], low_value=True,
         )
 
         merged = _deduplicate_benchmark_cells([error, clean])
@@ -232,6 +234,7 @@ class TestCrossPipelineDeduplication:
         assert len(merged) == 1
         assert merged[0].label == "ambiguous"
         assert merged[0].corrected_value is None
+        assert merged[0].low_value is False
 
     def test_inconsistency_failure_is_not_swallowed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -526,15 +529,11 @@ class TestAffectedRowsPropagation:
 # ---------------------------------------------------------------------------
 
 
-import json
-import zipfile
-
 from src.labeling.export import (
     UNCATEGORIZED_BUCKET,
     materialize_label_benchmark_by_error_type,
     write_benchmark_by_error_type,
 )
-from src.labeling.schema import Label, LabelStatus, LabelTarget
 
 
 class TestPerErrorTypeBundle:
@@ -699,7 +698,6 @@ class TestPerErrorTypeBundle:
         write_benchmark_by_error_type(out_dir, [cluster_a, cluster_b], store)
 
         # Mimic the endpoint: zip the directory.
-        import os
         zip_path = tmp_path / "bundle.zip"
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             for p in sorted(out_dir.glob("*.jsonl")):
@@ -1058,7 +1056,6 @@ class TestLLMSuggestedValue:
 # ---------------------------------------------------------------------------
 
 from src.labeling.export import find_label_conflicts
-from src.labeling.schema import BenchmarkCell
 
 
 def _bcell(

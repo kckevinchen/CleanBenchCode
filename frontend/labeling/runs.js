@@ -1431,6 +1431,7 @@ function collectParams() {
     reasoning_effort: val("reasoning-effort"),
     concurrency: num("concurrency"),
     synthesis_effort: val("synthesis-effort"),
+    no_synthesis: check("no-synthesis") || null,
     normalize_input: check("normalize-input") || null,
     normalize_fold_punctuation: check("normalize-fold-punctuation") || null,
     normalize_lowercase: check("normalize-lowercase") || null,
@@ -1530,6 +1531,7 @@ function previewCommand() {
     multi_table_semantic_max_pages: "--multi-table-semantic-max-pages",
   };
   const boolMap = {
+    no_synthesis: ["--no-synthesis", null],
     normalize_input: ["--normalize-input", null],
     normalize_fold_punctuation: ["--normalize-fold-punctuation", null],
     normalize_lowercase: ["--normalize-lowercase", null],

@@ -37,7 +37,7 @@ logger = logging.getLogger("baseline")
 
 
 def build_client(endpoint: str, api_version: str) -> AzureOpenAI:
-    """Construct an AzureOpenAI client, preferring Entra over API keys."""
+    """Construct a client, using an explicit API-key override when present."""
     api_key = os.environ.get("AZURE_OPENAI_KEY")
     if api_key:
         logger.info("Using API key auth (AZURE_OPENAI_KEY is set).")

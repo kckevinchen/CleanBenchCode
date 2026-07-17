@@ -148,7 +148,7 @@ class LabelStats(BaseModel):
 
 
 class BenchmarkCell(BaseModel):
-    """One row of the exported benchmark (per-cell ground truth).
+    """One row of the exported benchmark (cell or row-level ground truth).
 
     Unified across all error types (typo, semantic_incompatible,
     inconsistency, row_duplication, ...). The ``corrected_value``
@@ -173,6 +173,9 @@ class BenchmarkCell(BaseModel):
 
     Downstream evaluators detect the direction with
     ``isinstance(corrected_value, list)``.
+
+    Row-level findings such as ``row_duplication`` use ``column=""`` as a
+    sentinel and are keyed by ``(source, row, "")``.
     """
 
     source: str

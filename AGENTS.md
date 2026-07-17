@@ -112,7 +112,8 @@ Exports must stay aligned:
 - `benchmark.ignored.jsonl`: skipped/excluded immunity records, including
   wildcard row/column/CSV scopes;
 - eval bundle: both files plus `MANIFEST.txt` scoring rules;
-- source export: source CSVs with the same exclusions applied.
+- source export: source CSVs with the same exclusions applied; row-filtered
+  files carry `_ROW_MAP.json` for original benchmark coordinates.
 
 When changing labeling behavior, test both the store/API path and benchmark
 materialization. Relevant suites include:
@@ -200,6 +201,8 @@ Azure configuration rules:
   commands also expose explicit endpoint arguments.
 - Configure Foundry Agent resources through `AZURE_AGENTS_*`.
 - Authentication is normally `AzureCliCredential`.
+- `external/baseline` also honors `AZURE_OPENAI_KEY` when explicitly set and
+  otherwise falls back to `AzureCliCredential`.
 - Do not add organization-specific resource URLs or IDs as code defaults.
 
 ## Common change workflows
@@ -232,7 +235,8 @@ Azure configuration rules:
 
 1. Update materialization in `src/labeling/export.py` or the owning export
    router.
-2. Preserve one record per `(source, row, column)`.
+2. Preserve one record per `(source, row, column)`. Row-level findings use
+  `column=""` as the sentinel key.
 3. Keep exclusions and skipped-cell immunity synchronized across benchmark,
    ignored sidecar, bundle manifest, and source export.
 4. Run `tests/test_export_benchmark.py` and conflict/exclusion tests.

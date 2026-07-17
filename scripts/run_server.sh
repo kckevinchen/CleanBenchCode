@@ -43,9 +43,11 @@ case "${1:-start}" in
       echo "stopping pid $PID"
       kill -TERM "$PID" || true
       # Wait up to 10s for graceful shutdown.
-      for _ in $(seq 1 20); do
+      attempts=0
+      while [[ "$attempts" -lt 20 ]]; do
         kill -0 "$PID" 2>/dev/null || break
         sleep 0.5
+        attempts=$((attempts + 1))
       done
       if kill -0 "$PID" 2>/dev/null; then
         echo "force-killing pid $PID"
@@ -94,10 +96,16 @@ if [[ -f "$ROOT/.env" ]]; then
   set +a
 fi
 
-# setsid + nohup: survive SSH hangup, own process group so the server
-# can be killed cleanly via the pidfile.
-nohup setsid python -m experiments.workbench "$@" \
-  >>"$LOG_FILE" 2>&1 < /dev/null &
+# nohup survives SSH hangup. Linux also gets a dedicated session via setsid;
+# standard macOS does not ship setsid, so fall back to launching Python
+# directly while retaining pidfile-based stop/restart behavior.
+if command -v setsid >/dev/null 2>&1; then
+  nohup setsid python -m experiments.workbench "$@" \
+    >>"$LOG_FILE" 2>&1 < /dev/null &
+else
+  nohup python -m experiments.workbench "$@" \
+    >>"$LOG_FILE" 2>&1 < /dev/null &
+fi
 PID=$!
 echo "$PID" > "$PID_FILE"
 sleep 0.4

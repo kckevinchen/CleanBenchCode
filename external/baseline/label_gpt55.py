@@ -6,15 +6,15 @@ and the per-column distinct-value listing as ``input``. Output is a standard,
 workbench-loadable detection-run directory under ``outputs/``.
 
     # with-rulebook (default)
-    python -m external.baseline.label_gpt55 --data-dir data/curated_bing21_500_dedup
+    python -m external.baseline.label_gpt55 --data-dir <dataset-dir>
 
     # without-rulebook (generalized prompt)
-    python -m external.baseline.label_gpt55 --data-dir data/curated_bing21_500_dedup \
+    python -m external.baseline.label_gpt55 --data-dir <dataset-dir> \
         --prompt without-rulebook
 
 Score the resulting run dir with the shared scorer (not part of external/baseline/):
 
-    TYPO_BENCH_DIR=benchmark/typo_excel_500 \
+    TYPO_BENCH_DIR=<legacy-benchmark-dir> \
         python -m experiments.score_typo_dir_benchmark <run_dir>
 """
 
@@ -116,9 +116,13 @@ def main():
     tag = args.tag or f"{args.prompt.replace('-', '_')}_{args.effort}"
 
     data_dir = ROOT / args.data_dir
+    if not data_dir.is_dir():
+        raise SystemExit(f"--data-dir is not a directory: {data_dir}")
     csvs = sorted(data_dir.glob("*.csv")) or sorted(data_dir.rglob("*.csv"))
     if args.limit:
         csvs = csvs[: args.limit]
+    if not csvs:
+        raise SystemExit(f"no CSV files found under --data-dir: {data_dir}")
     ts = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_dir = ROOT / "outputs" / f"{ts}_{args.model}_{data_dir.name}_{tag}"
     cache_dir = run_dir / "gpt55_cache"

@@ -47,21 +47,20 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from src.labeling.app import RunContext
 from src.labeling._cells import (
     _apply_exclusions_to_cells,
     _deduplicate_benchmark_cells,
     _make_value_resolver,
     _materialize_inconsistency_cells_for_export,
 )
+from src.labeling._helpers import _derive_trivial_fix, _looks_like_instruction
+from src.labeling.app import RunContext
+from src.labeling.exclusions_store import ExclusionStore
 from src.labeling.export import (
-    materialize_ignored_cells,
     materialize_label_benchmark,
     materialize_skipped_cells,
 )
-from src.labeling._helpers import _derive_trivial_fix, _looks_like_instruction
 from src.labeling.schema import ExclusionScope
-from src.labeling.exclusions_store import ExclusionStore
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OUTPUTS = PROJECT_ROOT / "outputs"

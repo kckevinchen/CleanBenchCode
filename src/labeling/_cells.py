@@ -193,7 +193,9 @@ def _deduplicate_benchmark_cells(
             current.original_value = cell.original_value
         if not current.llm_suggested_value and cell.llm_suggested_value:
             current.llm_suggested_value = cell.llm_suggested_value
-        current.low_value = current.low_value or cell.low_value
+        current.low_value = (
+            current.low_value or cell.low_value
+        ) if current.label == "clean" else False
         _extend_unique(current.error_types, cell.error_types)
         _extend_unique(current.detection_ids, cell.detection_ids)
         _extend_unique(current.cluster_ids, cell.cluster_ids)

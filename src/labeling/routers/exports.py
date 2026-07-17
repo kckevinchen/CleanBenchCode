@@ -60,6 +60,8 @@ def _bundle_manifest(run_id: str, n_bench: int, n_ignore: int, n_excl: int) -> s
         "FILES\n"
         "  benchmark.jsonl          per-cell ground truth, one record per "
         "(source, row, column).\n"
+        "                           Row-level findings use column=\"\" as a "
+        "sentinel.\n"
         f"                           label in {{error, clean, ambiguous}}. "
         f"Authoritative labels. ({n_bench} cells)\n"
         "  benchmark.ignored.jsonl  cells to give FP/FN IMMUNITY (NOT in "
@@ -190,6 +192,7 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
 
           * ``benchmark.jsonl``        - per-cell ground truth
             (label = error|clean|ambiguous). The authoritative labels.
+                        Row-level findings use ``column=""``.
           * ``benchmark.ignored.jsonl`` - the IMMUNITY set: cells absent
             from benchmark.jsonl that must NOT count as FP/FN. Merges the
             operator's SKIPPED (deferred) cells and the active scope
@@ -624,7 +627,14 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
                     # Fast path: copy the raw file verbatim so
                     # encoding / quoting / mixed dtypes survive.
                     if not src_path.exists():
-                        continue
+                        raise HTTPException(
+                            500,
+                            detail={
+                                "error": "source_export_failed",
+                                "source": source,
+                                "reason": "source file is missing",
+                            },
+                        )
                     zf.write(src_path, arcname=arcname)
                     continue
                 # Row / column exclusions: re-emit via the loaded frame
@@ -632,8 +642,15 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
                 # labelling UI used.
                 try:
                     frame = ctx.load_frame(source)
-                except (FileNotFoundError, OSError, ValueError):
-                    continue
+                except (FileNotFoundError, OSError, ValueError) as exc:
+                    raise HTTPException(
+                        500,
+                        detail={
+                            "error": "source_export_failed",
+                            "source": source,
+                            "reason": str(exc),
+                        },
+                    ) from exc
                 if drop_cols:
                     keep_cols = [c for c in frame.columns if c not in drop_cols]
                     frame = frame.loc[:, keep_cols]

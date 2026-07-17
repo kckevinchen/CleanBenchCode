@@ -73,8 +73,9 @@ labeling begins because benchmark cells use `(source, row, column)` identities.
 Open `http://localhost:8000/`. In the UI:
 
 1. Open **Launch new run**.
-2. Choose the CSV or dataset directory.
-3. Select the relevant error types.
+2. For the first live run, choose one small CSV rather than a full directory.
+3. Select only `typo`, set **Max chunks** to `1`, and enable **Skip Phase-B
+  synthesis**.
 4. For a first smoke run, choose **single** mode; adaptive mode can run several
   LLM passes per detection arm.
 5. Preview the generated command, then launch the run.
@@ -103,6 +104,7 @@ python -m experiments.run_cleaning_detection \
   --csv data/my_dataset/customers.csv \
   --error-types typo \
   --mode single \
+  --no-synthesis \
   --dry-run
 ```
 
@@ -120,7 +122,8 @@ Run a whole dataset directory:
 ```bash
 python -m experiments.run_cleaning_detection \
   --csv-dir data/my_dataset \
-  --csv-glob '*.csv'
+  --csv-glob '*.csv' \
+  --mode single
 ```
 
 List the taxonomy without data or Azure calls:
@@ -161,7 +164,8 @@ The workbench records append-only decisions under each run directory:
 
 The recommended eval bundle contains:
 
-- `benchmark.jsonl`: authoritative error, clean, and ambiguous cells;
+- `benchmark.jsonl`: one authoritative record per `(source, row, column)`;
+  row-level findings such as duplication use `column=""` as a sentinel;
 - `benchmark.ignored.jsonl`: skipped and excluded cell/row/column/CSV scopes;
 - `MANIFEST.txt`: the cell-level micro-F1 scoring contract.
 

@@ -19,8 +19,10 @@ These tests use ``fastapi.testclient`` against an in-memory run dir.
 
 from __future__ import annotations
 
+import io
 import json
 import tempfile
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -28,7 +30,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.labeling.app import create_app
-from src.labeling.schema import LabelStatus, LabelTarget, cell_target_id
+from src.labeling.schema import cell_target_id
 
 
 def _make_run(project: Path, run_id: str = "20260101T000000Z_test") -> Path:
@@ -533,6 +535,46 @@ class TestExportWithFN:
         assert rec["label"] == "error"
         assert rec["cluster_ids"] == ["c1"]
         assert rec["corrected_value"] == "Alice"
+
+
+class TestSourceExportRowMap:
+    def test_row_exclusion_emits_original_row_mapping(
+        self, client_and_run,
+    ) -> None:
+        client, run_id = client_and_run
+        response = client.post(
+            f"/api/runs/{run_id}/exclusions",
+            json={"source": "a.csv", "scope": "rows", "rows": [1]},
+        )
+        assert response.status_code == 200, response.text
+
+        response = client.get(f"/api/runs/{run_id}/export/sources")
+        assert response.status_code == 200, response.text
+        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+            exported = archive.read("a.csv").decode("utf-8").splitlines()
+            row_map = json.loads(archive.read("_ROW_MAP.json"))
+
+        assert exported == ["name,email", "alice,a@x", "carol,c@x"]
+        assert row_map["sources"] == [{
+            "source": "a.csv",
+            "path": "a.csv",
+            "exported_to_source": [0, 2],
+        }]
+
+    def test_missing_source_fails_export(self, tmp_path: Path) -> None:
+        (tmp_path / "frontend" / "labeling").mkdir(parents=True)
+        run_dir = _make_run(tmp_path)
+        client = TestClient(create_app(tmp_path, annotator="tester"))
+        (tmp_path / "data" / "a.csv").unlink()
+
+        response = client.get(f"/api/runs/{run_dir.name}/export/sources")
+
+        assert response.status_code == 500
+        assert response.json()["detail"] == {
+            "error": "source_export_failed",
+            "source": "a.csv",
+            "reason": "source file is missing",
+        }
 
 
 class TestExportByErrorType:

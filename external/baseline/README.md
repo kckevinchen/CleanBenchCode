@@ -23,19 +23,29 @@ visible. Freeze check: `python -m external.baseline.prompt`.
 
 ## Run
 
+The repository does not ship benchmark or source data. Prepare a local
+directory of CSV files under `data/` (or another ignored location) and pass it
+with `--data-dir`. The command exits if the directory is missing or contains no
+CSV files.
+
 ```bash
-az login   # required before any live call
+az login   # required when AZURE_OPENAI_KEY is not set
+export AZURE_OPENAI_ENDPOINTS="https://<your-resource>.openai.azure.com/"
 
 # with-rulebook (default)
-python -m external.baseline.label_gpt55 --data-dir data/curated_bing21_500_dedup
+python -m external.baseline.label_gpt55 --data-dir <dataset-dir>
 
 # without-rulebook
-python -m external.baseline.label_gpt55 --data-dir data/curated_bing21_500_dedup \
+python -m external.baseline.label_gpt55 --data-dir <dataset-dir> \
     --prompt without-rulebook
 
-# smoke test (2 CSVs)
-python -m external.baseline.label_gpt55 --data-dir data/curated_bing21_500_dedup --limit 2
+# smoke test (one CSV; still one LLM call per textual column)
+python -m external.baseline.label_gpt55 --data-dir <dataset-dir> --limit 1
 ```
+
+Authentication normally uses `AzureCliCredential`. If `AZURE_OPENAI_KEY` is
+explicitly set, this baseline uses that key instead; unset it to force Entra
+authentication.
 
 Key flags: `--prompt {with-rulebook,without-rulebook}`, `--model` (default
 `gpt-5.5`), `--endpoint`, `--effort` (default `none`), `--limit`,
@@ -47,9 +57,23 @@ under the run's `gpt55_cache/`, keyed by prompt sha + model + effort + column.
 ## Score
 
 Scoring is **shared**, not part of `external/baseline/` — the same scorer grades RFT
-model runs. Point it at the run dir produced above:
+model runs. The current scorer uses the historical local typo-export layout and
+does not consume the workbench eval bundle directly. Prepare an ignored
+benchmark directory containing:
+
+```text
+<legacy-benchmark-dir>/
+    typo_benchmark.jsonl
+    typo_skipped.jsonl          # optional skip immunity
+    typo_exclusions.jsonl       # optional CSV/column exclusions
+```
+
+Then point it at the run directory produced above:
 
 ```bash
-TYPO_BENCH_DIR=benchmark/typo_excel_500 \
+TYPO_BENCH_DIR=<legacy-benchmark-dir> \
     python -m experiments.score_typo_dir_benchmark <run_dir> [<run_dir> ...]
 ```
+
+Do not assume `benchmark/typo_excel_500` exists in a clean checkout; benchmark
+data is intentionally untracked.
