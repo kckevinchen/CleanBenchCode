@@ -16,12 +16,12 @@ from pathlib import Path
 
 import pytest
 
-from RFT._common.engine import RftEngine
+from RFT import cli, registry
 from RFT._common import _rft_common
+from RFT._common.engine import RftEngine
 from RFT._common.scoring import make_cell_micro_f1_scorer, make_json_array_parser
 from RFT._common.spec import Hparams
 from RFT._common.state import RunState
-from RFT import cli, registry
 
 ALL_TASKS = sorted(registry.REGISTRY)
 DUMMY_ENDPOINT = "https://example.openai.azure.com/"
@@ -144,15 +144,15 @@ def test_scaffold_creates_runnable_task(tmp_path):
     from RFT import scaffold
 
     dst = scaffold.scaffold_task(
-        "scaffolded", version="v3", findings_key="hits", dest_root=tmp_path,
+        "scaffolded", findings_key="hits", dest_root=tmp_path,
     )
-    assert dst == tmp_path / "scaffolded" / "v3"
-    assert (tmp_path / "scaffolded" / "__init__.py").exists()  # error-type pkg
+    assert dst == tmp_path / "scaffolded"
+    assert (dst / "__init__.py").exists()
     spec_py = (dst / "spec.py").read_text()
-    assert 'name="scaffolded_v3"' in spec_py
+    assert 'name="scaffolded"' in spec_py
     assert 'error_type="scaffolded"' in spec_py
-    assert 'version="v3"' in spec_py
-    # imports were rewritten off the template package into the nested path
+    assert "version=" not in spec_py
+    # imports were rewritten off the template package into the task path
     assert "RFT._template" not in spec_py
-    assert "RFT.scaffolded.v3" in spec_py
+    assert "RFT.scaffolded" in spec_py
     assert (dst / "_prompt.py").read_text().count('FINDINGS_KEY = "hits"') == 1

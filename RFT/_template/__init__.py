@@ -1,8 +1,8 @@
-"""Template for a new RFT task version.
+"""Template for a new RFT task.
 
 Copy this folder to ``RFT/<task>/`` (``python -m RFT.cli new <task>
 --error-type <type>`` does it for you) and edit only the THREE things that
-change between runs:
+define the task:
 
   1. DATA   -> ``scripts/build_splits.py`` writes ``data/{train,valid,eval}.jsonl``
   2. PROMPT -> ``_prompt.py`` (trainee developer message + output schema)

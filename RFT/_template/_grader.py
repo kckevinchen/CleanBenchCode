@@ -5,10 +5,8 @@ The default is the shared gold-free ``5 * F1(precision, recall)`` judge
 (``TRAINEE_PROMPT``) and a one-line task description and you have a working
 reward -- no grader written from scratch.
 
-Need more? For reward-shape variants (r1/r2/r3) or python sub-graders
-(trivial-FP gate, column cap, gold-recall leg), see ``RFT/typo/v5/_task.py`` and
-``RFT/typo/v9/_grader_variants.py`` for multigrader examples, then return the
-appropriate dict per ``variant`` here.
+Need more? Add reward-shape variants or python sub-graders in this module and
+return the appropriate grader dict per ``variant``.
 """
 
 from __future__ import annotations
@@ -27,7 +25,7 @@ def build_grader(variant: str, grader_model: str = DEFAULT_GRADER_MODEL) -> dict
     """Return the Azure RFT grader. ``variant`` is ignored for the single
     gold-free judge; branch on it if you add reward-shape variants."""
     return build_pr_judge_grader(
-        name="example_v1_pr",
+        name="example_pr",
         rulebook=TRAINEE_PROMPT,
         task_description=TASK_DESCRIPTION,
         findings_key=FINDINGS_KEY,

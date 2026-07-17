@@ -791,6 +791,56 @@ class TestValueResolverPopulatesOriginalValue:
         assert cells[0].corrected_value == "real@example.com"
         assert cells[0].cluster_ids == []
 
+    def test_latest_unsure_cell_claim_exports_as_ambiguous(
+        self, store: LabelStore,
+    ) -> None:
+        target_id = "cell:a.csv:5:duration"
+        store.append(Label(
+            target=LabelTarget.CELL,
+            target_id=target_id,
+            source="a.csv", row=5, column="duration",
+            status=LabelStatus.FN,
+            annotator="tester",
+        ))
+        store.append(Label(
+            target=LabelTarget.CELL,
+            target_id=target_id,
+            source="a.csv", row=5, column="duration",
+            status=LabelStatus.UNSURE,
+            annotator="tester",
+        ))
+
+        cells = materialize_label_benchmark(
+            [], store, value_resolver=lambda *_: "4.5 Innings",
+        )
+
+        assert len(cells) == 1
+        assert cells[0].original_value == "4.5 Innings"
+        assert cells[0].label == "ambiguous"
+        assert cells[0].corrected_value is None
+        assert cells[0].cluster_ids == []
+
+    def test_standalone_partial_cell_claim_exports_as_error(
+        self, store: LabelStore,
+    ) -> None:
+        store.append(Label(
+            target=LabelTarget.CELL,
+            target_id="cell:a.csv:5:duration",
+            source="a.csv", row=5, column="duration",
+            status=LabelStatus.PARTIAL,
+            corrected_value="4.5",
+            annotator="tester",
+        ))
+
+        cells = materialize_label_benchmark(
+            [], store, value_resolver=lambda *_: "4.5 Innings",
+        )
+
+        assert len(cells) == 1
+        assert cells[0].label == "error"
+        assert cells[0].corrected_value == "4.5"
+        assert cells[0].cluster_ids == []
+
     def test_no_resolver_keeps_legacy_behaviour(
         self, store: LabelStore,
     ) -> None:
@@ -1619,5 +1669,3 @@ class TestMaterializeIgnoredCells:
         for r in recs:
             assert isinstance(r, IgnoreRecord)
             json.dumps(r.model_dump())  # must not raise
-
-

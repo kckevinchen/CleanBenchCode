@@ -1,13 +1,13 @@
 """The per-task RFT contract.
 
-Everything that differs between RFT versions is captured by one
+Everything that differs between RFT tasks is captured by one
 :class:`RftTaskSpec`. The generic engine (:mod:`RFT._common.engine`) and CLI
 (:mod:`RFT.cli`) consume a spec and provide the *entire* Azure lifecycle --
 ``prepare / upload / submit / status / cancel / supervise / deploy / delete /
 run / models`` -- so a new version is a ~30-line spec module, not a fresh
 launcher.
 
-A version varies in exactly these dimensions:
+A task varies in exactly these dimensions:
 
   * the trainee output schema (:attr:`RftTaskSpec.response_format`);
   * the grader (:attr:`RftTaskSpec.build_grader`, selected by reward variant);
@@ -17,7 +17,7 @@ A version varies in exactly these dimensions:
 
 The data splits themselves (``train.jsonl`` / ``valid.jsonl`` / ``eval.jsonl``
 with the trainee developer+user messages already baked in) live in
-``RFT/<task>/data/`` and are produced by that version's ``build_splits``
+``RFT/<task>/data/`` and are produced by the task's ``build_splits``
 script -- the spec only points at the directory.
 """
 
@@ -76,17 +76,11 @@ class Hparams:
 
 @dataclass(frozen=True, kw_only=True)
 class RftTaskSpec:
-    """Declarative description of one RFT task version.
-
-    Two versions of the *same* ``error_type`` (e.g. ``typo_v9`` / ``typo_v10``)
-    share an ``error_type`` and differ only in their trainee prompt, grader,
-    and data -- which is exactly what this dataclass isolates.
-    """
+    """Declarative description of one RFT task."""
 
     # Identity --------------------------------------------------------------
-    name: str  # unique registry key, e.g. "typo_v10"
-    error_type: str  # groups versions, e.g. "typo"
-    version: str  # e.g. "v10"
+    name: str  # unique registry key, e.g. "typo"
+    error_type: str  # taxonomy key, e.g. "typo"
 
     # Data + defaults -------------------------------------------------------
     data_dir: Path  # holds train/valid/eval jsonl
@@ -131,7 +125,6 @@ def make_spec(
     *,
     name: str,
     error_type: str,
-    version: str,
     data_dir: Path,
     response_format: ResponseFormatBuilder,
     build_grader: GraderBuilder,
@@ -171,7 +164,6 @@ def make_spec(
     return RftTaskSpec(
         name=name,
         error_type=error_type,
-        version=version,
         data_dir=data_dir,
         base_model=base_model,
         default_suffix=default_suffix,

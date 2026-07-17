@@ -36,8 +36,21 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
-from ._helpers import _has_whitespace_anomaly, _normalize_trivial
-from .schema import BenchmarkCell, LabelStatus, LabelTarget
+from ._helpers import (
+    _derive_trivial_fix,
+    _has_whitespace_anomaly,
+    _is_low_value_fix,
+    _looks_like_instruction,
+    _normalize_trivial,
+)
+from .schema import (
+    BenchmarkCell,
+    Exclusion,
+    ExclusionScope,
+    IgnoreRecord,
+    LabelStatus,
+    LabelTarget,
+)
 from .store import LabelStore
 
 
@@ -52,6 +65,17 @@ from .store import LabelStore
 # unknown column); the materializer falls back to ``row_values`` and
 # finally to the empty string.
 ValueResolver = Callable[[str, int, str], Optional[str]]
+
+LEAN_EXPORT_ERROR_TYPES = frozenset({"typo"})
+LEAN_BENCHMARK_FIELDS = (
+    "source",
+    "row",
+    "column",
+    "original_value",
+    "label",
+    "corrected_value",
+    "error_types",
+)
 
 
 _VERDICT: Dict[str, str] = {
@@ -165,6 +189,7 @@ def materialize_label_benchmark(
     *,
     value_resolver: Optional[ValueResolver] = None,
     cell_note_overrides: Optional[Mapping[Tuple[str, int, str], str]] = None,
+    row_verdict_overrides: Optional[Mapping[Tuple[str, int, str], Any]] = None,
 ) -> List[BenchmarkCell]:
     """Return one :class:`BenchmarkCell` per (source, row, column) cell.
 
@@ -249,28 +274,29 @@ def materialize_label_benchmark(
         # ``suggested_fix`` map when the synthesis didn't fill one in.
         llm_suggestion_per_col = _llm_suggestion_for_cluster(cluster)
 
-        # Propagate the cluster verdict across every row the cluster
-        # covers: the primary ``row`` plus every entry in any
-        # detection's ``affected_rows``. Relation rules (and
-        # row_duplication groups) fire on N rows but collapse to ONE
-        # cluster — without this fan-out, the benchmark would only
-        # carry a verdict for the representative row and silently
-        # drop the rest. De-duped + sorted so the emit order is
-        # deterministic; the primary row stays first.
+        # Calculation inconsistency verdicts apply only to their anchor
+        # row. FD and row-duplication findings still fan out across every
+        # affected row represented by their shared cluster.
         rows_to_emit: List[int] = [int(row)]
         _seen_rows = {int(row)}
-        for det in cluster.get("detections") or []:
-            if not isinstance(det, Mapping):
-                continue
-            for r in det.get("affected_rows") or ():
-                try:
-                    r_int = int(r)
-                except (TypeError, ValueError):
+        should_fan_out = not any(
+            error_type
+            in {"row_calculation_inconsistency", "string_calculation_inconsistency"}
+            for error_type in error_types
+        )
+        if should_fan_out:
+            for det in cluster.get("detections") or []:
+                if not isinstance(det, Mapping):
                     continue
-                if r_int in _seen_rows:
-                    continue
-                _seen_rows.add(r_int)
-                rows_to_emit.append(r_int)
+                for affected_row in det.get("affected_rows") or ():
+                    try:
+                        affected_row = int(affected_row)
+                    except (TypeError, ValueError):
+                        continue
+                    if affected_row in _seen_rows:
+                        continue
+                    _seen_rows.add(affected_row)
+                    rows_to_emit.append(affected_row)
 
         for emit_row in rows_to_emit:
             for column in columns:
@@ -375,6 +401,8 @@ def materialize_label_benchmark(
                     # disagreeing fan-out can't downgrade an
                     # already-authoritative verdict to ``ambiguous``.
                     if is_anchor:
+                        if not existing.get("_anchor"):
+                            existing["note"] = label.note
                         existing["_anchor"] = True
                     if verdict == "error" and corrected_for_emit:
                         existing["corrected_value"] = (
@@ -399,39 +427,46 @@ def materialize_label_benchmark(
                         if v and v not in existing[field_]:
                             existing[field_].append(v)
 
-    # Fold in cell-level FN labels. A FN claims "this cell is an error
-    # the detector missed", so we emit it as label="error" with an
-    # empty cluster_ids list (caller can tell FN cells from TP cells by
-    # the absence of cluster_ids). FN labels that fall on a cell
-    # already marked TP / PARTIAL are silently superseded - the
-    # annotator effectively beat themselves to the call via the cluster
-    # path, so we keep the cluster record.
+    # Fold in standalone cell claims. FN / PARTIAL mean the missed cell
+    # is an error; UNSURE means it needs a second opinion. These labels
+    # have no enclosing cluster, so ``cluster_ids`` stays empty.
     for label in labels.values():
-        if label.target != LabelTarget.CELL or label.status != LabelStatus.FN:
+        if label.target != LabelTarget.CELL:
+            continue
+        if label.status in {LabelStatus.FN, LabelStatus.PARTIAL}:
+            cell_verdict = "error"
+        elif label.status == LabelStatus.UNSURE:
+            cell_verdict = "ambiguous"
+        else:
             continue
         if label.row is None or not label.source:
             continue
-        # A FN with an EMPTY column is a ROW-LEVEL finding: the only
-        # producer is the row-duplication trivial tagger, which writes
+        # An EMPTY column is a ROW-LEVEL finding: the only producer is
+        # the row-duplication trivial tagger, which writes
         # ``column=""`` at every byte-identical (exact-duplicate) row the
         # LLM missed. It exports as a ``row_duplication`` "error" record
         # using the same sentinel ``column=""`` the cluster path uses for
         # row_duplication verdicts, so the by-error-type bundle buckets
-        # it correctly. Cell-level FNs (whitespace tagger etc.) keep their
-        # real column and an empty ``error_types``.
-        fn_column = label.column or ""
-        is_row_level = fn_column == ""
-        key = _cell_key(label.source, int(label.row), fn_column)
+        # it correctly. Cell-level claims keep their real column and may
+        # carry an empty ``error_types`` list.
+        cell_column = label.column or ""
+        is_row_level = cell_column == ""
+        key = _cell_key(label.source, int(label.row), cell_column)
         existing = cells.get(key)
         if existing is not None and existing["label"] == "error":
-            # Already an error record; just merge annotator note/credit.
+            # A confirmed cluster error outranks a standalone unsure claim.
             if label.annotator not in existing["annotators"]:
                 existing["annotators"].append(label.annotator)
-            if label.corrected_value and not existing.get("corrected_value"):
+            if (
+                cell_verdict == "error"
+                and label.corrected_value
+                and not existing.get("corrected_value")
+            ):
                 existing["corrected_value"] = label.corrected_value
             continue
-        if existing is not None and existing["label"] != "error":
-            # Cluster says clean/ambiguous, cell says error: ambiguous.
+        if existing is not None:
+            # An unsure claim makes a clean cluster ambiguous. A missed-error
+            # claim conflicting with a clean/ambiguous cluster is ambiguous too.
             existing["label"] = "ambiguous"
             existing["corrected_value"] = None
             if label.annotator not in existing["annotators"]:
@@ -440,24 +475,27 @@ def materialize_label_benchmark(
         cells[key] = {
             "source": label.source,
             "row": int(label.row),
-            "column": fn_column,
-            # FN cells were never enclosed in a cluster, so we have no
+            "column": cell_column,
+            # Standalone cells were never enclosed in a cluster, so we have no
             # row_values snapshot. Fall back to the resolver (live CSV
             # value) so the exported record is still self-contained.
             # Row-level findings have no single cell value, so they carry
             # an empty ``original_value`` (matching the cluster path).
             "original_value": (
                 "" if is_row_level
-                else _lookup_value(label.source, int(label.row), fn_column)
+                else _lookup_value(label.source, int(label.row), cell_column)
             ),
-            "label": "error",
-            "corrected_value": label.corrected_value,
-            # Pure FN cells have no enclosing cluster, hence no LLM
-            # suggestion to record. The benchmark consumer can tell FN
-            # cells from TP/PARTIAL ones via the empty ``cluster_ids``
-            # list.
+            "label": cell_verdict,
+            "corrected_value": (
+                label.corrected_value if cell_verdict == "error" else None
+            ),
+            # Standalone cells have no enclosing cluster, hence no LLM
+            # suggestion to record. Empty ``cluster_ids`` distinguishes
+            # them from detector-backed cluster verdicts.
             "llm_suggested_value": None,
-            "error_types": ["row_duplication"] if is_row_level else [],
+            "error_types": (
+                ["row_duplication"] if is_row_level else list(label.error_types)
+            ),
             "detection_ids": [],
             "cluster_ids": [],
             "annotators": [label.annotator],
@@ -507,14 +545,34 @@ def materialize_label_benchmark(
             continue
         payload["corrected_value"] = suggestion_str
 
-    # Apply per-cell note overrides: a single (source, row, column)
-    # may carry a free-text note that supersedes the cluster's note.
-    # Used when one cell in a cluster needs a different annotation
-    # from its siblings (e.g. the operator wants to strip the
-    # auto-applied TRIVIAL tag for one row only). Empty / missing
-    # entries fall through so the cluster note still wins.
+    # A per-row verdict supersedes the enclosing cluster's fanned-out
+    # verdict for that one cell without altering peer-row coverage.
+    if row_verdict_overrides:
+        for payload in cells.values():
+            key = (
+                payload.get("source", ""),
+                int(payload.get("row", 0)),
+                payload.get("column", ""),
+            )
+            override = row_verdict_overrides.get(key)
+            if override is None:
+                continue
+            verdict = _VERDICT.get(override.status.value)
+            if verdict is None:
+                continue
+            payload["label"] = verdict
+            payload["corrected_value"] = (
+                override.corrected_value if verdict == "error" else None
+            )
+            if override.note:
+                payload["note"] = override.note
+
+    # ``cell_notes.jsonl`` now carries per-cell corrected-value overrides.
+    # Apply these last so an explicit cell fix wins over cluster and row fixes.
     if cell_note_overrides:
         for payload in cells.values():
+            if payload.get("label") != "error":
+                continue
             key = (
                 payload.get("source", ""),
                 int(payload.get("row", 0)),
@@ -523,11 +581,228 @@ def materialize_label_benchmark(
             override = cell_note_overrides.get(key)
             if override is None:
                 continue
-            payload["note"] = override
+            payload["corrected_value"] = override
+
+    # Mark only rejected, cluster-backed cosmetic LLM flags as low value.
+    for payload in cells.values():
+        if payload.get("label") != "clean" or not payload.get("cluster_ids"):
+            continue
+        suggestion = payload.get("llm_suggested_value")
+        if (
+            isinstance(suggestion, str)
+            and suggestion
+            and _is_low_value_fix(payload.get("original_value") or "", suggestion)
+        ):
+            payload["low_value"] = True
 
     for payload in cells.values():
         payload.pop("_anchor", None)
     return [BenchmarkCell(**payload) for payload in cells.values()]
+
+
+def materialize_skipped_cells(
+    clusters: Iterable[Mapping[str, Any]],
+    store: LabelStore,
+    *,
+    value_resolver: Optional[ValueResolver] = None,
+    exclude_keys: Optional[set[Tuple[str, int, str]]] = None,
+) -> List[BenchmarkCell]:
+    """Materialize cells deferred by cluster-level ``skip`` verdicts."""
+    labels = store.latest_by_target()
+    excluded = exclude_keys or set()
+    cells: Dict[Tuple[str, int, str], BenchmarkCell] = {}
+
+    for cluster in clusters:
+        cid = cluster.get("cluster_id")
+        label = labels.get(cid) if cid else None
+        if label is None or label.status != LabelStatus.SKIP:
+            continue
+        source = str(cluster.get("source") or "")
+        row = cluster.get("row")
+        if not source or row is None:
+            continue
+
+        columns = list(label.columns) if label.columns else list(cluster.get("columns") or [])
+        if not columns:
+            columns = [""]
+        primary_row = int(row)
+        rows_to_emit = [primary_row]
+        seen_rows = {primary_row}
+        should_fan_out = not any(
+            error_type
+            in {"row_calculation_inconsistency", "string_calculation_inconsistency"}
+            for error_type in cluster.get("error_types") or []
+        )
+        if should_fan_out:
+            for detection in cluster.get("detections") or []:
+                if not isinstance(detection, Mapping):
+                    continue
+                for affected_row in detection.get("affected_rows") or ():
+                    try:
+                        affected_row = int(affected_row)
+                    except (TypeError, ValueError):
+                        continue
+                    if affected_row not in seen_rows:
+                        seen_rows.add(affected_row)
+                        rows_to_emit.append(affected_row)
+
+        row_values = cluster.get("row_values") or {}
+        detection_ids = [
+            detection.get("issue_id", "")
+            for detection in cluster.get("detections") or []
+            if isinstance(detection, Mapping) and detection.get("issue_id")
+        ]
+        for emit_row in rows_to_emit:
+            for column in columns:
+                key = (source, emit_row, column)
+                if key in excluded:
+                    continue
+                fallback = ""
+                if emit_row == primary_row and row_values.get(column) is not None:
+                    fallback = str(row_values[column])
+                original_value = fallback
+                if value_resolver is not None:
+                    try:
+                        resolved = value_resolver(source, emit_row, column)
+                    except Exception:  # noqa: BLE001 - a failed resolver must not abort export.
+                        resolved = None
+                    if resolved is not None:
+                        original_value = str(resolved)
+
+                existing = cells.get(key)
+                if existing is not None:
+                    if cid and cid not in existing.cluster_ids:
+                        existing.cluster_ids.append(cid)
+                    for detection_id in detection_ids:
+                        if detection_id not in existing.detection_ids:
+                            existing.detection_ids.append(detection_id)
+                    continue
+                cells[key] = BenchmarkCell(
+                    source=source,
+                    row=emit_row,
+                    column=column,
+                    original_value=original_value,
+                    label="skip",
+                    error_types=list(cluster.get("error_types") or []),
+                    detection_ids=list(detection_ids),
+                    cluster_ids=[cid] if cid else [],
+                    annotators=[label.annotator],
+                    note=label.note,
+                )
+    return list(cells.values())
+
+
+def materialize_ignored_cells(
+    skipped_cells: Iterable[BenchmarkCell],
+    exclusions: Iterable[Exclusion],
+) -> List[IgnoreRecord]:
+    """Merge deferred cells and active scope exclusions into immunity records."""
+    records = [
+        IgnoreRecord(
+            source=cell.source,
+            row=cell.row,
+            column=cell.column,
+            original_value=cell.original_value,
+            reason="skip",
+        )
+        for cell in skipped_cells
+    ]
+
+    active = [exclusion for exclusion in exclusions if not exclusion.deleted]
+    scope_order = {
+        ExclusionScope.CSV: 0,
+        ExclusionScope.ROWS: 1,
+        ExclusionScope.COLUMNS: 2,
+    }
+    for exclusion in sorted(active, key=lambda item: scope_order[item.scope]):
+        if exclusion.scope == ExclusionScope.CSV:
+            records.append(
+                IgnoreRecord(
+                    source=exclusion.source,
+                    reason="exclusion",
+                    scope=exclusion.scope.value,
+                )
+            )
+        elif exclusion.scope == ExclusionScope.ROWS:
+            records.extend(
+                IgnoreRecord(
+                    source=exclusion.source,
+                    row=row,
+                    reason="exclusion",
+                    scope=exclusion.scope.value,
+                )
+                for row in exclusion.rows
+            )
+        elif exclusion.scope == ExclusionScope.COLUMNS:
+            records.extend(
+                IgnoreRecord(
+                    source=exclusion.source,
+                    column=column,
+                    reason="exclusion",
+                    scope=exclusion.scope.value,
+                )
+                for column in exclusion.columns
+            )
+    return records
+
+
+def _concrete_corrected_value(cell: BenchmarkCell) -> Any:
+    """Resolve an error cell's correction to literal value(s), never prose."""
+    original = cell.original_value.strip()
+
+    def _concrete(value: Any) -> List[str]:
+        values = value if isinstance(value, list) else [value]
+        return [
+            item
+            for item in values
+            if isinstance(item, str) and item and not _looks_like_instruction(item)
+        ]
+
+    def _useful(values: List[str]) -> bool:
+        return any(value.strip() != original for value in values)
+
+    corrected = _concrete(cell.corrected_value)
+    if corrected and _useful(corrected):
+        return corrected if isinstance(cell.corrected_value, list) else corrected[0]
+
+    suggested = _concrete(cell.llm_suggested_value)
+    if suggested and _useful(suggested):
+        return suggested[0]
+
+    for instruction in (cell.corrected_value, cell.llm_suggested_value):
+        if not isinstance(instruction, str):
+            continue
+        derived = _derive_trivial_fix(cell.original_value, instruction)
+        if derived and derived.strip() != original:
+            return derived
+    return None
+
+
+def lean_benchmark_record(cell: BenchmarkCell) -> Dict[str, Any]:
+    """Project a benchmark cell to the compact downstream evaluation schema."""
+    payload = cell.model_dump()
+    payload["corrected_value"] = (
+        _concrete_corrected_value(cell) if cell.label == "error" else None
+    )
+    return {field: payload[field] for field in LEAN_BENCHMARK_FIELDS}
+
+
+def full_benchmark_record(cell: BenchmarkCell) -> Dict[str, Any]:
+    """Return full provenance while ensuring error corrections are literal."""
+    payload = cell.model_dump()
+    if cell.label == "error":
+        payload["corrected_value"] = _concrete_corrected_value(cell)
+    return payload
+
+
+def benchmark_record_for_export(
+    cell: BenchmarkCell,
+    error_type: str,
+) -> Dict[str, Any]:
+    """Choose the compact schema for cell-level types and full schema otherwise."""
+    if error_type in LEAN_EXPORT_ERROR_TYPES:
+        return lean_benchmark_record(cell)
+    return full_benchmark_record(cell)
 
 
 def write_benchmark(
@@ -537,6 +812,7 @@ def write_benchmark(
     *,
     value_resolver: Optional[ValueResolver] = None,
     cell_note_overrides: Optional[Mapping[Tuple[str, int, str], str]] = None,
+    row_verdict_overrides: Optional[Mapping[Tuple[str, int, str], Any]] = None,
 ) -> Path:
     """Materialise the benchmark and write it to ``out_path`` as JSONL.
 
@@ -551,6 +827,7 @@ def write_benchmark(
     rows = materialize_label_benchmark(
         clusters, store, value_resolver=value_resolver,
         cell_note_overrides=cell_note_overrides,
+        row_verdict_overrides=row_verdict_overrides,
     )
     tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
     with tmp_path.open("w", encoding="utf-8") as fh:
@@ -691,6 +968,7 @@ def materialize_label_benchmark_by_error_type(
     *,
     value_resolver: Optional[ValueResolver] = None,
     cell_note_overrides: Optional[Mapping[Tuple[str, int, str], str]] = None,
+    row_verdict_overrides: Optional[Mapping[Tuple[str, int, str], Any]] = None,
 ) -> Dict[str, List[BenchmarkCell]]:
     """Materialise the benchmark grouped by ``error_type``.
 
@@ -711,6 +989,7 @@ def materialize_label_benchmark_by_error_type(
     cells = materialize_label_benchmark(
         clusters, store, value_resolver=value_resolver,
         cell_note_overrides=cell_note_overrides,
+        row_verdict_overrides=row_verdict_overrides,
     )
     buckets: Dict[str, List[BenchmarkCell]] = {}
     for cell in cells:
@@ -740,6 +1019,7 @@ def write_benchmark_by_error_type(
     *,
     value_resolver: Optional[ValueResolver] = None,
     cell_note_overrides: Optional[Mapping[Tuple[str, int, str], str]] = None,
+    row_verdict_overrides: Optional[Mapping[Tuple[str, int, str], Any]] = None,
 ) -> Dict[str, Path]:
     """Write one JSONL per error_type into ``out_dir``.
 
@@ -760,6 +1040,7 @@ def write_benchmark_by_error_type(
     buckets = materialize_label_benchmark_by_error_type(
         clusters, store, value_resolver=value_resolver,
         cell_note_overrides=cell_note_overrides,
+        row_verdict_overrides=row_verdict_overrides,
     )
     written: Dict[str, Path] = {}
     for slug, rows in buckets.items():
@@ -773,4 +1054,3 @@ def write_benchmark_by_error_type(
         os.replace(tmp_path, path)
         written[slug] = path
     return written
-

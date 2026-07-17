@@ -4474,22 +4474,35 @@ function renderCorrectionsBlock(item) {
     const s = valueIdx.get(v);
     const saved = savedCorr[v];
     const draft = draftMap[v];
-    let action, text;
+    let action, items;
     if (draft) {
       action = draft.action;
-      text = draft.text;
+      // Backward-compat: older drafts stored a comma-separated ``text``.
+      items = Array.isArray(draft.items)
+        ? draft.items
+        : String(draft.text || "").split(",").map((t) => t.trim()).filter(Boolean);
     } else if (saved !== undefined) {
       action = "accept";
-      text = Array.isArray(saved) ? saved.join(", ") : String(saved);
+      items = Array.isArray(saved) ? saved.slice() : [String(saved)];
     } else if (s) {
       const consensusList = Array.isArray(s.suggestion) ? s.suggestion : [];
       const lone = consensusList.length === 1 && consensusList[0] === v;
       action = lone ? "drop" : (consensusList.length ? "accept" : "drop");
-      text = consensusList.join(", ");
+      items = consensusList.slice();
     } else {
       action = "drop";
-      text = "";
+      items = [];
     }
+    // Always render at least one input row so an accepted value stays editable.
+    const displayItems = items.length ? items : [""];
+    const dis = action === "drop" ? " disabled" : "";
+    const itemsHtml = displayItems.map((val) => `
+            <div class="cc-correction-item-row">
+              <input type="text" class="cc-correction-item"
+                     value="${escape(val)}" placeholder="canonical value"${dis}/>
+              <button type="button" class="cc-correction-item-remove"
+                      title="Remove this value"${dis}>&times;</button>
+            </div>`).join("");
     const agree = s ? `${(s.agreement || 0).toFixed(2)} (${s.n_valid_samples}/${s.n_total_samples})` : "";
     const rowCount = s ? s.rows.length : 0;
     return `
@@ -4506,10 +4519,9 @@ function renderCorrectionsBlock(item) {
           </select>
         </td>
         <td>
-          <input type="text" class="cc-correction-text"
-                 value="${escape(text)}"
-                 placeholder="canonical value (comma-separate for multi-direction)"
-                 ${action === "drop" ? "disabled" : ""}/>
+          <div class="cc-correction-items">${itemsHtml}
+          </div>
+          <button type="button" class="cc-correction-add"${dis}>+ Add value</button>
         </td>
         <td class="muted" style="font-size:10.5px;">${escape(agree)}</td>
       </tr>
@@ -4519,10 +4531,10 @@ function renderCorrectionsBlock(item) {
   container.innerHTML = `
     <h2>Per-value corrections</h2>
     <div class="muted" style="font-size:11px; margin-bottom:6px;">
-      Edit the suggested correction for each value. Use a comma-separated
-      list for bi-directional / multi-canonical cases (e.g.
-      <code>NY, New York</code>). Choose <b>Drop</b> to exclude the value
-      from the exported benchmark.
+      Edit the suggested correction for each value. Use <b>+ Add value</b> to
+      list multiple acceptable canonical values for bi-directional /
+      multi-canonical cases (e.g. <code>NY</code> and <code>New York</code>).
+      Choose <b>Drop</b> to exclude the value from the exported benchmark.
     </div>
     <table class="cc-corrections-table">
       <thead>
@@ -4549,21 +4561,63 @@ function renderCorrectionsBlock(item) {
     container.querySelectorAll(".cc-correction-row").forEach((tr) => {
       const v = tr.getAttribute("data-value") || "";
       const action = tr.querySelector(".cc-correction-action")?.value || "drop";
-      const text = tr.querySelector(".cc-correction-text")?.value || "";
-      draft[v] = { action, text };
+      const items = Array.from(tr.querySelectorAll(".cc-correction-item"))
+        .map((inp) => inp.value);
+      draft[v] = { action, items };
     });
     ccState.draft = draft;
+  };
+  // Build a fresh list-editor input row (used when the operator clicks
+  // "+ Add value"); interactions are handled via delegation on the items box.
+  const makeItemRow = () => {
+    const row = document.createElement("div");
+    row.className = "cc-correction-item-row";
+    const inp = document.createElement("input");
+    inp.type = "text";
+    inp.className = "cc-correction-item";
+    inp.placeholder = "canonical value";
+    const rm = document.createElement("button");
+    rm.type = "button";
+    rm.className = "cc-correction-item-remove";
+    rm.title = "Remove this value";
+    rm.innerHTML = "&times;";
+    row.appendChild(inp);
+    row.appendChild(rm);
+    return row;
   };
   container.querySelectorAll(".cc-correction-action").forEach((sel) => {
     sel.addEventListener("change", () => {
       const tr = sel.closest(".cc-correction-row");
-      const input = tr?.querySelector(".cc-correction-text");
-      if (input) input.disabled = (sel.value === "drop");
+      const disabled = sel.value === "drop";
+      tr?.querySelectorAll(
+        ".cc-correction-item, .cc-correction-item-remove, .cc-correction-add",
+      ).forEach((el) => { el.disabled = disabled; });
       persistDraft();
     });
   });
-  container.querySelectorAll(".cc-correction-text").forEach((inp) => {
-    inp.addEventListener("input", persistDraft);
+  container.querySelectorAll(".cc-correction-row").forEach((tr) => {
+    const itemsBox = tr.querySelector(".cc-correction-items");
+    const addBtn = tr.querySelector(".cc-correction-add");
+    if (itemsBox) {
+      itemsBox.addEventListener("input", (e) => {
+        if (e.target.classList?.contains("cc-correction-item")) persistDraft();
+      });
+      itemsBox.addEventListener("click", (e) => {
+        const rm = e.target.closest?.(".cc-correction-item-remove");
+        if (rm && itemsBox.contains(rm)) {
+          rm.closest(".cc-correction-item-row")?.remove();
+          persistDraft();
+        }
+      });
+    }
+    if (addBtn && itemsBox) {
+      addBtn.addEventListener("click", () => {
+        const row = makeItemRow();
+        itemsBox.appendChild(row);
+        row.querySelector("input")?.focus();
+        persistDraft();
+      });
+    }
   });
   container.querySelector(".cc-corrections-generate")
     ?.addEventListener("click", () => triggerSuggestCorrections(item));
@@ -4585,7 +4639,7 @@ async function triggerSuggestCorrections(item) {
   renderCorrectionsBlock(item);
   try {
     const res = await api(
-      `${API}/clusters/${encodeURIComponent(item.target_id)}/suggest-corrections`,
+      `${API}/column-cluster-suggest-corrections?cluster_id=${encodeURIComponent(item.target_id)}`,
       { method: "POST", body: JSON.stringify({}) },
     );
     ccState.phase = "results";
@@ -4613,20 +4667,23 @@ async function saveCorrectionsFromUI(item) {
   if (!container) return;
   const value_corrections = {};
   let invalid = false;
+  container.querySelectorAll(".cc-correction-invalid").forEach((el) =>
+    el.classList.remove("cc-correction-invalid"));
   container.querySelectorAll(".cc-correction-row").forEach((tr) => {
     const v = tr.getAttribute("data-value") || "";
     const action = tr.querySelector(".cc-correction-action")?.value || "drop";
-    const text = (tr.querySelector(".cc-correction-text")?.value || "").trim();
     if (action === "drop") return;
-    if (!text) {
-      invalid = true;
-      tr.querySelector(".cc-correction-text")?.classList.add("cc-correction-invalid");
-      return;
-    }
-    // Parse comma-separated lists; single-value -> scalar, multi -> list.
-    const parts = text.split(",").map((s) => s.trim()).filter(Boolean);
+    // Gather the list-editor values. Also split on commas so a value pasted
+    // as "NY, New York" into one box still expands into separate entries.
+    const parts = Array.from(tr.querySelectorAll(".cc-correction-item"))
+      .flatMap((inp) => (inp.value || "").split(","))
+      .map((s) => s.trim())
+      .filter(Boolean);
     if (parts.length === 0) {
       invalid = true;
+      tr.querySelector(".cc-correction-items")?.classList.add("cc-correction-invalid");
+      tr.querySelectorAll(".cc-correction-item").forEach((inp) =>
+        inp.classList.add("cc-correction-invalid"));
       return;
     }
     value_corrections[v] = parts.length === 1 ? parts[0] : parts;
@@ -4658,7 +4715,7 @@ async function saveCorrectionsFromUI(item) {
   document.body.classList.add("saving");
   try {
     const res = await api(
-      `${API}/clusters/${encodeURIComponent(item.target_id)}/corrections`,
+      `${API}/column-cluster-corrections?cluster_id=${encodeURIComponent(item.target_id)}`,
       {
         method: "POST",
         body: JSON.stringify({ value_corrections, note_tag }),
@@ -4684,7 +4741,7 @@ async function clearSavedCorrections(item) {
   if (!confirm("Clear all saved corrections for this cluster?")) return;
   try {
     const res = await api(
-      `${API}/clusters/${encodeURIComponent(item.target_id)}/corrections`,
+      `${API}/column-cluster-corrections?cluster_id=${encodeURIComponent(item.target_id)}`,
       {
         method: "POST",
         body: JSON.stringify({ value_corrections: {}, note_tag: "[manual]" }),
@@ -4726,7 +4783,7 @@ async function hydrateClusterCorrections(item) {
   let res;
   try {
     res = await api(
-      `${API}/clusters/${encodeURIComponent(item.target_id)}/corrections`,
+      `${API}/column-cluster-corrections?cluster_id=${encodeURIComponent(item.target_id)}`,
     );
   } catch (e) {
     // Surface in the console only; a failed hydration shouldn't

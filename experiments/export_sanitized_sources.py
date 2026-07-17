@@ -1,6 +1,6 @@
 """Emit a SANITISED copy of the merged-benchmark source corpus.
 
-Produces a version of the ~1000 source CSVs behind ``benchmark/merged_v7``
+Produces a version of the ~1000 source CSVs behind ``benchmark/merged_v8``
 with every operator EXCLUSION applied, so a downstream data-cleaning step
 sees exactly the slices the benchmark actually scores:
 
@@ -13,12 +13,12 @@ run in :data:`experiments.export_merged_benchmark.REGISTRY` (the same runs
 that feed ``benchmark_cell.json`` / ``benchmark_row.json``), so a cell
 excluded under ANY error type is removed once, run-agnostic.
 
-After exclusions, the registered PBI pool contains only 497 CSVs. The exporter
-deterministically backfills it to 501 with readable, non-empty CSVs from
-``data/curated_pbi_mt100_dedup`` that are unique by basename and SHA-256
-content. It prefers distinct workbooks and records each source path and hash in
-``MANIFEST.json``. These four files are source-corpus backfills; they do not add
-gold cell/row labels.
+The registered PBI pool currently contains 504 CSVs and writes 500 after four
+whole-file exclusions. If a future exclusion drops it below 500, the exporter
+can deterministically backfill with readable, non-empty CSVs from
+``data/curated_pbi_mt100_dedup`` that are unique by basename and SHA-256.
+The Excel/Bing21 pool writes 500 after 17 whole-file exclusions, including seven
+reviewed-clean corpus-balance files with no benchmark cell or row records.
 
 The inter-table sheets carry no exclusions, but the merged benchmark's
 ``inter_table_inconsistency`` findings reference a handful of them. To keep
@@ -44,7 +44,7 @@ is read from, so the surviving cells still line up.
 Read-only w.r.t. the runs and the source corpora. Run::
 
     python -m experiments.export_sanitized_sources \
-        --out benchmark/merged_v7/sanitized_sources
+        --out benchmark/merged_v8/sanitized_sources
 """
 
 from __future__ import annotations
@@ -219,7 +219,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
         "--out",
-        default=str(PROJECT_ROOT / "benchmark" / "merged_v7" / "sanitized_sources"),
+        default=str(PROJECT_ROOT / "benchmark" / "merged_v8" / "sanitized_sources"),
         help="output directory (a sibling .zip is written too)",
     )
     ap.add_argument(
