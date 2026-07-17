@@ -1,0 +1,15 @@
+Requested upstream URL:
+https://github.com/BigDaMa/SequentialPatternErrorDetection
+
+The requested URL returned GitHub 404 during integration.  The public BigDaMa
+repository containing the ED2 CIKM 2019 code is:
+https://github.com/BigDaMa/ExampleDrivenErrorDetection
+
+It is vendored unchanged at:
+external/ed2/SequentialPatternErrorDetection
+
+Pinned commit:
+ae8bc24fc441957d9a29e5fa4cc247f1805d8b4d
+
+Commit subject:
+Merge branch 'master' of github.com:BigDaMa/ExampleDrivenErrorDetection

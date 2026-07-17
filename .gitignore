@@ -83,17 +83,68 @@ backups/
 *.pfx
 *secret*
 
-# external/: ignore ad-hoc experiments, vendored repositories, environments,
-# caches, and scratch data by default. The maintained baseline package is the
-# only publishable exception.
+# external/: ignore vendored repositories, environments, caches, downloaded
+# assets, predictions, and scratch data by default. Publish only project-authored
+# baseline wrappers, documentation, setup manifests, and provenance pins.
 external/*
 !external/__init__.py
+!external/README.md
+!external/setup_upstreams.sh
 !external/baseline/
 !external/baseline/**
 external/baseline/**/__pycache__/
 external/baseline/**/*.py[cod]
 
+# Source-only baseline wrappers. Direct children remain ignored unless they
+# match one of the explicit source/documentation patterns below.
+!external/*/
+external/*/*
+!external/*/*.py
+!external/*/README.md
+!external/*/AGENTS.md
+!external/*/.gitignore
+!external/*/requirements*.txt
+!external/*/setup.sh
+!external/*/*COMMIT*
+!external/*/*commit*
+!external/*/PINNED_UPSTREAM.txt
+!external/*/RUNNABILITY.md
+
+# Shared synthetic few-shot helper; materialized temp tables remain ignored.
+!external/synth_fewshot/inject.py
+
+# Project-native LLM baseline prompt assets.
+!external/llm/prompts/
+external/llm/prompts/*
+!external/llm/prompts/*.yaml
+
+# Black-box product baseline harnesses. Browser profiles, workbooks, captures,
+# screenshots, outputs, and environments remain ignored by the parent rules.
+!external/excel_copilot_local/scripts/
+external/excel_copilot_local/scripts/*
+!external/excel_copilot_local/scripts/*.py
+!external/sheets_cleanup/scripts/
+external/sheets_cleanup/scripts/*
+!external/sheets_cleanup/scripts/*.py
+!external/sheets_cleanup/scripts/*.sh
+
+# Derived reports/presentations are not baseline implementations.
+external/baseline_llm_inconsistency/*
+external/baseline_slide/*
+external/benchmark_gaps/*
+external/GPT_score/*
+external/model_inconsistency_result/*
+
+# Known generated or copied direct files that must not be published.
+external/cleanagent/annotations.json
+external/cocoon/cocoon_prompt.py
+external/cocoon/venv_requirements_frozen.txt
+external/fm_data_tasks/venv_requirements_frozen.txt
+external/holoclean/example_*
+external/holoclean/pg.log
+
 # Editor
+/.github/
 .vscode/
 .idea/
 *.swp

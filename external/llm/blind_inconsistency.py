@@ -26,7 +26,7 @@ Flow:
 1. Walk ``--source-dir`` for ``*.xlsx/*.csv`` paths.
 2. For each ``(source, column)``, build a prompt from the column's
    distinct values + counts and ask the LLM to surface
-   normalisation groups (see ``prompts/baseline_inconsistency.yaml``).
+   normalisation groups (see ``external/llm/prompts/inconsistency.yaml``).
 3. Expand every group into row-level predictions
    (``{source, row, column, original_value, predicted_correction,
    predicted_kind}``) by looking up which rows hold each value.
@@ -42,7 +42,7 @@ Flow:
 
 CLI:
 
-    python -m experiments.benchmark_llm_baseline \
+    python -m external.llm.blind_inconsistency \
         --source-dir data/source_inconsistency_bing21 \
         --benchmark benchmark/benchmark_inconsistency_20260513T090000Z_gpt5-family.jsonl \
         --max-sources 2 \
@@ -61,7 +61,6 @@ import datetime as _dt
 import hashlib
 import json
 import logging
-import os
 import re
 import sys
 import time
@@ -73,7 +72,11 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import yaml
 
-from src.core.llm_client import LLMClient
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.core.llm_client import LLMClient  # noqa: E402
 
 logger = logging.getLogger("benchmark_llm_baseline")
 
@@ -706,7 +709,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--prompt", type=Path,
-        default=Path("prompts/baseline_inconsistency.yaml"),
+        default=PROJECT_ROOT / "external" / "llm" / "prompts" / "inconsistency.yaml",
     )
     parser.add_argument(
         "--output-dir", type=Path, default=None,

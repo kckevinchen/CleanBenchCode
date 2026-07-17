@@ -19,12 +19,12 @@ Output is a self-contained run dir under ``--output-dir`` with:
   * ``RUN_STATUS.json`` -- in_progress / completed / failed.
 
 The runner does NOT score predictions itself; that's
-:mod:`experiments.score_precision_baseline` against the benchmark
+:mod:`external.llm.score_precision` against the benchmark
 JSONLs.
 
 Example::
 
-    python -m experiments.run_precision_baseline \\
+    python -m external.llm.precision \\
         --source-dir data/source_inconsistency_bing21 \\
         --error-types typo,inconsistency,numeric_outlier,semantic_incompatible \\
         --concurrency 20
@@ -49,7 +49,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import yaml
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -77,7 +77,7 @@ DEFAULT_ERROR_TYPES = (
 
 # Maps error_type -> prompt YAML path (project-relative).
 PROMPT_PATHS = {
-    et: f"prompts/precision_baseline_{et}.yaml"
+    et: f"external/llm/prompts/precision_{et}.yaml"
     for et in DEFAULT_ERROR_TYPES
 }
 

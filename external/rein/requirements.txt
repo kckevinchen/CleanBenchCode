@@ -1,0 +1,8 @@
+# Pinned deps for the REIN-on-benchmark detector runner (external/rein/venv).
+# raha 1.x calls DataFrame.applymap (removed in pandas 3.0) -> pin pandas 2.2.x.
+# numpy is constrained by the resolved scipy (needs >=2.0); the stack below is
+# the verified working combination on Python 3.12.
+raha
+pandas==2.2.3
+numpy>=2.0,<2.8
+scikit-learn

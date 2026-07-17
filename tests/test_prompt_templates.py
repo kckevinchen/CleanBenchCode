@@ -1,4 +1,5 @@
-"""Smoke tests for every YAML prompt template under ``prompts/``.
+"""Smoke tests for YAML prompt templates under ``prompts/`` and
+``external/llm/prompts/``.
 
 These guard against drift between the placeholders a template expects
 (e.g. ``{table_overview}``) and the kwargs the corresponding renderer
@@ -21,6 +22,9 @@ import pytest
 import yaml
 
 PROMPT_DIR = Path(__file__).resolve().parents[1] / "prompts"
+EXTERNAL_LLM_PROMPT_DIR = (
+    Path(__file__).resolve().parents[1] / "external" / "llm" / "prompts"
+)
 
 
 # Per-prompt-file kwargs covering every placeholder the matching
@@ -204,35 +208,35 @@ PROMPT_FIXTURES: Dict[str, Dict[str, str]] = {
     },
     # Single-column baseline detectors: each scans one column's value
     # vocabulary. They share the same placeholder set.
-    "baseline_inconsistency.yaml": {
+    "inconsistency.yaml": {
         "source": "smoke.csv",
         "column": "State",
         "distinct_count": "3",
         "truncated_hint": "",
         "value_list": "  - 'CA' (count=18)\n  - 'Calif.' (count=6)",
     },
-    "precision_baseline_inconsistency.yaml": {
+    "precision_inconsistency.yaml": {
         "source": "smoke.csv",
         "column": "State",
         "distinct_count": "3",
         "truncated_hint": "",
         "value_list": "  - 'CA' (count=18)\n  - 'Calif.' (count=6)",
     },
-    "precision_baseline_numeric_outlier.yaml": {
+    "precision_numeric_outlier.yaml": {
         "source": "smoke.csv",
         "column": "Amount",
         "distinct_count": "3",
         "truncated_hint": "",
         "value_list": "  - '100' (count=18)\n  - '1000000' (count=1)",
     },
-    "precision_baseline_semantic_incompatible.yaml": {
+    "precision_semantic_incompatible.yaml": {
         "source": "smoke.csv",
         "column": "Unit",
         "distinct_count": "3",
         "truncated_hint": "",
         "value_list": "  - 'kg' (count=18)\n  - 'banana' (count=1)",
     },
-    "precision_baseline_typo.yaml": {
+    "precision_typo.yaml": {
         "source": "smoke.csv",
         "column": "Name",
         "distinct_count": "3",
@@ -241,7 +245,7 @@ PROMPT_FIXTURES: Dict[str, Dict[str, str]] = {
     },
     # Adjudicates one proposed inconsistency group against the rest of
     # the column's vocabulary.
-    "baseline_inconsistency_judge.yaml": {
+    "inconsistency_judge.yaml": {
         "source": "smoke.csv",
         "column": "State",
         "distinct_count": "3",
@@ -258,7 +262,9 @@ PROMPT_FIXTURES: Dict[str, Dict[str, str]] = {
 
 
 def _iter_prompt_files() -> Iterable[Path]:
-    return sorted(PROMPT_DIR.glob("*.yaml"))
+    return sorted(PROMPT_DIR.glob("*.yaml")) + sorted(
+        EXTERNAL_LLM_PROMPT_DIR.glob("*.yaml")
+    )
 
 
 @pytest.mark.parametrize(

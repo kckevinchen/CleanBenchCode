@@ -200,7 +200,7 @@ src/core/                detection, clustering, relation, and report logic
 src/adaptive/            repeated-pass coverage estimation
 src/labeling/            FastAPI workbench and append-only stores
 frontend/labeling/       labeling UI
-external/baseline/       maintained comparison baselines
+external/                comparison baseline catalog and source wrappers
 RFT/                     experimental reinforcement fine-tuning engine
 scripts/run_server.sh    detached workbench server
 ```
@@ -208,19 +208,27 @@ scripts/run_server.sh    detached workbench server
 The code, prompt language, and runtime settings are separated intentionally.
 Change the taxonomy in YAML rather than embedding policy in Python.
 
-## Maintained external baseline
+## External baselines
 
-The tracked baseline package lives under `external/baseline/`:
+Project-authored wrappers for LLM, classical, published research, spell-check,
+repair, and black-box product baselines live under `external/`. The repository
+tracks wrapper source and provenance, not upstream clones, environments,
+checkpoints, data, caches, predictions, or result files.
+
+Start with the catalog:
 
 ```bash
 python -m external.baseline.prompt
-python -m external.baseline.label_gpt55 --help
-python -m external.baseline.inconsistency.optimize --help
+python -m external.llm.precision --help
+python external/rein/run_rein.py --help
+python external/classical/run_classical.py --help
+python -m external.normalization.run --help
 ```
 
-See [`external/baseline/README.md`](external/baseline/README.md) for its setup and
-scoring workflow. Other content under `external/` is local experimental scratch
-and remains ignored.
+See [`external/README.md`](external/README.md) for every method, supervision
+level, setup requirements, upstream provenance, licensing caveats, and support
+status. The self-contained GPT-5.5/inconsistency package remains documented in
+[`external/baseline/README.md`](external/baseline/README.md).
 
 ## Testing
 
@@ -275,5 +283,5 @@ RFT or shared pipeline code.
 - [`LABELING_GUIDE.md`](LABELING_GUIDE.md): complete human labeling workflow.
 - [`AGENTS.md`](AGENTS.md): architecture, invariants, and validation guidance for
   coding agents.
-- [`external/baseline/README.md`](external/baseline/README.md): maintained
-  baseline methods.
+- [`external/README.md`](external/README.md): complete baseline catalog,
+  provenance, and support status.

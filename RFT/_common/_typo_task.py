@@ -28,7 +28,7 @@ and, when the cell is a typo, a correction that matches the gold up
 to trivial normalisation.
 
 Why single-cell (and not whole-column like
-``prompts/precision_baseline_typo.yaml`` does)?
+``external/llm/prompts/precision_typo.yaml`` does)?
 
 * RFT score-model graders are most stable with one well-defined output
   per input. The whole-column variant would require set-based

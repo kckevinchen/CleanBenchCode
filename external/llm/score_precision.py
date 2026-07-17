@@ -1,4 +1,4 @@
-"""Score predictions from ``run_precision_baseline`` against the labeled
+"""Score predictions from ``external.llm.precision`` against the labeled
 benchmark JSONLs in ``benchmark/``.
 
 For each requested single-column error type:
@@ -32,7 +32,7 @@ Output:
 
 Example::
 
-    python -m experiments.score_precision_baseline \\
+    python -m external.llm.score_precision \\
         outputs/precision_baseline_20260517T... \\
         --benchmark-dir benchmark
 """
@@ -44,12 +44,12 @@ import csv
 import json
 import logging
 import sys
-from collections import Counter, defaultdict
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -422,7 +422,7 @@ def _short(s: str, n: int = 80) -> str:
 
 def _examples_md_block(name: str, items: List[Dict]) -> str:
     if not items:
-        return f"\n_None._\n"
+        return "\n_None._\n"
     lines = ["", "| source | row | column | value | rationale / corrected |", "| --- | --- | --- | --- | --- |"]
     for it in items:
         rat = it.get("rationale") or it.get("benchmark_corrected_value") or ""
@@ -605,7 +605,7 @@ def write_report(
 def _build_argparser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("run_dir", type=Path,
-                   help="Output dir from experiments.run_precision_baseline.")
+                   help="Output dir from experiments.external.llm.precision.")
     p.add_argument("--benchmark-dir", type=Path,
                    default=PROJECT_ROOT / "benchmark",
                    help="Dir containing benchmark_<error_type>_*.jsonl files.")

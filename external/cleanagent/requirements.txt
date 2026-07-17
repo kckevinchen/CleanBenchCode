@@ -1,0 +1,5 @@
+# CleanAgent detector deps (external/cleanagent/venv) — Python 3.10 (via uv).
+# dataprep pins an old pandas (1.5.x) that does NOT build on Python 3.12, so this
+# venv is provisioned on a standalone CPython 3.10 by setup.sh (uv python install).
+dataprep==0.4.4
+pandas==1.5.3

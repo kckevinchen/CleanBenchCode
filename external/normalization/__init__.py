@@ -1,0 +1,1 @@
+"""Deterministic normalization-key baseline."""

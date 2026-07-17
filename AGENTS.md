@@ -154,20 +154,23 @@ python -m pytest -q RFT/tests/test_rft_cli.py -k "not prepare_validates_real_spl
 Repair stale package imports before making feature changes. Do not describe RFT
 as runnable in human documentation until these checks pass.
 
-### Maintained external baseline
+### External baselines
 
-`external/baseline/` is the only tracked package under `external/`. It is
-runnable as:
+`external/README.md` is the catalog and provenance guide. The repository tracks
+project-authored wrappers across multiple methods, including:
 
 ```bash
 python -m external.baseline.prompt
-python -m external.baseline.label_gpt55 --help
-python -m external.baseline.inconsistency.optimize --help
+python -m external.llm.precision --help
+python external/rein/run_rein.py --help
+python external/classical/run_classical.py --help
+python -m external.normalization.run --help
 ```
 
-All other `external/` content is ignored local scratch, caches, vendored
-repositories, or experimental output. Do not widen the allowlist unless the user
-explicitly chooses another maintained package.
+Only wrappers, setup manifests, provenance pins, and documentation are tracked.
+Upstream clones, environments, checkpoints, browser profiles, source data,
+caches, predictions, and results remain ignored. Preserve each method's stated
+supervision level and licensing/fidelity caveats when changing or reporting it.
 
 ## Ownership and layering rules
 
@@ -191,7 +194,8 @@ data/ datasets/ outputs/ benchmark/ label_result/ logs/ backups/
 docs/ notebooks/ checkpoints/ runs/ state/ tmp/ external/*
 ```
 
-The exceptions under `external/` are declared explicitly in `.gitignore`.
+The source-wrapper exceptions under `external/` are declared explicitly in
+`.gitignore`.
 Never force-add ignored datasets, benchmark rows, model outputs, logs, cloud job
 state, `.env`, endpoint names, assistant IDs, or credentials.
 

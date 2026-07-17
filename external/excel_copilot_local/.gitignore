@@ -1,0 +1,5 @@
+venv/
+profile/
+outputs/
+data/xlsx/
+__pycache__/

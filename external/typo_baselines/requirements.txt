@@ -1,0 +1,7 @@
+# Typo-specialist baseline deps (external/typo_baselines/venv), Python 3.12.
+# NOTE: setup.sh installs torch (CPU) FIRST so neuspell doesn't pull a GPU build.
+symspellpy
+neuspell
+transformers==4.38.2   # keeps tokenizer.encode_plus (removed in v5) and has py3.12 tokenizers wheels
+gdown                  # fetch NeuSpell's 2.2GB checkpoint from Google Drive (bypasses virus-scan HTML)
+pandas
