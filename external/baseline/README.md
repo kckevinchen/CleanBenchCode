@@ -1,4 +1,4 @@
-# `baseline/` — GPT-5.5 typo-detection baseline
+# `external/baseline/` — GPT-5.5 typo-detection baseline
 
 A self-contained external baseline for the typo benchmark. It labels a CSV
 dataset with **GPT-5.5** (one Responses-API call per textual column,
@@ -19,7 +19,7 @@ of truth; read verbatim and sent as the Responses-API `instructions`):
 [`prompt.py`](prompt.py) just loads these files and exposes them as
 `WITH_RULEBOOK_PROMPT` / `WITHOUT_RULEBOOK_PROMPT` (+ `PROMPTS`, `PROMPT_SHA`).
 To edit a prompt, edit its `.md` file; the recorded sha256 makes any drift
-visible. Freeze check: `python -m baseline.prompt`.
+visible. Freeze check: `python -m external.baseline.prompt`.
 
 ## Run
 
@@ -27,14 +27,14 @@ visible. Freeze check: `python -m baseline.prompt`.
 az login   # required before any live call
 
 # with-rulebook (default)
-python -m baseline.label_gpt55 --data-dir data/curated_bing21_500_dedup
+python -m external.baseline.label_gpt55 --data-dir data/curated_bing21_500_dedup
 
 # without-rulebook
-python -m baseline.label_gpt55 --data-dir data/curated_bing21_500_dedup \
+python -m external.baseline.label_gpt55 --data-dir data/curated_bing21_500_dedup \
     --prompt without-rulebook
 
 # smoke test (2 CSVs)
-python -m baseline.label_gpt55 --data-dir data/curated_bing21_500_dedup --limit 2
+python -m external.baseline.label_gpt55 --data-dir data/curated_bing21_500_dedup --limit 2
 ```
 
 Key flags: `--prompt {with-rulebook,without-rulebook}`, `--model` (default
@@ -46,7 +46,7 @@ under the run's `gpt55_cache/`, keyed by prompt sha + model + effort + column.
 
 ## Score
 
-Scoring is **shared**, not part of `baseline/` — the same scorer grades RFT
+Scoring is **shared**, not part of `external/baseline/` — the same scorer grades RFT
 model runs. Point it at the run dir produced above:
 
 ```bash

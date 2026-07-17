@@ -9,7 +9,7 @@ suggestions reach the prompt editor. A suggestion whose actionable field is
 gutted by redaction is dropped entirely.
 
 Matching is whitespace-flexible and case-insensitive, mirroring the grader's
-:func:`baseline.inconsistency._task.norm`. Very short or generic values are not
+:func:`external.baseline.inconsistency._task.norm`. Very short or generic values are not
 blocked (they would scrub legitimate rule language); the threshold is tunable.
 """
 
@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from baseline.inconsistency._task import norm
+from external.baseline.inconsistency._task import norm
 
 REDACTION = "\u00abREDACTED\u00bb"
 

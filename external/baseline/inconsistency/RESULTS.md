@@ -1,7 +1,7 @@
 # Inconsistency prompt-optimization — results
 
 GPT-5.5 inconsistency **rulebook** optimized by the multi-agent loop
-(`baseline/inconsistency/`). Reviewer sees dev results; a mechanical leakage
+(`external/baseline/inconsistency/`). Reviewer sees dev results; a mechanical leakage
 filter + editor-output scrub keep all data out of the prompt; the editor (which
 never sees data) rewrites the rulebook; candidates are selected on a held-out
 **val** split and the winner is scored **once** on a held-out **test** split.
@@ -52,7 +52,7 @@ About half the prompt length for ~0.026 less test F1 than `hardened10v2`.
 `outputs/inconsistency_promptopt/<run>/error_cells_{dev,val,test}.csv` — one row
 per `(source, column, value)` classified TP/FP/FN/AMBIG, with context (value
 count/share, column size + value distribution, predicted kind/correction/
-rationale, gold correction). Built by `python -m baseline.inconsistency.export_errors`
+rationale, gold correction). Built by `python -m external.baseline.inconsistency.export_errors`
 (uses the run's detector cache → no API calls). Curator-ignored columns/files
 are excluded by default.
 

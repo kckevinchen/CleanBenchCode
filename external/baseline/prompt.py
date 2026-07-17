@@ -1,7 +1,7 @@
 """Baseline GPT-5.5 typo-detection prompts (loader).
 
 There are exactly TWO prompts, each a complete frozen string stored as a
-markdown file under ``baseline/prompts/`` (the source of truth):
+markdown file under ``external/baseline/prompts/`` (the source of truth):
 
 * ``with_rulebook.md``     -- intro + the clean, spec-derived rulebook + output
                               footer. High-precision, proper-nouns out of scope.
@@ -19,7 +19,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-_PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
+_PROMPTS_DIR = Path(__file__).resolve().parent / "prompts" / "typo"
 
 
 def _load(name: str) -> str:

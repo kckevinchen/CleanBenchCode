@@ -6,13 +6,13 @@ and the per-column distinct-value listing as ``input``. Output is a standard,
 workbench-loadable detection-run directory under ``outputs/``.
 
     # with-rulebook (default)
-    python -m baseline.label_gpt55 --data-dir data/curated_bing21_500_dedup
+    python -m external.baseline.label_gpt55 --data-dir data/curated_bing21_500_dedup
 
     # without-rulebook (generalized prompt)
-    python -m baseline.label_gpt55 --data-dir data/curated_bing21_500_dedup \
+    python -m external.baseline.label_gpt55 --data-dir data/curated_bing21_500_dedup \
         --prompt without-rulebook
 
-Score the resulting run dir with the shared scorer (not part of baseline/):
+Score the resulting run dir with the shared scorer (not part of external/baseline/):
 
     TYPO_BENCH_DIR=benchmark/typo_excel_500 \
         python -m experiments.score_typo_dir_benchmark <run_dir>
@@ -29,12 +29,12 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from baseline import _task as t  # noqa: E402
-from baseline._common import (  # noqa: E402
+from external.baseline import _task as t  # noqa: E402
+from external.baseline._common import (  # noqa: E402
     build_client,
     chat_rf_to_responses_text,
     extract_responses_output_text,
@@ -44,7 +44,7 @@ from baseline._common import (  # noqa: E402
     textual_columns,
     values_with_counts,
 )
-from baseline.prompt import PROMPT_SHA, PROMPTS  # noqa: E402
+from external.baseline.prompt import PROMPT_SHA, PROMPTS  # noqa: E402
 from src.core.aggregator import cluster_issues  # noqa: E402
 from src.core.detector import ChunkReport  # noqa: E402
 from src.core.llm_client import configured_endpoint_pool  # noqa: E402
@@ -175,7 +175,7 @@ def main():
                 start_row=0,
                 end_row=max(0, len(df) - 1),
                 model=args.model,
-                prompt_name=f"baseline.{args.prompt}",
+                prompt_name=f"external.baseline.{args.prompt}",
                 error_type="typo",
                 error_type_name="Typo",
                 error_type_category="Single-Column / Typo",

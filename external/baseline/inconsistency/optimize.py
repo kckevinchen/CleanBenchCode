@@ -3,13 +3,13 @@
     az login   # required before any live call
 
     # full loop, pooled pbi+bing, 6 iterations
-    python -m baseline.inconsistency.optimize --iters 6
+    python -m external.baseline.inconsistency.optimize --iters 6
 
     # out-of-distribution test: optimize on bing, hold out all pbi
-    python -m baseline.inconsistency.optimize --dev-dataset bing21_500
+    python -m external.baseline.inconsistency.optimize --dev-dataset bing21_500
 
     # smoke-test the whole loop with NO API calls (stub model + stub agents)
-    python -m baseline.inconsistency.optimize --dry-run --iters 2
+    python -m external.baseline.inconsistency.optimize --dry-run --iters 2
 
 Outputs land under ``outputs/inconsistency_promptopt/<ts>/`` (per-iter prompts,
 critiques, leakage reports, dev metrics, decisions) plus ``best_prompt.md``,
@@ -25,14 +25,14 @@ import re
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from baseline.inconsistency import data, loop  # noqa: E402
+from external.baseline.inconsistency import data, loop  # noqa: E402
 from src.core.llm_client import configured_endpoint_pool  # noqa: E402
 
-PROMPTS_DIR = ROOT / "baseline" / "prompts" / "inconsistency"
+PROMPTS_DIR = ROOT / "external" / "baseline" / "prompts" / "inconsistency"
 API_VERSION = "2025-04-01-preview"
 OUT_ROOT = ROOT / "outputs" / "inconsistency_promptopt"
 
@@ -104,9 +104,9 @@ class _StubAgentBackend:
 
 
 def _build_live(args):
-    from baseline._common import build_client
-    from baseline.inconsistency.agents import ResponsesAgentBackend
-    from baseline.inconsistency.evaluator import Gpt55Detector
+    from external.baseline._common import build_client
+    from external.baseline.inconsistency.agents import ResponsesAgentBackend
+    from external.baseline.inconsistency.evaluator import Gpt55Detector
 
     endpoints = [e.strip() for e in args.endpoints.split(",") if e.strip()]
     if not endpoints:

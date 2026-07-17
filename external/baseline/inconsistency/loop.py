@@ -21,14 +21,14 @@ import json
 from pathlib import Path
 from typing import Any
 
-from baseline.inconsistency import agents
-from baseline.inconsistency._task import (
+from external.baseline.inconsistency import agents
+from external.baseline.inconsistency._task import (
     has_output_contract,
     join_rulebook,
     split_rulebook,
 )
-from baseline.inconsistency.evaluator import Detector, evaluate
-from baseline.inconsistency.leakage import build_blocklist, scrub_critique, scrub_text
+from external.baseline.inconsistency.evaluator import Detector, evaluate
+from external.baseline.inconsistency.leakage import build_blocklist, scrub_critique, scrub_text
 
 OBJECTIVES = (
     "f1",

@@ -33,7 +33,7 @@ import re
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from baseline.inconsistency._task import norm
+from external.baseline.inconsistency._task import norm
 
 # --------------------------------------------------------------------------- #
 # Normalisers — each maps a raw surface form to a canonical key (or None when it

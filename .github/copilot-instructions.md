@@ -141,9 +141,9 @@ Foundry Agent with the Web Search tool (configured via `AZURE_AGENTS_*`;
 - `src/data_prep/` — offline CSV curation library; not part of the runtime path.
 - `src/heuristics/` & `src/synth/` — deterministic heuristic detectors and
   synthetic-error injectors (benchmark construction / baselines).
-- `baseline/` — self-contained external GPT-5.5 typo-detection baseline
-  (`python -m baseline.label_gpt55`); vendors its own helpers so it is decoupled
-  from `RFT/`. Its two frozen prompts in `baseline/prompts/` are the source of truth.
+- `external/baseline/` — self-contained external GPT-5.5 typo-detection baseline
+  (`python -m external.baseline.label_gpt55`); vendors its own helpers so it is decoupled
+  from `RFT/`. Its two frozen prompts in `external/baseline/prompts/typo/` are the source of truth.
 - `external/` — ad-hoc normalization/baseline experiments and scratch data;
   excluded from ruff (and most tooling). Not on the runtime path.
 - `scripts/` — one-off operational helpers (`run_server.sh`, label/benchmark utilities).

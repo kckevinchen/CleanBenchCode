@@ -15,8 +15,8 @@ gold (ambiguous = FP-immune), and reports:
     structural twin in their column (catchable, a fixable miss) vs none
     (semantic: alias/abbreviation/qualifier — the irreducible LLM residual).
 
-    python -m baseline.inconsistency.measure_oracle --split test
-    python -m baseline.inconsistency.measure_oracle --split full --no-exclusions
+    python -m external.baseline.inconsistency.measure_oracle --split test
+    python -m external.baseline.inconsistency.measure_oracle --split full --no-exclusions
 """
 
 from __future__ import annotations
@@ -27,20 +27,20 @@ import json
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from baseline.inconsistency import data  # noqa: E402
-from baseline.inconsistency._task import parse_findings  # noqa: E402
-from baseline.inconsistency.evaluator import (  # noqa: E402
+from external.baseline.inconsistency import data  # noqa: E402
+from external.baseline.inconsistency._task import parse_findings  # noqa: E402
+from external.baseline.inconsistency.evaluator import (  # noqa: E402
     _build_jobs,
     _prf,
     _read_csv,
     column_values,
     score_column,
 )
-from baseline.inconsistency.oracle import (  # noqa: E402
+from external.baseline.inconsistency.oracle import (  # noqa: E402
     is_structurally_justified,
     make_oracle_detector,
 )

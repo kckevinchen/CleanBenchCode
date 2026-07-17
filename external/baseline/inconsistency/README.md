@@ -1,9 +1,9 @@
-# `baseline/inconsistency/` — rulebook prompt-optimization loop
+# `external/baseline/inconsistency/` — rulebook prompt-optimization loop
 
 A self-contained multi-agent loop that optimizes the GPT-5.5 **inconsistency
 rulebook** prompt against the ground-truth benchmark, with a hard information
 barrier so the prompt never overfits to the eval data. Vendors the few helpers
-it needs (decoupled from `RFT/`), like the rest of `baseline/`.
+it needs (decoupled from `RFT/`), like the rest of `external/baseline/`.
 
 ## The idea
 
@@ -57,16 +57,16 @@ which document prompt-vs-benchmark overfitting and *verbatim* eval-cell leakage)
 az login   # required before any live call
 
 # full loop, pooled pbi+bing, optimize F1, 6 iterations
-python -m baseline.inconsistency.optimize --iters 6
+python -m external.baseline.inconsistency.optimize --iters 6
 
 # optimize recall-leaning (F-beta, beta=2) since we have ground truth
-python -m baseline.inconsistency.optimize --objective fbeta --fbeta 2.0
+python -m external.baseline.inconsistency.optimize --objective fbeta --fbeta 2.0
 
 # out-of-distribution test: optimize on bing, hold ALL pbi out for test
-python -m baseline.inconsistency.optimize --dev-dataset bing21_500
+python -m external.baseline.inconsistency.optimize --dev-dataset bing21_500
 
 # smoke-test the whole loop with NO API calls (stub model + stub agents)
-python -m baseline.inconsistency.optimize --dry-run --iters 2
+python -m external.baseline.inconsistency.optimize --dry-run --iters 2
 ```
 
 Key flags: `--objective {f1,f1_labeled,precision,precision_labeled,recall,fbeta}`
@@ -88,9 +88,9 @@ improve by more than this), `--dev-frac`/`--seed` (the split), `--dev-dataset`
 
 ## Prompts (source of truth)
 
-- `baseline/prompts/inconsistency/rulebook.md` — the seed / optimization target.
-- `baseline/prompts/inconsistency/reviewer.md` — reviewer system prompt.
-- `baseline/prompts/inconsistency/prompt_editor.md` — editor system prompt.
+- `external/baseline/prompts/inconsistency/rulebook.md` — the seed / optimization target.
+- `external/baseline/prompts/inconsistency/reviewer.md` — reviewer system prompt.
+- `external/baseline/prompts/inconsistency/prompt_editor.md` — editor system prompt.
 
 ## Layout
 

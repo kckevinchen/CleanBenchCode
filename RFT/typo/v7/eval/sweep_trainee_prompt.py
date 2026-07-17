@@ -281,7 +281,7 @@ Empty list only when nothing in the column looks suspicious."""
 # Clean, spec-derived GPT-5.5 detector prompt (OOD-honest; no benchmark
 # strings). Now the baseline "with-rulebook" prompt; loaded here so the sweep
 # scores the SHIPPED text, not a copy.
-from baseline.prompt import WITH_RULEBOOK_PROMPT as PROMPT_CLEAN_V9  # noqa: E402
+from external.baseline.prompt import WITH_RULEBOOK_PROMPT as PROMPT_CLEAN_V9  # noqa: E402
 
 PROMPT_CANDIDATES: dict[str, str] = {
     "v7": PROMPT_V7_PLACEHOLDER,

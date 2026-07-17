@@ -83,10 +83,15 @@ backups/
 *.pfx
 *secret*
 
-# external/: ad-hoc normalization/baseline experiments, vendored third-party
-# clones, isolated venvs/envs, per-table caches, and scratch data. Excluded from
-# ruff and most tooling; not on the runtime path. Ignore the whole tree.
-external/
+# external/: ignore ad-hoc experiments, vendored repositories, environments,
+# caches, and scratch data by default. The maintained baseline package is the
+# only publishable exception.
+external/*
+!external/__init__.py
+!external/baseline/
+!external/baseline/**
+external/baseline/**/__pycache__/
+external/baseline/**/*.py[cod]
 
 # Editor
 .vscode/

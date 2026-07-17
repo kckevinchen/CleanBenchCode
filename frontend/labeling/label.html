@@ -38,6 +38,12 @@
       <details class="export-menu" id="export-menu">
         <summary class="export-menu-summary" title="Download benchmark / source exports">Export</summary>
         <div class="export-menu-body" role="menu">
+          <a id="export-bundle-link" href="#" download class="export-primary" role="menuitem">
+            <span class="export-primary-row">Eval bundle <span class="export-primary-tag">recommended</span></span>
+            <span class="export-caption">Benchmark, ignored cells, and scoring contract</span>
+          </a>
+          <div class="export-divider"></div>
+          <div class="export-section-label">Individual exports</div>
           <a id="export-link" href="#" download role="menuitem">Export benchmark</a>
           <a id="export-by-type-link" href="#" download title="One JSONL per error_type, bundled as a ZIP" role="menuitem">Per-type benchmark</a>
           <span class="export-single" title="Download just one error_type as JSONL">

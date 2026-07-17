@@ -88,6 +88,7 @@ src/                                library code
   data_prep/                        offline curation library
   labeling/                         FastAPI workbench
 frontend/                           HTML dashboard + labeling UI
+external/baseline/                  maintained external comparison baselines
 scripts/run_server.sh               detached server start/stop wrapper
 outputs/                            timestamped run dirs (gitignored)
 ```
@@ -213,6 +214,10 @@ schema/relation discovery, dataset curation, report builds), **browse
 every run** under `outputs/`, **view embedded HTML reports**, and
 **label clusters** to materialise a per-cell ground-truth benchmark
 (`benchmark.jsonl`).
+
+For the complete workflow from adding CSV files through false-negative review,
+conflict checking, and eval-bundle export, see
+[`LABELING_GUIDE.md`](LABELING_GUIDE.md).
 
 ```bash
 ./scripts/run_server.sh start --port 8000     # detached; survives SSH drops

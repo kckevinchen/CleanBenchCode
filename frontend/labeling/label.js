@@ -352,6 +352,7 @@ async function bootstrap() {
     console.warn("cell-note overrides hydrate failed:", e);
   }
 
+  document.getElementById("export-bundle-link").href = `${API}/export/bundle`;
   document.getElementById("export-link").href = `${API}/export/benchmark`;
   // The per-type bundle anchor is optional - older cached copies of
   // label.html don't have it. Avoid blowing up bootstrap when the JS
@@ -9158,7 +9159,12 @@ for (const el of [
 let _pendingExport = null;
 
 function setupExportConflictGuard() {
-  const wires = ["#export-link", "#export-by-type-link", "#export-single-link"];
+  const wires = [
+    "#export-bundle-link",
+    "#export-link",
+    "#export-by-type-link",
+    "#export-single-link",
+  ];
   for (const sel of wires) {
     const a = document.querySelector(sel);
     if (!a) continue;

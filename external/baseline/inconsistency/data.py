@@ -17,7 +17,7 @@ import random
 from pathlib import Path
 from typing import Any
 
-from baseline.inconsistency._task import norm
+from external.baseline.inconsistency._task import norm
 
 # Repo-relative defaults (verified present at build time).
 DEFAULT_BENCHMARK = "benchmark/merged_v2/benchmark_inconsistency_cells.jsonl"

@@ -23,7 +23,7 @@ from typing import Any
 
 import pandas as pd
 
-from baseline.inconsistency._task import (
+from external.baseline.inconsistency._task import (
     MAX_DISTINCT,
     build_response_format,
     build_user_message,
@@ -197,7 +197,7 @@ def aggregate(results: list[dict[str, Any]]) -> dict[str, Any]:
 def _build_jobs(sources, cols, source_dataset, csv_map, *, include_clean, exclusions=None):
     """Yield (source, column, gold, values, col_kind, dataset).
 
-    ``exclusions`` (a :class:`baseline.inconsistency.data.Exclusions`, optional)
+    ``exclusions`` (a :class:`external.baseline.inconsistency.data.Exclusions`, optional)
     drops curator-ignored CSVs/columns entirely and folds skipped-cell values
     into each remaining column's FP-immune set.
     """

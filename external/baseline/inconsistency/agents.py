@@ -15,7 +15,7 @@ import json
 import re
 from typing import Any, Protocol
 
-from baseline.inconsistency._task import _strip_fences
+from external.baseline.inconsistency._task import _strip_fences
 
 
 class AgentBackend(Protocol):
@@ -172,7 +172,7 @@ class ResponsesAgentBackend:
         self.effort = effort
 
     def __call__(self, instructions: str, user_input: str) -> str:
-        from baseline._common import extract_responses_output_text
+        from external.baseline._common import extract_responses_output_text
 
         resp = self.client.responses.create(
             model=self.model,

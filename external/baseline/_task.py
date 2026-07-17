@@ -1,9 +1,10 @@
-"""Per-column typo-audit task assets for the GPT-5.5 baseline.
+"""Per-column typo-audit task assets for the GPT-5.5 external.baseline.
 
-Vendored from ``RFT.typo.v5._task`` so ``baseline/`` is self-contained and does
+Vendored from ``RFT.typo.v5._task`` so ``external/baseline/`` is self-contained and does
 not reach into the RFT tree. These define the *user message* (the per-column
 distinct-value listing) and the strict JSON *response format* shared by both
-baseline prompts. The system prompt itself lives in ``baseline/prompts/*.md``.
+baseline prompts. The system prompt itself lives in
+``external/baseline/prompts/typo/*.md``.
 """
 
 from __future__ import annotations

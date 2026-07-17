@@ -16,8 +16,8 @@ detector's predicted kind/correction/rationale, the gold acceptable
 correction(s), and a sample of the column's value distribution (so an
 inconsistency call can be judged against its peers).
 
-    python -m baseline.inconsistency.export_errors --run outputs/inconsistency_promptopt/hardened10v2
-    python -m baseline.inconsistency.export_errors --run .../lean --split val --prompt both
+    python -m external.baseline.inconsistency.export_errors --run outputs/inconsistency_promptopt/hardened10v2
+    python -m external.baseline.inconsistency.export_errors --run .../lean --split val --prompt both
 """
 
 from __future__ import annotations
@@ -28,13 +28,13 @@ import json
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from baseline.inconsistency import data  # noqa: E402
-from baseline.inconsistency._task import norm, parse_findings  # noqa: E402
-from baseline.inconsistency.evaluator import (  # noqa: E402
+from external.baseline.inconsistency import data  # noqa: E402
+from external.baseline.inconsistency._task import norm, parse_findings  # noqa: E402
+from external.baseline.inconsistency.evaluator import (  # noqa: E402
     Gpt55Detector,
     _read_csv,
     column_values,
@@ -90,7 +90,7 @@ def _prompt_text(run_dir: Path, which: str) -> str:
     if which == "best":
         return (run_dir / "best_prompt.md").read_text(encoding="utf-8")
     if which == "seed":
-        return (ROOT / "baseline" / "prompts" / "inconsistency" / "rulebook.md").read_text(
+        return (ROOT / "external" / "baseline" / "prompts" / "inconsistency" / "rulebook.md").read_text(
             encoding="utf-8"
         )
     raise SystemExit(f"unknown prompt {which!r}")
@@ -261,7 +261,7 @@ def main() -> None:
 
     clients = None
     if args.allow_live:
-        from baseline._common import build_client
+        from external.baseline._common import build_client
 
         eps = [e.strip() for e in args.endpoints.split(",") if e.strip()]
         if not eps:

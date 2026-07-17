@@ -1,6 +1,6 @@
 """Shared plumbing for the GPT-5.5 baseline labeler.
 
-Vendored (and trimmed) from the RFT tree so ``baseline/`` is self-contained:
+Vendored (and trimmed) from the RFT tree so ``external/baseline/`` is self-contained:
 
 * ``build_client``                         <- RFT._common._rft_common
 * ``chat_rf_to_responses_text``,
@@ -26,7 +26,7 @@ import pandas as pd
 from azure.identity import AzureCliCredential, get_bearer_token_provider
 from openai import AzureOpenAI
 
-from baseline._task import MAX_DISTINCT
+from external.baseline._task import MAX_DISTINCT
 
 logger = logging.getLogger("baseline")
 

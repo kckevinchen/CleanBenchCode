@@ -1,6 +1,6 @@
 """Per-column inconsistency-audit task assets + rulebook surgery.
 
-Vendored / adapted from ``RFT.inconsistency.v1`` so ``baseline/`` stays
+Vendored / adapted from ``RFT.inconsistency.v1`` so ``external/baseline/`` stays
 self-contained (decoupled from the RFT tree):
 
 * ``build_user_message`` / ``build_response_format`` / ``KINDS``

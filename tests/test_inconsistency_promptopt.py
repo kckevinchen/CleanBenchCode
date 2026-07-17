@@ -13,18 +13,18 @@ from pathlib import Path
 
 import pandas as pd
 
-from baseline.inconsistency import data, loop
-from baseline.inconsistency._task import (
+from external.baseline.inconsistency import data, loop
+from external.baseline.inconsistency._task import (
     has_output_contract,
     join_rulebook,
     parse_findings,
     split_rulebook,
 )
-from baseline.inconsistency.evaluator import aggregate, evaluate, score_column
-from baseline.inconsistency.leakage import build_blocklist, scrub_critique, scrub_text
+from external.baseline.inconsistency.evaluator import aggregate, evaluate, score_column
+from external.baseline.inconsistency.leakage import build_blocklist, scrub_critique, scrub_text
 
 ROOT = Path(__file__).resolve().parents[1]
-SEED_RULEBOOK = (ROOT / "baseline" / "prompts" / "inconsistency" / "rulebook.md").read_text()
+SEED_RULEBOOK = (ROOT / "external" / "baseline" / "prompts" / "inconsistency" / "rulebook.md").read_text()
 
 
 # --------------------------------------------------------------------------- #
@@ -440,7 +440,7 @@ def test_exclusions_drop_columns_and_immunise_skips(tmp_path):
             )
         return json.dumps({"findings": []})
 
-    from baseline.inconsistency.data import Exclusions
+    from external.baseline.inconsistency.data import Exclusions
 
     exc = Exclusions()
     exc.columns.add(("s1.csv", "extra"))  # ignore the over-flagged column
