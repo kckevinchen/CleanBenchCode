@@ -14,7 +14,7 @@ DIFFERENT cluster that carries a TP verdict with a ``TRIVIAL`` note.
 Append-only and idempotent (an already-labelled cluster is left alone).
 
     python -m experiments.skip_redundant_clusters \\
-        --run-id 20260604T182523Z_model_be8ecd05 [--apply] [--annotator kaiwen]
+        --run-id RUN_ID [--apply] [--annotator reviewer]
 """
 
 from __future__ import annotations

@@ -30,7 +30,7 @@ Run it (the spec's registry name is `<error_type>_<version>`):
 
 ```bash
 python -m RFT.cli --task mytask_v1 all --reward-variant default \
-    --endpoint https://dmxaz-test-aoai-eu2.openai.azure.com/ --suffix mytask-v1
+   --endpoint <azure-openai-endpoint> --suffix mytask-v1
 python -m RFT.cli --task mytask_v1 deploy --deployment-name mytask-v1 --resource-group <rg>
 python -m RFT.cli --task mytask_v1 run --deployment mytask-v1
 ```

@@ -62,12 +62,11 @@ _TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
 
 
 def resolve_default_endpoint() -> str:
-    """Pick the default RFT endpoint using the same precedence as ``LLMClient``.
+    """Pick the configured RFT endpoint using the same precedence as ``LLMClient``.
 
     Order:
       1. ``AZURE_OPENAI_ENDPOINT`` (single-endpoint override).
       2. First entry of ``AZURE_OPENAI_ENDPOINTS`` (pool, comma-separated).
-      3. First entry of :data:`src.core.llm_client.DEFAULT_ENDPOINTS`.
     """
     single = os.environ.get("AZURE_OPENAI_ENDPOINT")
     if single:
@@ -78,7 +77,12 @@ def resolve_default_endpoint() -> str:
             ep = ep.strip()
             if ep:
                 return ep
-    return DEFAULT_ENDPOINTS[0]
+    if DEFAULT_ENDPOINTS:
+        return DEFAULT_ENDPOINTS[0]
+    raise ValueError(
+        "Azure OpenAI endpoint is not configured; set AZURE_OPENAI_ENDPOINT, "
+        "AZURE_OPENAI_ENDPOINTS, or pass --endpoint"
+    )
 
 
 def build_client(endpoint: str, api_version: str) -> AzureOpenAI:
@@ -372,8 +376,8 @@ def add_common_args(p: argparse.ArgumentParser, default_output_dir: Path) -> Non
         "--endpoint",
         default=None,
         help="Azure OpenAI resource endpoint, e.g. https://<resource>.openai.azure.com/. "
-        "Defaults (in order): $AZURE_OPENAI_ENDPOINT, first of "
-        "$AZURE_OPENAI_ENDPOINTS, first of src.core.llm_client.DEFAULT_ENDPOINTS.",
+        "Defaults to $AZURE_OPENAI_ENDPOINT or the first entry of "
+        "$AZURE_OPENAI_ENDPOINTS.",
     )
     p.add_argument(
         "--api-version",

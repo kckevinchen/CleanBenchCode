@@ -70,14 +70,12 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from RFT.typo_v5 import _task as t  # noqa: E402
+from src.core.llm_client import configured_endpoint_pool  # noqa: E402
 
 logger = logging.getLogger("label_curated_bing21_100_gpt55")
 
 
-# Endpoint pool that carries gpt-5.5.
-DEFAULT_ENDPOINTS = (
-    "https://dmxaz-test-aoai-eu2.openai.azure.com/",
-)
+DEFAULT_ENDPOINTS = tuple(configured_endpoint_pool())
 DEFAULT_API_VERSION = "2025-04-01-preview"
 DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_DATASET = "data/curated_bing21_100"
@@ -572,6 +570,8 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("Built %d (source, column) task(s)", len(tasks))
 
     endpoints = [e.strip() for e in args.endpoints.split(",") if e.strip()]
+    if not endpoints:
+        raise SystemExit("configure --endpoints or AZURE_OPENAI_ENDPOINTS")
     clients = [_make_client(e, args.api_version) for e in endpoints]
     text_format = _chat_rf_to_responses_text(t.build_response_format())
     cursor = [0]

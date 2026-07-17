@@ -111,7 +111,7 @@ def client(tmp_path: Path) -> TestClient:
     # Point at the real frontend dir so static-file tests can see the
     # column_board.* files we ship in the repo.
     app = create_app(
-        ws, annotator="kaiwen",
+        ws, annotator="reviewer",
         static_dir=PROJECT_ROOT / "frontend" / "labeling",
     )
     return TestClient(app)
@@ -127,7 +127,7 @@ class TestDraftEndpoint:
 
     def test_unknown_run_returns_404(self, tmp_path: Path) -> None:
         ws = _build_workspace(tmp_path)
-        app = create_app(ws, annotator="kaiwen")
+        app = create_app(ws, annotator="reviewer")
         with TestClient(app) as client:
             r = client.get(
                 "/api/runs/no_such_run/columns/smoke.csv/State/draft",
@@ -149,7 +149,7 @@ class TestDraftEndpoint:
                                     "agreement": 1.0}],
             }) + "\n",
         )
-        app = create_app(ws, annotator="kaiwen")
+        app = create_app(ws, annotator="reviewer")
         with TestClient(app) as client:
             r = client.get(
                 "/api/runs/r1/columns/smoke.csv/State/draft",
@@ -170,7 +170,7 @@ class TestDraftEndpoint:
             + json.dumps({"source": "smoke.csv", "column": "State",
                           "runs_completed": 5, "draft_clusters": []}) + "\n",
         )
-        app = create_app(ws, annotator="kaiwen")
+        app = create_app(ws, annotator="reviewer")
         with TestClient(app) as client:
             r = client.get(
                 "/api/runs/r1/columns/smoke.csv/State/draft",
@@ -184,7 +184,7 @@ class TestDraftEndpoint:
             json.dumps({"source": "smoke.csv", "column": "Year",
                         "draft_clusters": []}) + "\n",
         )
-        app = create_app(ws, annotator="kaiwen")
+        app = create_app(ws, annotator="reviewer")
         with TestClient(app) as client:
             r = client.get(
                 "/api/runs/r1/columns/smoke.csv/State/draft",
@@ -200,7 +200,7 @@ class TestDraftEndpoint:
                           "runs_completed": 2,
                           "draft_clusters": []}) + "\n",
         )
-        app = create_app(ws, annotator="kaiwen")
+        app = create_app(ws, annotator="reviewer")
         with TestClient(app) as client:
             r = client.get(
                 "/api/runs/r1/columns/smoke.csv/State/draft",
@@ -304,7 +304,7 @@ def _build_workspace_with_slash(tmp_path: Path) -> Path:
 class TestSlashInColumnName:
     def test_values_alias_with_slash(self, tmp_path: Path) -> None:
         ws = _build_workspace_with_slash(tmp_path)
-        app = create_app(ws, annotator="kaiwen")
+        app = create_app(ws, annotator="reviewer")
         with TestClient(app) as client:
             r = client.get(
                 "/api/runs/r1/columns/smoke.csv/values/"
@@ -317,7 +317,7 @@ class TestSlashInColumnName:
 
     def test_clusters_alias_get_with_slash(self, tmp_path: Path) -> None:
         ws = _build_workspace_with_slash(tmp_path)
-        app = create_app(ws, annotator="kaiwen")
+        app = create_app(ws, annotator="reviewer")
         with TestClient(app) as client:
             r = client.get(
                 "/api/runs/r1/columns/smoke.csv/clusters/"
@@ -328,7 +328,7 @@ class TestSlashInColumnName:
 
     def test_clusters_alias_post_with_slash(self, tmp_path: Path) -> None:
         ws = _build_workspace_with_slash(tmp_path)
-        app = create_app(ws, annotator="kaiwen")
+        app = create_app(ws, annotator="reviewer")
         with TestClient(app) as client:
             # Use status=no_inconsistency so we don't have to satisfy
             # the cluster-content invariants (>=2 values etc.) -- this
@@ -372,7 +372,7 @@ class TestSlashInColumnName:
                 }],
             }) + "\n",
         )
-        app = create_app(ws, annotator="kaiwen")
+        app = create_app(ws, annotator="reviewer")
         with TestClient(app) as client:
             r = client.get(
                 "/api/runs/r1/columns/smoke.csv/draft/"

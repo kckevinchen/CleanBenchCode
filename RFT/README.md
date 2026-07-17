@@ -1,10 +1,10 @@
 # RFT experiments
 
-Self-contained snapshots of each Reinforcement Fine-Tuning (RFT) experiment
-run on Azure OpenAI. Each subfolder is meant to be enough on its own --
-the data we trained on, the verbatim prompt the trainee saw, the grader
-spec the service ran, the scripts that produced the artifacts, and the
-training / eval logs.
+Reproducible source snapshots of each Reinforcement Fine-Tuning (RFT)
+experiment run on Azure OpenAI. Versioned folders preserve prompts, grader
+specifications, task configuration, and the scripts that produce each run.
+Generated datasets, predictions, logs, cloud state, and resource identifiers
+remain under ignored runtime directories and are not part of the repository.
 
 ## Unified RFT CLI (the way to run jobs now)
 
@@ -22,7 +22,7 @@ python -m RFT.cli --list-tasks             # tasks grouped by error type
 
 # Train: prepare -> upload -> submit -> follow, in one shot
 python -m RFT.cli --task typo_v10 all --reward-variant r1 \
-    --endpoint https://dmxaz-test-aoai-eu2.openai.azure.com/ \
+   --endpoint <azure-openai-endpoint> \
     --output-dir outputs/rft_typo_v10_r1 --suffix v10-r1
 
 python -m RFT.cli --task typo_v10 status --follow            # monitor
@@ -84,13 +84,13 @@ harness + v8 label helpers -- analysis tooling, not the RFT runtime path.)
 
 | Experiment        | Task                                                      | Status |
 |-------------------|-----------------------------------------------------------|--------|
-| [typo](typo)      | Per-cell typo / clean / ambiguous classifier (3-way)      | trained `o4-mini-2025-04-16-typo-rft-v1`; eval done (label_accuracy 0.483) |
-| [typo_v2](typo_v2)| Per-cell typo / clean classifier (BINARY; no trivial errors) | submitted `ftjob-034a136375344ffc81c366389e44534f` 2026-05-19 20:06 UTC |
+| [typo/v1](typo/v1) | Per-cell typo / clean / ambiguous classifier (3-way) | historical eval complete (label accuracy 0.483) |
+| [typo/v2](typo/v2) | Per-cell typo / clean classifier (BINARY; no trivial errors) | historical run submitted |
 
 The **live** task definition in `experiments/_typo_task.py` is **v2**.
 The v1 task definition is preserved frozen at
-`RFT/typo/scripts/_typo_task.py`. See
-[`typo_v2/README.md`](typo_v2/README.md) for the rationale behind the
+`RFT/typo/v1/scripts/_typo_task.py`. See
+[`typo/v2/README.md`](typo/v2/README.md) for the rationale behind the
 v2 changes.
 
 Add a new sibling folder (`RFT/<task>/`) per new RFT run rather than

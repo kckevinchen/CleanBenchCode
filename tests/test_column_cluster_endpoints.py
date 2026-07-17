@@ -72,7 +72,7 @@ def client_project(tmp_path: Path):
     project.mkdir()
     (project / "frontend" / "labeling").mkdir(parents=True)
     run_dir = _make_run(project)
-    app = create_app(project, annotator="kaiwen")
+    app = create_app(project, annotator="reviewer")
     with TestClient(app) as client:
         yield client, project, run_dir.name
 
@@ -129,7 +129,7 @@ class TestInconsistencyColumns:
         assert len(labelled) == 1
         assert labelled[0]["status"] == "labeled"
         assert labelled[0]["n_clusters"] == 1
-        assert labelled[0]["annotator"] == "kaiwen"
+        assert labelled[0]["annotator"] == "reviewer"
 
     def test_cardinality_filter(self, client_project, tmp_path: Path) -> None:
         client, project, run_id = client_project
@@ -253,7 +253,7 @@ class TestPostColumnClusters:
         assert rec["source"] == "smoke.csv"
         assert rec["column"] == "School"
         assert rec["status"] == "labeled"
-        assert rec["annotator"] == "kaiwen"
+        assert rec["annotator"] == "reviewer"
         assert len(rec["clusters"]) == 2
         # Subsequent GET sees the record.
         r = client.get(
@@ -711,7 +711,7 @@ class TestDraftSurfacing:
         (project / "frontend" / "labeling").mkdir(parents=True)
         run_dir = _make_run(project)
         _write_drafts(run_dir)
-        app = create_app(project, annotator="kaiwen")
+        app = create_app(project, annotator="reviewer")
         with TestClient(app) as client:
             r = client.get(f"/api/runs/{run_dir.name}/column-clusters")
             assert r.status_code == 200, r.text
@@ -745,7 +745,7 @@ class TestDraftSurfacing:
         (project / "frontend" / "labeling").mkdir(parents=True)
         run_dir = _make_run(project)
         _write_drafts(run_dir)
-        app = create_app(project, annotator="kaiwen")
+        app = create_app(project, annotator="reviewer")
         with TestClient(app) as client:
             r = client.get(
                 f"/api/runs/{run_dir.name}/column-clusters?include_drafts=false"
@@ -760,7 +760,7 @@ class TestDraftSurfacing:
         (project / "frontend" / "labeling").mkdir(parents=True)
         run_dir = _make_run(project)
         _write_drafts(run_dir)
-        app = create_app(project, annotator="kaiwen")
+        app = create_app(project, annotator="reviewer")
         with TestClient(app) as client:
             # Save a different cluster (1 cluster) - the column is now
             # labelled, so draft items should NOT surface anymore.
@@ -813,7 +813,7 @@ class TestPerClusterLabelling:
         (project / "frontend" / "labeling").mkdir(parents=True)
         run_dir = _make_run(project)
         _write_drafts(run_dir)
-        app = create_app(project, annotator="kaiwen")
+        app = create_app(project, annotator="reviewer")
         with TestClient(app) as client:
             run_id = run_dir.name
             tid_c2 = "colclust\x00smoke.csv\x00School\x00c2"
@@ -869,7 +869,7 @@ class TestPerClusterLabelling:
         (project / "frontend" / "labeling").mkdir(parents=True)
         run_dir = _make_run(project)
         _write_drafts(run_dir)
-        app = create_app(project, annotator="kaiwen")
+        app = create_app(project, annotator="reviewer")
         with TestClient(app) as client:
             run_id = run_dir.name
             for local_id, status_ in (("c2", "tp"), ("c1", "fp")):
@@ -905,7 +905,7 @@ class TestPerClusterLabelling:
         (project / "frontend" / "labeling").mkdir(parents=True)
         run_dir = _make_run(project)
         _write_overlapping_drafts(run_dir)
-        app = create_app(project, annotator="kaiwen")
+        app = create_app(project, annotator="reviewer")
         with TestClient(app) as client:
             run_id = run_dir.name
             # Operator votes TP on c1 (the superset).
@@ -960,7 +960,7 @@ class TestPerClusterLabelling:
         (project / "frontend" / "labeling").mkdir(parents=True)
         run_dir = _make_run(project)
         _write_drafts(run_dir)
-        app = create_app(project, annotator="kaiwen")
+        app = create_app(project, annotator="reviewer")
         with TestClient(app) as client:
             run_id = run_dir.name
             r = client.post(
@@ -987,7 +987,7 @@ class TestPerClusterLabelling:
         (project / "frontend" / "labeling").mkdir(parents=True)
         run_dir = _make_run(project)
         # No drafts; just save a clustering through the board endpoint.
-        app = create_app(project, annotator="kaiwen")
+        app = create_app(project, annotator="reviewer")
         with TestClient(app) as client:
             run_id = run_dir.name
             save = client.post(
@@ -1132,7 +1132,7 @@ class TestCorrectionsRouteSlashColumn:
         run_dir = self._make_slash_run(project)
         run_id = run_dir.name
         tid = "colclust\x00ship.csv\x00State/Province\x00c1"
-        app = create_app(project, annotator="kaiwen")
+        app = create_app(project, annotator="reviewer")
         with TestClient(app) as client:
             # GET resolves -- the regression: a path-segment route 404'd
             # here because the '/' in the column name split the segment.
@@ -1206,7 +1206,7 @@ class TestVerdictPreservesCorrections:
         (project / "frontend" / "labeling").mkdir(parents=True)
         run_dir = _make_run(project)
         _write_drafts(run_dir)
-        app = create_app(project, annotator="kaiwen")
+        app = create_app(project, annotator="reviewer")
         with TestClient(app) as client:
             run_id = run_dir.name
             tid = "colclust\x00smoke.csv\x00School\x00c2"
@@ -1232,7 +1232,7 @@ class TestVerdictPreservesCorrections:
         (project / "frontend" / "labeling").mkdir(parents=True)
         run_dir = _make_run(project)
         _write_drafts(run_dir)
-        app = create_app(project, annotator="kaiwen")
+        app = create_app(project, annotator="reviewer")
         with TestClient(app) as client:
             run_id = run_dir.name
             tid = "colclust\x00smoke.csv\x00School\x00c2"

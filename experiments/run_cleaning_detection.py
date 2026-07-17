@@ -2660,6 +2660,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     prompts_cfg = config.get("prompts", {})
     output_cfg = config.get("output", {})
 
+    if args.list_error_types:
+        error_types_file = _resolve(
+            args.error_types_file
+            or prompts_cfg.get("error_types_file", "prompts/error_types.yaml"),
+            PROJECT_ROOT,
+        )
+        taxonomy = load_taxonomy(error_types_file)
+        for error_type in taxonomy.types:
+            print(f"  {error_type.key:40s}  {error_type.summary_line()}")
+        return 0
+
     # CSV resolution supports three modes:
     #   1. --csv FILE                    -> single file
     #   2. --csv DIR  or --csv-dir DIR   -> every CSV in DIR matching --csv-glob
@@ -2725,13 +2736,18 @@ def main(argv: Optional[list[str]] = None) -> int:
                 f"No CSVs matched {csv_glob!r} under {csv_dir}"
             )
         csv_path = csv_dir
-    else:
+    elif data_cfg.get("csv_path"):
         csv_path = _resolve(data_cfg["csv_path"], PROJECT_ROOT)
         if not csv_path.is_file():
             raise FileNotFoundError(
                 f"data.csv_path does not exist: {csv_path}"
             )
         csv_paths = [csv_path]
+    else:
+        raise ValueError(
+            "No CSV input configured; pass --csv/--csv-dir or set "
+            "data.csv_path/data.csv_dir in config/experiment.yaml"
+        )
 
     output_dir = _resolve(
         args.output_dir or output_cfg.get("directory", "outputs"),
@@ -2814,11 +2830,6 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
 
     taxonomy = load_taxonomy(error_types_file)
-
-    if args.list_error_types:
-        for et in taxonomy.types:
-            print(f"  {et.key:40s}  {et.summary_line()}")
-        return 0
 
     if getattr(args, "validate_config", False):
         # All upstream validation has already run by this point:
@@ -3312,7 +3323,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     run_dir.mkdir(parents=True, exist_ok=True)
     _write_run_status(run_dir, "in_progress")
 
-    llm = LLMClient()
+    llm: Optional[LLMClient] = None
+
+    def _get_llm() -> LLMClient:
+        nonlocal llm
+        if llm is None:
+            llm = LLMClient()
+        return llm
 
     # ---- Detection: single pass OR adaptive multi-pass --------------
     gt_artifacts: Optional[Dict[str, Any]] = None
@@ -3330,7 +3347,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 if not group_chunks or not group_types:
                     continue
                 detector = PerTypeCleaningDetector(
-                    llm=llm,
+                    llm=_get_llm(),
                     taxonomy=taxonomy,
                     model=model,
                     error_types=group_types,
@@ -3352,7 +3369,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             representative_concurrency = concurrency or 1
         if use_row_dup_adjudicator:
             row_dup_detector = RowDuplicationDetector(
-                llm=llm,
+                llm=_get_llm(),
                 taxonomy=taxonomy,
                 model=model,
                 settings=row_dup_settings,
@@ -3376,12 +3393,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         # prompt_ensemble on. When off, the adaptive loop falls back
         # to frame-only perturbation.
         variant_generator: Optional[PromptVariantGenerator] = None
-        if adaptive_settings["prompt_ensemble"]:
+        if adaptive_settings["prompt_ensemble"] and chunk_error_types:
             variant_template_path = _resolve(
                 adaptive_settings["prompt_variant_template"], PROJECT_ROOT
             )
             variant_generator = PromptVariantGenerator(
-                llm=llm,
+                llm=_get_llm(),
                 model=model,
                 template_path=variant_template_path,
                 reasoning_effort=adaptive_settings["variant_generation_effort"],
@@ -3395,7 +3412,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 adaptive_settings["variant_generation_effort"],
                 len(error_types),
             )
-        else:
+        elif chunk_error_types:
             logger.info(
                 "Prompt-ensemble OFF: relying on frame-only perturbation "
                 "(shuffle_rows=%s, shuffle_columns=%s)",
@@ -3441,7 +3458,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     [et.key for et in group_types],
                 )
             g_reports, g_flat, g_artifacts = _run_adaptive_loop(
-                llm=llm,
+                    llm=_get_llm(),
                 model=model,
                 base_taxonomy=taxonomy,
                 seed_error_types=group_types,
@@ -3466,7 +3483,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         gt_artifacts = _merge_adaptive_gt_artifacts(per_group_gt)
         if use_row_dup_adjudicator:
             row_dup_detector = RowDuplicationDetector(
-                llm=llm,
+                llm=_get_llm(),
                 taxonomy=taxonomy,
                 model=model,
                 settings=row_dup_settings,
@@ -3505,15 +3522,18 @@ def main(argv: Optional[list[str]] = None) -> int:
         # ``.concurrency`` is independent of the type list, so fall back to
         # the full taxonomy (``None``) purely to satisfy the constructor's
         # non-empty guard instead of crashing the whole run.
-        representative_concurrency = PerTypeCleaningDetector(
-            llm=llm,
-            taxonomy=taxonomy,
-            model=model,
-            error_types=error_types or None,
-            reasoning_effort=reasoning_effort,
-            reasoning_summary=reasoning_summary,
-            concurrency=concurrency,
-        ).concurrency
+        if llm is None:
+            representative_concurrency = concurrency or 1
+        else:
+            representative_concurrency = PerTypeCleaningDetector(
+                llm=llm,
+                taxonomy=taxonomy,
+                model=model,
+                error_types=error_types or None,
+                reasoning_effort=reasoning_effort,
+                reasoning_summary=reasoning_summary,
+                concurrency=concurrency,
+            ).concurrency
 
     # Phase A: cluster on the full (possibly multi-pass) pool.
     clusters = cluster_issues(flat_issues)
@@ -3528,10 +3548,10 @@ def main(argv: Optional[list[str]] = None) -> int:
             synthesise_singletons if enable_synthesis else None
         ),
     }
-    if enable_synthesis:
+    if enable_synthesis and clusters:
         synthesis_prompt = load_synthesis_prompt(synthesis_prompt_file)
         synthesiser = ClusterSynthesiser(
-            llm=llm,
+            llm=_get_llm(),
             taxonomy=taxonomy,
             prompt=synthesis_prompt,
             model=model,
@@ -3849,7 +3869,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                         workbooks=workbooks_map,
                         source_frames=source_frames,
                         digests=digests,
-                        llm=llm,
+                        llm=_get_llm(),
                         model=model,
                         prompt_path=_resolve(
                             args.multi_table_prompt, PROJECT_ROOT,
@@ -3861,7 +3881,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     run_dir=run_dir,
                     resolved=resolved,
                     source_frames=source_frames,
-                    llm=llm,
+                    llm=_get_llm(),
                     model=model,
                     strategy=args.multi_table_strategy,
                     detect_prompt_path=_resolve(
@@ -4049,7 +4069,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                             _cc_ensemble_template.relative_to(PROJECT_ROOT),
                         )
                         _cc_gen = ClusterPromptVariantGenerator(
-                            llm=llm, model=_cc_model,
+                            llm=_get_llm(), model=_cc_model,
                             template_path=_cc_ensemble_template,
                             reasoning_effort=_cc_variant_effort,
                             reasoning_summary=reasoning_summary,
@@ -4106,7 +4126,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 arm_config=_cc_arm_config,
                 prompt_path=_cc_prompt,
                 max_workers=int(concurrency or 1),
-                llm=llm,
+                llm=_get_llm(),
                 variants=_cc_variants,
             )
             # ``_column_clustering_run`` already emits one INFO line

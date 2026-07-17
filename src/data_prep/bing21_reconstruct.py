@@ -24,7 +24,7 @@ Usage
 ::
 
     python -m src.bing21_reconstruct \\
-        --input /datadrive/yeye/data/Bing21-CtrlT/Bing21-CtrlT-processed.tsv \\
+        --input data/Bing21-CtrlT-processed.tsv \\
         --output-dir data/Bing21 \\
         [--limit-spreadsheets N]
 

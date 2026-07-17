@@ -11,6 +11,11 @@ logs/
 runs/
 wandb/
 mlruns/
+/results/
+/artifacts/
+/state/
+/tmp/
+/temp/
 *.parquet
 *.jsonl
 *.arrow
@@ -29,9 +34,38 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+env/
+mamba_env/
+conda_env/
+build/
+dist/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.hypothesis/
+.tox/
+.nox/
+
+# Logs & caches (never commit)
+*.log
+*.log.*
+*.out
+*.err
+*.pid
+*.trace
+.cache/
+*.cache
+.ipynb_checkpoints/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# RFT runtime state and generated evaluations
+RFT/**/training/state.json
+RFT/**/eval/summary*.json
+RFT/**/grader/calibration*.json
+RFT/endpoint_reliability.md
 
 # Local backups
 *.bak
@@ -40,51 +74,19 @@ backups/
 
 # Secrets - NEVER commit
 .env
-.env.local
+.env.*
+!.env.example
+.envrc
 *.key
+*.pem
+*.p12
+*.pfx
 *secret*
 
-# external/rein: vendored third-party clone + run artifacts
-# (datasets/ and venv/ are already ignored globally above)
-external/rein/rein-benchmark/
-external/rein/results/
-
-# external/cleanagent: vendored clone, isolated venvs, and run artifacts
-external/cleanagent/CleanAgent/
-external/cleanagent/venv/
-external/cleanagent/toolvenv/
-external/cleanagent/results/
-external/cleanagent/annotations*.json
-
-# external/gpt5_detect: per-chunk LLM response cache
-external/gpt5_detect/cache/
-
-# external/tabclean: vendored clone, isolated venv, per-table cache + work dirs
-# (predictions land in external/rein/results/, already ignored above)
-external/tabclean/TabClean/
-external/tabclean/venv/
-external/tabclean/cache/
-external/tabclean/work/
-
-# external/cocoon: vendored clone (interactive RAG product; not headless-runnable)
-# + per-table LLM response cache. Predictions land in external/rein/results/.
-external/cocoon/cocoon_repo/
-external/cocoon/cache/
-
-# external/synth_fewshot: synthetic-error temp tables for honest few-shot training
-# (the inject.py library itself is tracked; only the materialized temp dirs are not)
-external/synth_fewshot/tmp_rein/
-external/synth_fewshot/tmp_tabclean/
-external/synth_fewshot/__pycache__/
-
-# external/fm_data_tasks: per-table LLM response cache (predictions -> rein/results/)
-external/fm_data_tasks/cache/
-
-# external/forested: vendored clone, torch venv, per-table cache + work dirs
-external/forested/ForestED/
-external/forested/venv/
-external/forested/cache/
-external/forested/work/
+# external/: ad-hoc normalization/baseline experiments, vendored third-party
+# clones, isolated venvs/envs, per-table caches, and scratch data. Excluded from
+# ruff and most tooling; not on the runtime path. Ignore the whole tree.
+external/
 
 # Editor
 .vscode/

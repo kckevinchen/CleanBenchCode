@@ -48,10 +48,8 @@ experiment:
     to outputs/ as JSONL, Markdown, and an interactive HTML dashboard.
 
 data:
-  # Relative to the project root (GPT-5/).
-  # Default is the 100-row seeded subsample (reproducible; see
-  # `python -m src.subsample --help`). Point at the full CSV
-  # (data/0a0a2ebffde940e2a232f26ba3ceb327.csv) via --csv for the final run.
+  # Paths are relative to the project root. Data is intentionally not shipped;
+  # pass --csv/--csv-dir or configure one of these local paths.
   csv_path: null
   # Multi-CSV mode: if csv_dir is set (or --csv points at a directory, or
   # --csv-dir is passed), every file matching csv_glob inside it is loaded
@@ -60,7 +58,7 @@ data:
   # csv_path. Example:
   #   csv_dir: data/curated
   #   csv_glob: "*.csv"
-  csv_dir: data/curated_pbi
+  csv_dir: null
   csv_glob: "*.csv"
   # 0 means "start at the first data row".
   start_row: 0

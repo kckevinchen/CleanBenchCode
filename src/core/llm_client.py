@@ -38,24 +38,11 @@ logger = logging.getLogger(__name__)
 # Endpoint configuration
 # ---------------------------------------------------------------------------
 
-# Default pool mirrors the endpoints used in combined-gpt-5-with-reasoning-summary.py.
-# Override via the ``AZURE_OPENAI_ENDPOINTS`` env var (comma separated URLs) when
-# running in a different environment. Not every endpoint carries every model;
-# the runtime 404-skip logic in :class:`LLMClient` handles that without
-# operator action.
-DEFAULT_ENDPOINTS: List[str] = [
-    "https://dmxaz-test-aoai.openai.azure.com/",
-    "https://dmxaz-test-aoai-eu2.openai.azure.com/",
-    "https://yeyehe-aoai.openai.azure.com/",
-    "https://sc-rf-ma30hqbc-eastus2.cognitiveservices.azure.com/",
-    "https://sc-rf-m8udnqmj-swedencentral.cognitiveservices.azure.com/",
-    "https://sc-rf-ml1gih82-centralus.cognitiveservices.azure.com/",
-    "https://sc-rf-mcfew454-francecentral.cognitiveservices.azure.com/",
-    "https://sc-rf-mbvhbia4-northcentralus.cognitiveservices.azure.com/",
-    "https://sc-rf-mcfeobyx-northcentralus.cognitiveservices.azure.com/",
-    "https://sc-rf-mcnngi4g-norwayeast.cognitiveservices.azure.com/",
-    "https://sc-rf-ml1gf0z3-southcentralus.openai.azure.com/",
-]
+# Public releases do not ship organization-specific Azure resource names.
+# Configure a comma-separated pool through ``AZURE_OPENAI_ENDPOINTS`` or pass
+# ``endpoints=`` explicitly. This symbol remains for backwards-compatible
+# imports by older experiment snapshots.
+DEFAULT_ENDPOINTS: List[str] = []
 
 DEFAULT_API_VERSION = "2025-03-01-preview"
 
@@ -94,6 +81,16 @@ _REASONING_EFFORT_REWRITES = {"minimal": "low"}
 # call.
 _warned_effort_rewrites: set[Tuple[str, str]] = set()
 _warned_effort_lock = Lock()
+
+
+def configured_endpoint_pool() -> List[str]:
+    """Return Azure OpenAI endpoints configured through environment variables."""
+    pool = os.environ.get("AZURE_OPENAI_ENDPOINTS", "")
+    endpoints = [endpoint.strip() for endpoint in pool.split(",") if endpoint.strip()]
+    if endpoints:
+        return endpoints
+    single = os.environ.get("AZURE_OPENAI_ENDPOINT", "").strip()
+    return [single] if single else []
 
 
 def _normalize_reasoning_effort(model: str, effort: str) -> str:
@@ -203,11 +200,14 @@ class LLMClient:
     token_scope: str = "https://cognitiveservices.azure.com/.default"
 
     def __post_init__(self) -> None:
-        env_endpoints = os.environ.get("AZURE_OPENAI_ENDPOINTS")
+        env_endpoints = configured_endpoint_pool()
         if env_endpoints:
-            self.endpoints = [e.strip() for e in env_endpoints.split(",") if e.strip()]
+            self.endpoints = env_endpoints
         if not self.endpoints:
-            raise ValueError("LLMClient requires at least one endpoint")
+            raise ValueError(
+                "LLMClient requires at least one endpoint; set "
+                "AZURE_OPENAI_ENDPOINTS or pass endpoints=[...]"
+            )
 
         credential = AzureCliCredential()
         token_provider = get_bearer_token_provider(credential, self.token_scope)

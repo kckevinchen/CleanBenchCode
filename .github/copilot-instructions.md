@@ -13,8 +13,8 @@ covers the conventions and architecture you need to be productive in the code.
 ./create_venv.sh && source venv/bin/activate
 pip install -r requirements.txt -r requirements-dev.txt   # -dev adds ruff/pytest/pre-commit
 az login                                                   # required before any live LLM call
-# Optional: `cp .env.example .env` then `set -a; source .env; set +a` to override
-# the built-in endpoint pools (AZURE_OPENAI_ENDPOINTS / AZURE_AGENTS_*); defaults work out of the box.
+cp .env.example .env                                       # add your Azure resources
+set -a; source .env; set +a                                # loads AZURE_OPENAI_ENDPOINTS / AZURE_AGENTS_*
 
 # Tests (config in pyproject.toml; testpaths=tests)
 pytest                                   # full suite
@@ -100,11 +100,11 @@ one un-perturbed pass.
 ### LLM client
 
 `src/core/llm_client.py::LLMClient` is framework-free and shared by everything. It
-round-robins across a pool of Azure endpoints (`DEFAULT_ENDPOINTS`, override via
-`AZURE_OPENAI_ENDPOINTS`), tracks dead `(endpoint, model)` 404 pairs and skips
+round-robins across the Azure endpoints configured via `AZURE_OPENAI_ENDPOINTS`,
+tracks dead `(endpoint, model)` 404 pairs and skips
 them, and falls back between the Responses API (`RESPONSES_API_MODELS`) and Chat
 Completions. The web-grounded verifier (`src/verifier/`) instead hits a Microsoft
-Foundry Agent with the Web Search tool (override via `AZURE_AGENTS_*`;
+Foundry Agent with the Web Search tool (configured via `AZURE_AGENTS_*`;
 `StubAgentBackend` in tests).
 
 ## Key conventions

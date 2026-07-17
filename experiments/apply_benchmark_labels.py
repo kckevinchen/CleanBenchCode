@@ -25,7 +25,7 @@ Usage::
     python -m experiments.apply_benchmark_labels \\
         --run-id 20260512T213238Z_gpt5-family \\
         --benchmark label_result/benchmark_typo_20260507T215150Z_gpt5-family.canonical.jsonl \\
-        --annotator kaiwen \\
+        --annotator reviewer \\
         [--dry-run] [--overwrite] [--port 8000]
 """
 
@@ -103,7 +103,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         required=True,
         help="Path to canonical benchmark JSONL (per-cell ground truth).",
     )
-    p.add_argument("--annotator", default="kaiwen")
+    p.add_argument("--annotator", default="reviewer")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8000)
     p.add_argument(

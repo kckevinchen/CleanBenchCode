@@ -47,10 +47,12 @@ from baseline._common import (  # noqa: E402
 from baseline.prompt import PROMPT_SHA, PROMPTS  # noqa: E402
 from src.core.aggregator import cluster_issues  # noqa: E402
 from src.core.detector import ChunkReport  # noqa: E402
+from src.core.llm_client import configured_endpoint_pool  # noqa: E402
 from src.core.report_builder import build_run_artifacts, flatten_issues  # noqa: E402
 
 API_VERSION = "2025-04-01-preview"
-DEFAULT_ENDPOINT = "https://dmxaz-test-aoai-eu2.openai.azure.com/"
+_CONFIGURED_ENDPOINTS = configured_endpoint_pool()
+DEFAULT_ENDPOINT = _CONFIGURED_ENDPOINTS[0] if _CONFIGURED_ENDPOINTS else ""
 DEFAULT_MODEL = "gpt-5.5"
 
 
@@ -93,7 +95,12 @@ def main():
         "without-rulebook = compact generalized rule.",
     )
     ap.add_argument("--model", default=DEFAULT_MODEL)
-    ap.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
+    ap.add_argument(
+        "--endpoint",
+        default=DEFAULT_ENDPOINT,
+        required=not bool(DEFAULT_ENDPOINT),
+        help="Azure OpenAI endpoint (default: configured environment endpoint).",
+    )
     ap.add_argument(
         "--effort", default="none", choices=["none", "minimal", "low", "medium", "high", "xhigh"]
     )

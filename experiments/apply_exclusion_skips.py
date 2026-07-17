@@ -32,7 +32,7 @@ Usage::
 
     python -m experiments.apply_exclusion_skips \\
         --run-id 20260512T213238Z_gpt5-family \\
-        --annotator kaiwen \\
+        --annotator reviewer \\
         [--dry-run]
 """
 
@@ -128,7 +128,7 @@ def cluster_in_exclusion(
 def main(argv: Optional[List[str]] = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--run-id", required=True)
-    p.add_argument("--annotator", default="kaiwen")
+    p.add_argument("--annotator", default="reviewer")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8000)
     p.add_argument(

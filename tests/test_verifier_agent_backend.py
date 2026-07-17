@@ -549,17 +549,7 @@ def test_factory_singular_env_vars_still_work(monkeypatch):
     assert backend.agent_id == "asst_only"
 
 
-def test_factory_uses_default_pool_when_nothing_configured(monkeypatch):
-    """Out-of-the-box default: with no env vars and no CLI args,
-    ``build_agent_backend()`` returns a RoundRobinAgentBackend over
-    the built-in DEFAULT_AGENT_ENDPOINTS / DEFAULT_AGENT_IDS pool.
-
-    This is what makes multi-endpoint round-robin the experiment's
-    DEFAULT behaviour rather than an opt-in."""
-    from src.verifier import DEFAULT_AGENT_ENDPOINTS, DEFAULT_AGENT_IDS
-
-    # Wipe every env var the resolver knows about so we exercise the
-    # code-default fallback path.
+def test_factory_without_configuration_returns_unconfigured_backend(monkeypatch):
     for var in (
         "AZURE_AGENTS_ENDPOINT",
         "AZURE_AGENTS_VERIFIER_AGENT_ID",
@@ -569,24 +559,12 @@ def test_factory_uses_default_pool_when_nothing_configured(monkeypatch):
         monkeypatch.delenv(var, raising=False)
 
     backend = build_agent_backend()
-    assert isinstance(backend, RoundRobinAgentBackend)
-    # Pool length matches the shipped defaults.
-    assert len(backend.backends) == len(DEFAULT_AGENT_ENDPOINTS)
-    # Pairs are positional: the i-th endpoint is dispatched against
-    # the i-th agent id.
-    for child, ep, aid in zip(
-        backend.backends, DEFAULT_AGENT_ENDPOINTS, DEFAULT_AGENT_IDS,
-    ):
-        assert child.endpoint == ep
-        assert child.agent_id == aid
+    assert isinstance(backend, AzureAgentBackend)
+    assert backend.endpoint == ""
+    assert backend.agent_id == ""
 
 
-def test_azure_agent_falls_back_to_default_pool_first_entry(monkeypatch):
-    """Direct ``AzureAgentBackend()`` instantiation (no factory) with
-    no env vars must still pick up the FIRST default pair so legacy
-    callers don't regress to ``missing endpoint`` errors."""
-    from src.verifier import DEFAULT_AGENT_ENDPOINTS, DEFAULT_AGENT_IDS
-
+def test_azure_agent_without_configuration_stays_unconfigured(monkeypatch):
     for var in (
         "AZURE_AGENTS_ENDPOINT",
         "AZURE_AGENTS_VERIFIER_AGENT_ID",
@@ -596,5 +574,5 @@ def test_azure_agent_falls_back_to_default_pool_first_entry(monkeypatch):
         monkeypatch.delenv(var, raising=False)
 
     backend = AzureAgentBackend()
-    assert backend.endpoint == DEFAULT_AGENT_ENDPOINTS[0]
-    assert backend.agent_id == DEFAULT_AGENT_IDS[0]
+    assert backend.endpoint == ""
+    assert backend.agent_id == ""

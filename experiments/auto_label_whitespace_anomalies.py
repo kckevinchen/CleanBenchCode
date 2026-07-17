@@ -29,7 +29,7 @@ Usage::
 
     python -m experiments.auto_label_whitespace_anomalies \\
         --run-id 20260512T213238Z_gpt5-family \\
-        --annotator kaiwen \\
+        --annotator reviewer \\
         [--dry-run] [--overwrite]
 """
 
@@ -143,7 +143,7 @@ def fetch_existing_labels(base: str, run_id: str) -> Dict[str, dict]:
 def main(argv: Optional[List[str]] = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--run-id", required=True)
-    p.add_argument("--annotator", default="kaiwen")
+    p.add_argument("--annotator", default="reviewer")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8000)
     p.add_argument(

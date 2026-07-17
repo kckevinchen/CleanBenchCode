@@ -39,9 +39,9 @@ from baseline.inconsistency.evaluator import (  # noqa: E402
     _read_csv,
     column_values,
 )
+from src.core.llm_client import configured_endpoint_pool  # noqa: E402
 
 API_VERSION = "2025-04-01-preview"
-DEFAULT_ENDPOINT = "https://dmxaz-test-aoai-eu2.openai.azure.com/"
 
 CSV_FIELDS = [
     "prompt_variant",
@@ -263,7 +263,13 @@ def main() -> None:
     if args.allow_live:
         from baseline._common import build_client
 
-        eps = [e.strip() for e in (args.endpoints or DEFAULT_ENDPOINT).split(",") if e.strip()]
+        eps = [e.strip() for e in args.endpoints.split(",") if e.strip()]
+        if not eps:
+            eps = configured_endpoint_pool()
+        if not eps:
+            raise SystemExit(
+                "--allow-live requires --endpoints or AZURE_OPENAI_ENDPOINTS"
+            )
         clients = [build_client(ep, API_VERSION) for ep in eps]
     detector = Gpt55Detector(
         clients or [],

@@ -26,7 +26,7 @@ Idempotent and append-only. Use ``--dry-run`` (default) to preview;
 single writer, then restart it.
 
     python -m experiments.reconcile_trivial_labels \\
-        --run-id 20260604T182523Z_model_be8ecd05 [--apply] [--annotator kaiwen]
+        --run-id RUN_ID [--apply] [--annotator reviewer]
 """
 
 from __future__ import annotations

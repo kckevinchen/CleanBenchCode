@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from RFT._common.engine import RftEngine
+from RFT._common import _rft_common
 from RFT._common.scoring import make_cell_micro_f1_scorer, make_json_array_parser
 from RFT._common.spec import Hparams
 from RFT._common.state import RunState
@@ -60,6 +61,20 @@ def test_cli_parser_builds_and_reflects_spec(name):
     if has_variant_flag:
         with pytest.raises(SystemExit):
             parser.parse_args(["submit", "--reward-variant", "__nope__"])
+
+
+def test_endpoint_resolution_requires_public_configuration(monkeypatch):
+    monkeypatch.delenv("AZURE_OPENAI_ENDPOINT", raising=False)
+    monkeypatch.delenv("AZURE_OPENAI_ENDPOINTS", raising=False)
+    monkeypatch.setattr(_rft_common, "DEFAULT_ENDPOINTS", [])
+    with pytest.raises(ValueError, match="AZURE_OPENAI_ENDPOINT"):
+        _rft_common.resolve_default_endpoint()
+
+
+def test_endpoint_resolution_uses_environment_pool(monkeypatch):
+    monkeypatch.delenv("AZURE_OPENAI_ENDPOINT", raising=False)
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINTS", " https://first, https://second ")
+    assert _rft_common.resolve_default_endpoint() == "https://first"
 
 
 @pytest.mark.parametrize("name", ALL_TASKS)

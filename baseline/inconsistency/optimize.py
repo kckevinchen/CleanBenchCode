@@ -30,10 +30,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from baseline.inconsistency import data, loop  # noqa: E402
+from src.core.llm_client import configured_endpoint_pool  # noqa: E402
 
 PROMPTS_DIR = ROOT / "baseline" / "prompts" / "inconsistency"
 API_VERSION = "2025-04-01-preview"
-DEFAULT_ENDPOINT = "https://dmxaz-test-aoai-eu2.openai.azure.com/"
 OUT_ROOT = ROOT / "outputs" / "inconsistency_promptopt"
 
 
@@ -108,7 +108,11 @@ def _build_live(args):
     from baseline.inconsistency.agents import ResponsesAgentBackend
     from baseline.inconsistency.evaluator import Gpt55Detector
 
-    endpoints = [e.strip() for e in (args.endpoints or DEFAULT_ENDPOINT).split(",") if e.strip()]
+    endpoints = [e.strip() for e in args.endpoints.split(",") if e.strip()]
+    if not endpoints:
+        endpoints = configured_endpoint_pool()
+    if not endpoints:
+        raise SystemExit("live optimization requires --endpoints or AZURE_OPENAI_ENDPOINTS")
     clients = [build_client(ep, API_VERSION) for ep in endpoints]
     detector = Gpt55Detector(
         clients,

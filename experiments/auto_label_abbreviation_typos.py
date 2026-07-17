@@ -21,7 +21,7 @@ Usage::
 
     python -m experiments.auto_label_abbreviation_typos \\
         --run-id 20260512T001509Z_gpt5-family \\
-        --annotator kaiwen \\
+        --annotator reviewer \\
         [--dry-run] [--status unsure] [--port 8000]
 """
 
@@ -75,7 +75,7 @@ def fetch_existing_labels(base: str, run_id: str) -> Dict[str, str]:
 def main(argv: Optional[List[str]] = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--run-id", required=True)
-    p.add_argument("--annotator", default="kaiwen")
+    p.add_argument("--annotator", default="reviewer")
     p.add_argument("--status", default="unsure",
                    choices=["unsure", "tp", "fp", "partial", "skip"])
     p.add_argument("--port", type=int, default=8000)

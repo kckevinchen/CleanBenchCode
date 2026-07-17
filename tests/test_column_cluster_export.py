@@ -38,7 +38,7 @@ from src.labeling.schema import (  # noqa: E402
 
 def _make_state_record(
     *,
-    annotator: str = "kaiwen",
+    annotator: str = "reviewer",
     note: str = "test",
     canonical: str = "California",
     counts: List[int] = (18, 6, 4),  # type: ignore[assignment]
@@ -202,7 +202,7 @@ class TestThresholdFlip:
                     ],
                 ),
             ],
-            annotator="kaiwen", ts="2026-01-01T00:00:00Z",
+            annotator="reviewer", ts="2026-01-01T00:00:00Z",
         )
         cells, decisions = export_inconsistency_benchmark(
             [rec], data_dir, threshold=0.6,
@@ -249,7 +249,7 @@ class TestThresholdFlip:
                     ],
                 ),
             ],
-            annotator="kaiwen", ts="2026-01-01T00:00:00Z",
+            annotator="reviewer", ts="2026-01-01T00:00:00Z",
         )
         cells, decisions = export_inconsistency_benchmark(
             [rec], data_dir, threshold=0.7,
@@ -311,7 +311,7 @@ class TestFilters:
                     ],
                 ),
             ],
-            annotator="kaiwen", ts="2026-01-01T00:00:00Z",
+            annotator="reviewer", ts="2026-01-01T00:00:00Z",
         )
         cells, decisions = export_inconsistency_benchmark(
             [rec_state, rec_other], smoke_dir,
@@ -511,17 +511,17 @@ class TestSynthesizeFromDraftsAndLabels:
                  "target_id": _column_cluster_target_id(
                      "smoke.csv", "State", "c1"),
                  "source": "smoke.csv", "column": "State",
-                 "status": "tp", "annotator": "kaiwen"},
+                 "status": "tp", "annotator": "reviewer"},
                 {"target": "column_cluster",
                  "target_id": _column_cluster_target_id(
                      "smoke.csv", "State", "c2"),
                  "source": "smoke.csv", "column": "State",
-                 "status": "fp", "annotator": "kaiwen"},
+                 "status": "fp", "annotator": "reviewer"},
                 {"target": "column_cluster",
                  "target_id": _column_cluster_target_id(
                      "smoke.csv", "State", "c3"),
                  "source": "smoke.csv", "column": "State",
-                 "status": "partial", "annotator": "kaiwen"},
+                 "status": "partial", "annotator": "reviewer"},
                 # c4 has no label entry -> excluded.
             ],
         )
@@ -582,25 +582,25 @@ class TestSynthesizeFromDraftsAndLabels:
                      "smoke.csv", "State", "c1"),
                  "source": "smoke.csv", "column": "State",
                  "status": "tp", "confirmed_canonical": "CA",
-                 "annotator": "kaiwen"},
+                 "annotator": "reviewer"},
                 {"target": "column_cluster",
                  "target_id": _column_cluster_target_id(
                      "smoke.csv", "State", "c2"),
                  "source": "smoke.csv", "column": "State",
                  "status": "tp", "confirmed_canonical": "TX",
-                 "annotator": "kaiwen"},
+                 "annotator": "reviewer"},
                 {"target": "column_cluster",
                  "target_id": _column_cluster_target_id(
                      "smoke.csv", "State", "c3"),
                  "source": "smoke.csv", "column": "State",
                  "status": "partial", "confirmed_canonical": "NY",
-                 "annotator": "kaiwen"},
+                 "annotator": "reviewer"},
                 {"target": "column_cluster",
                  "target_id": _column_cluster_target_id(
                      "smoke.csv", "State", "c4"),
                  "source": "smoke.csv", "column": "State",
                  "status": "tp",  # no confirmed_canonical => bi-directional
-                 "annotator": "kaiwen"},
+                 "annotator": "reviewer"},
             ],
         )
         records = synthesize_records_from_drafts_and_labels(drafts, labels)
@@ -646,7 +646,7 @@ class TestSynthesizeFromDraftsAndLabels:
                  # Stale: operator confirmed "Calif." but it's no
                  # longer a value of the (re-clustered) cluster.
                  "confirmed_canonical": "Calif.",
-                 "annotator": "kaiwen"},
+                 "annotator": "reviewer"},
             ],
         )
         records = synthesize_records_from_drafts_and_labels(drafts, labels)
@@ -953,7 +953,7 @@ class TestLoadRecordsForExport:
         # Only the board record; the synthesised draft for the same
         # (source, column) is filtered out.
         assert len(records) == 1
-        assert records[0].annotator == "kaiwen"
+        assert records[0].annotator == "reviewer"
         # Three values from the board record, NOT the draft's three.
         values = {v.value for v in records[0].clusters[0].values}
         assert values == {"CA", "Calif.", "California"}
@@ -1021,7 +1021,7 @@ class TestExportFromDraftsViaCli:
                  "target_id": _column_cluster_target_id(
                      "smoke.csv", "State", "c1"),
                  "source": "smoke.csv", "column": "State",
-                 "status": "tp", "annotator": "kaiwen"},
+                 "status": "tp", "annotator": "reviewer"},
             ],
         )
         return tmp_path

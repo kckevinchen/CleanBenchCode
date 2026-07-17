@@ -13,8 +13,8 @@ of truth; read verbatim and sent as the Responses-API `instructions`):
 
 | `--prompt` | file | what it is |
 |---|---|---|
-| `with-rulebook` (default) | [`prompts/with_rulebook.md`](prompts/with_rulebook.md) | intro + the clean, spec-derived rulebook + output footer. Precision-first; proper-noun character-level slips out of scope. **7,574 chars, sha256 `2fd244b3…`** |
-| `without-rulebook` | [`prompts/without_rulebook.md`](prompts/without_rulebook.md) | intro + a compact *generalized* rule + output footer. No long rulebook — keeps a per-token NAME-vs-generic-word scope rule (names strictly out of scope for char-level fixes). **3,827 chars, sha256 `054cafd8…`** |
+| `with-rulebook` (default) | [`prompts/typo/with_rulebook.md`](prompts/typo/with_rulebook.md) | intro + the clean, spec-derived rulebook + output footer. Precision-first; proper-noun character-level slips out of scope. **7,574 chars, sha256 `2fd244b3…`** |
+| `without-rulebook` | [`prompts/typo/without_rulebook.md`](prompts/typo/without_rulebook.md) | intro + a compact *generalized* rule + output footer. No long rulebook — keeps a per-token NAME-vs-generic-word scope rule (names strictly out of scope for char-level fixes). **3,827 chars, sha256 `054cafd8…`** |
 
 [`prompt.py`](prompt.py) just loads these files and exposes them as
 `WITH_RULEBOOK_PROMPT` / `WITHOUT_RULEBOOK_PROMPT` (+ `PROMPTS`, `PROMPT_SHA`).

@@ -48,6 +48,7 @@ def _patch_azure(monkeypatch):
     # Clear any AZURE_OPENAI_ENDPOINTS that might be present in the
     # CI environment — we want full control over .endpoints.
     monkeypatch.delenv("AZURE_OPENAI_ENDPOINTS", raising=False)
+    monkeypatch.delenv("AZURE_OPENAI_ENDPOINT", raising=False)
 
 
 # ---------------------------------------------------------------------------
@@ -56,10 +57,9 @@ def _patch_azure(monkeypatch):
 
 
 class TestLLMClientConstruction:
-    def test_default_endpoints_used(self) -> None:
-        c = LLMClient()
-        assert c.endpoints == llm_module.DEFAULT_ENDPOINTS
-        assert len(c._clients) == len(llm_module.DEFAULT_ENDPOINTS)
+    def test_missing_endpoints_raises(self) -> None:
+        with pytest.raises(ValueError, match="AZURE_OPENAI_ENDPOINTS"):
+            LLMClient()
 
     def test_explicit_endpoints_override_default(self) -> None:
         c = LLMClient(endpoints=["http://a", "http://b"])
@@ -73,6 +73,11 @@ class TestLLMClientConstruction:
         )
         c = LLMClient()
         assert c.endpoints == ["http://e1", "http://e2", "http://e3"]
+
+    def test_singular_env_var_supplies_endpoint(self, monkeypatch) -> None:
+        monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "http://single")
+        c = LLMClient()
+        assert c.endpoints == ["http://single"]
 
     def test_empty_endpoints_via_env_raises(self, monkeypatch) -> None:
         monkeypatch.setenv("AZURE_OPENAI_ENDPOINTS", "  ,  ")

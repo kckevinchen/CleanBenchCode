@@ -9,7 +9,7 @@ workbench-loadable ``issues.jsonl`` as the gpt-5.5 label runs, so
     python -m experiments.label_dataset_v10rft --data-dir data/_curated_bing21_500_flat
     # v9-r1-e3
     python -m experiments.label_dataset_v10rft --model o4-mini-v9-r1-e3 --prompt v9 \
-        --endpoint https://sc-rf-m8udnqmj-swedencentral.cognitiveservices.azure.com/ --tag v9r1e3_med
+        --endpoint <azure-openai-endpoint> --tag v9r1e3_med
 """
 from __future__ import annotations
 
@@ -34,16 +34,17 @@ from RFT.typo.v5.eval.compare_ft_vs_base import (  # noqa: E402
     _chat_response_format_to_responses_text_format,
     _extract_responses_output_text,
 )
-from RFT.typo.v9._prompt import PROMPT_V9  # noqa: E402
-from RFT.typo.v10._prompt import PROMPT_V10  # noqa: E402
 from RFT.typo.v8.scripts.label_dataset_v8 import (  # noqa: E402
     _issues_for_csv,
     _parse_typos,
     _textual_columns,
     _values_with_counts,
 )
+from RFT.typo.v9._prompt import PROMPT_V9  # noqa: E402
+from RFT.typo.v10._prompt import PROMPT_V10  # noqa: E402
 from src.core.aggregator import cluster_issues  # noqa: E402
 from src.core.detector import ChunkReport  # noqa: E402
+from src.core.llm_client import configured_endpoint_pool  # noqa: E402
 from src.core.report_builder import build_run_artifacts, flatten_issues  # noqa: E402
 
 API_VERSION = "2025-04-01-preview"
@@ -72,9 +73,16 @@ def predict_column(client, tf, cache_dir, source, column, values, *, model, effo
 
 def main():
     ap = argparse.ArgumentParser()
+    configured_endpoints = configured_endpoint_pool()
+    default_endpoint = configured_endpoints[0] if configured_endpoints else ""
     ap.add_argument("--data-dir", default="data/_curated_bing21_500_flat")
     ap.add_argument("--model", default="o4-mini-v10-r1")
-    ap.add_argument("--endpoint", default="https://dmxaz-test-aoai-eu2.openai.azure.com/")
+    ap.add_argument(
+        "--endpoint",
+        default=default_endpoint,
+        required=not bool(default_endpoint),
+        help="Azure OpenAI endpoint (default: configured environment endpoint).",
+    )
     ap.add_argument("--prompt", choices=sorted(PROMPTS), default="v10")
     ap.add_argument("--effort", default="medium")
     ap.add_argument("--limit", type=int, default=0)

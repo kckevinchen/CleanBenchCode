@@ -6,7 +6,7 @@ Azure-hosted LLMs (currently the GPT-5 family).
 The flagship experiment, `data_cleaning_error_detection`, asks the model
 to scan a CSV **one narrow error type at a time** and merges the
 findings via deterministic clustering plus an optional LLM-based
-synthesis step. A 20-type taxonomy ships in
+synthesis step. A 9-type taxonomy ships in
 [`prompts/error_types.yaml`](prompts/error_types.yaml).
 
 ---
@@ -19,12 +19,14 @@ synthesis step. A 20-type taxonomy ships in
 source venv/bin/activate
 pip install -r requirements.txt
 az login                     # Azure OpenAI uses AzureCliCredential
+cp .env.example .env         # add your Azure endpoint(s)
+set -a; source .env; set +a
 
-# Smoke test (no LLM call - just renders the first prompt)
-python -m experiments.run_cleaning_detection --dry-run
+# Smoke test your CSV (no LLM call - just renders the first prompt)
+python -m experiments.run_cleaning_detection --csv /path/to/input.csv --dry-run
 
-# Default focused run on the shipped 100-row sample
-python -m experiments.run_cleaning_detection
+# Focused run on the same CSV
+python -m experiments.run_cleaning_detection --csv /path/to/input.csv
 
 # Open the interactive dashboard
 xdg-open outputs/<timestamp>_<model>/report.html
@@ -353,11 +355,3 @@ To iterate on the prompt template shared by every type, edit
 thresholds (peer minimum, dominant-baseline percentage, affected-row
 cap, …) live under `defaults:` and are substituted into the templates
 at load time — change them in one place.
-
----
-
-## Further reading
-
-- [`docs/experiment_summary.md`](docs/experiment_summary.md) — design
-  notes and experiment write-ups.
-- [`docs/pipeline.html`](docs/pipeline.html) — visual pipeline diagram.

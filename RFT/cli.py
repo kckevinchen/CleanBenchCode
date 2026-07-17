@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -34,12 +35,7 @@ from RFT import registry  # noqa: E402
 
 logger = logging.getLogger("rft.cli")
 
-# eu2 known-good first; dmxaz-test-aoai excluded (100% postprocessing-500).
-# See RFT/endpoint_reliability.md.
-DEFAULT_SUPERVISE_POOL = [
-    "https://dmxaz-test-aoai-eu2.openai.azure.com/",
-    "https://yeyehe-aoai.openai.azure.com/",
-]
+DEFAULT_SUPERVISE_POOL: list[str] = []
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +116,11 @@ def _build_parser(spec: RftTaskSpec) -> argparse.ArgumentParser:
     )
     _add_common(sp, spec)
     _add_submit(sp, spec)
-    sp.add_argument("--endpoints", default=",".join(DEFAULT_SUPERVISE_POOL))
+    sp.add_argument(
+        "--endpoints",
+        default=os.environ.get("AZURE_OPENAI_ENDPOINTS", ""),
+        help="Comma-separated retry pool (default: $AZURE_OPENAI_ENDPOINTS).",
+    )
     sp.add_argument("--attach-job-id", default=None)
     sp.add_argument("--max-attempts", type=int, default=4)
     sp.add_argument("--max-poll-errors", type=int, default=20)

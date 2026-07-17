@@ -9,16 +9,18 @@ All future evaluations must follow the protocol in §3.
 
 | Purpose | Source | Path |
 |---|---|---|
-| **Gold benchmark** (the *only* thing eval is allowed to score against) | Hand-curated, post-cluster-contamination fix | [benchmark/benchmark_typo_20260512T213238Z_gpt5-family.jsonl](benchmark/benchmark_typo_20260512T213238Z_gpt5-family.jsonl) |
-| Source tables | Per-column CSV samples (≤500 distinct values) | [data/benchmark_sources_v6/](data/benchmark_sources_v6/) |
-| Train split (RFT only) | 60% of benchmark columns (by-CSV stratified) | [RFT/typo/v9/data/train.jsonl](RFT/typo/v9/data/train.jsonl) (99 rows, 78 gold cells) |
-| Valid split (RFT only) | 10% of benchmark columns | [RFT/typo/v9/data/valid.jsonl](RFT/typo/v9/data/valid.jsonl) (20 rows, 6 gold cells) |
-| **Eval split (REQUIRED for all reporting)** | 30% of benchmark columns, *never seen by any FT job* | [RFT/typo/v9/data/eval.jsonl](RFT/typo/v9/data/eval.jsonl) (64 rows, 31 gold cells, 15 typo cols / 20 amb-only / 29 clean) |
-| Demo / few-shot | 8 held-out columns | [RFT/typo/v9/data/demo.jsonl](RFT/typo/v9/data/demo.jsonl) |
+| **Gold benchmark** (the *only* thing eval is allowed to score against) | Hand-curated, post-cluster-contamination fix | `benchmark/benchmark_typo_20260512T213238Z_gpt5-family.jsonl` |
+| Source tables | Per-column CSV samples (≤500 distinct values) | `data/benchmark_sources_v6/` |
+| Train split (RFT only) | 60% of benchmark columns (by-CSV stratified) | `RFT/typo/v9/data/train.jsonl` (99 rows, 78 gold cells) |
+| Valid split (RFT only) | 10% of benchmark columns | `RFT/typo/v9/data/valid.jsonl` (20 rows, 6 gold cells) |
+| **Eval split (REQUIRED for all reporting)** | 30% of benchmark columns, *never seen by any FT job* | `RFT/typo/v9/data/eval.jsonl` (64 rows, 31 gold cells, 15 typo cols / 20 amb-only / 29 clean) |
+| Demo / few-shot | 8 held-out columns | `RFT/typo/v9/data/demo.jsonl` |
 | Trainee dev message | **Versioned** — fork of v8 with names put out of scope for char-level fixes; multiple `PROMPT_V9_*` variants live side-by-side and are gated through the §7 recall harness before any RFT job consumes them | [RFT/typo/v9/_prompt.py](RFT/typo/v9/_prompt.py) (current export: `PROMPT_V9`) |
 | Precision rulebook | Fork of v7 rulebook with proper-noun char-level slips → fp | [RFT/typo/v9/prompts/rulebook.md](RFT/typo/v9/prompts/rulebook.md) |
-| Gold reconciliation | Deterministic offline classifier moving proper-noun char-level gold → ambiguous | [RFT/typo/v9/_gold_reconcile.py](RFT/typo/v9/_gold_reconcile.py); audit trail in [RFT/typo/v9/data/gold_reconciliation_report.json](RFT/typo/v9/data/gold_reconciliation_report.json) |
-| Frozen prior split (kept for back-compat only) | v6 splits, no longer used for headline numbers | [RFT/typo/v6/data/](RFT/typo/v6/data/) |
+| Gold reconciliation | Deterministic offline classifier moving proper-noun char-level gold → ambiguous | [RFT/typo/v9/_gold_reconcile.py](RFT/typo/v9/_gold_reconcile.py); audit trail in `RFT/typo/v9/data/gold_reconciliation_report.json` |
+| Frozen prior split (kept for back-compat only) | v6 splits, no longer used for headline numbers | `RFT/typo/v6/data/` |
+
+Data, benchmark, and output paths in this document are local, gitignored artifacts.
 
 ### Hard rule
 
@@ -34,16 +36,16 @@ All future evaluations must follow the protocol in §3.
 
 ## 2. Models under comparison
 
-| ID | Kind | Endpoint | Notes |
-|---|---|---|---|
-| `base` | `o4-mini-2025-04-16` (no FT) | dmxaz-test-aoai-eu2 | reference; run under v8 trainee prompt |
-| `v8-r1-low` | RFT `o4-mini` | dmxaz-test-aoai-eu2 | r1 additive reward, n_epochs=2, reasoning=low |
-| `v8-slim` | RFT `o4-mini` | yeyehe-aoai | slim 2-grader reward, n_epochs=2 |
-| `gpt-5.2` | base model | dmxaz-test-aoai-eu2 | external baseline |
-| `gpt-5.5` | base model | dmxaz-test-aoai-eu2 | external baseline (current SOTA on this bench) |
+| ID | Kind | Notes |
+|---|---|---|
+| `base` | `o4-mini-2025-04-16` (no FT) | reference; run under v8 trainee prompt |
+| `v8-r1-low` | RFT `o4-mini` | r1 additive reward, n_epochs=2, reasoning=low |
+| `v8-slim` | RFT `o4-mini` | slim 2-grader reward, n_epochs=2 |
+| `gpt-5.2` | base model | external baseline |
+| `gpt-5.5` | base model | external baseline (current SOTA on this bench) |
 
 FT models can only be deployed on the same Azure account where the
-job ran — this constraint forces the split across endpoints.
+job ran, so historical runs used more than one private resource.
 Deprecated v6-era RFTs (`longer`, `sharper`, `baseline`, `deep`) are no
 longer benchmarked; the v8 reward grid (`r1`/`r2`/`r3`) supersedes them.
 v9 RFT runs are pending — they will be added here once trained.
@@ -142,10 +144,9 @@ That's the entire metric. Anything more elaborate is a distraction.
 
 ## 4. Current results (v8 eval, 64 cols, 33 gold cells)
 
-Run: [outputs/v8_compare/](outputs/v8_compare/) plus the three GPT-5.5
-prompt-sweep folders ([outputs/v8_compare_gpt55_min/](outputs/v8_compare_gpt55_min/),
-[outputs/v8_compare_gpt55_v7prompt/](outputs/v8_compare_gpt55_v7prompt/),
-[outputs/v8_compare_gpt55_r4/](outputs/v8_compare_gpt55_r4/)). All numbers
+Run: `outputs/v8_compare/` plus the three GPT-5.5 prompt-sweep folders
+(`outputs/v8_compare_gpt55_min/`, `outputs/v8_compare_gpt55_v7prompt/`,
+`outputs/v8_compare_gpt55_r4/`). All numbers
 computed by summing per-row `tp/fp/fn` from `*.rollouts.jsonl` exactly per §3.5.
 
 | model | trainee prompt | preds | TP | FP | FN | micro P | micro R | micro F1 |
@@ -182,7 +183,7 @@ computed by summing per-row `tp/fp/fn` from `*.rollouts.jsonl` exactly per §3.5
 
 ## 4b. v9 results (2026-05-29 — new benchmark relabel, reconciliation-OFF gold, GPT-5 @ none)
 
-Run: `outputs/v9_compare*`. Eval [RFT/typo/v9/data/eval.jsonl](RFT/typo/v9/data/eval.jsonl)
+Run: `outputs/v9_compare*`. Eval `RFT/typo/v9/data/eval.jsonl`
 (64 cols, **19 gold cells** after further benchmark relabels; **reconciliation
 disabled** — gold = the human benchmark's typo cells as-is, the LLM grader judges
 proper-noun scope at grading time, see D13/D14). Cell-level **micro** (§3.5).
@@ -252,7 +253,7 @@ it was trained on, baked into the eval rows; GPT-5 runs whichever prompt is name
 
 | # | Decision | Why |
 |---|---|---|
-| D1 | Use only [benchmark/benchmark_typo_20260512T213238Z_gpt5-family.jsonl](benchmark/benchmark_typo_20260512T213238Z_gpt5-family.jsonl) for all eval | Single point of truth, hand-curated, post-cluster-fix |
+| D1 | Use only `benchmark/benchmark_typo_20260512T213238Z_gpt5-family.jsonl` for all eval | Single point of truth, hand-curated, post-cluster-fix |
 | D2 | Cell-level micro F1 (§3) is the only headline | Per-column macro inflated by 75% free-F1 rows; cell-level micro is what the user actually cares about |
 | D3 | Ambiguous cells grant FP immunity but no recall credit | Matches the benchmark's labelling intent |
 | D4 | v9 eval set is 64 cols, 31 gold cells (was 33 in v6/v8 — 2 reconciled into ambiguous by [RFT/typo/v9/_gold_reconcile.py](RFT/typo/v9/_gold_reconcile.py)) | Stratified by-CSV split, never seen during RFT training; reconciliation aligns the recall reward with the v9 precision rulebook so the trainee stops being penalised for *not* proposing proper-noun char-level fixes the rulebook would reject |
@@ -305,7 +306,7 @@ are still in-scope and recoverable.
 
 Details:
 
-* Reconstructs full columns from [data/benchmark_sources_v6/](data/benchmark_sources_v6/)
+* Reconstructs full columns from `data/benchmark_sources_v6/`
   (137 sources, all resolve); 67 cols have ≥1 gold typo cell, 233 gold typo cells total.
 * Reports pool / non-trivial / trivial recall, where "trivial" =
   whitespace-only corrections that the official scoring excludes
@@ -333,7 +334,7 @@ Details:
 Tracked per-hash recall on the §7 harness (o4-mini @ `reasoning_effort=low`).
 Each iteration changed *only* the proper-noun-handling paragraph; the
 rest of the prompt body is held constant. Summaries on disk under
-[outputs/v9_recall/](outputs/v9_recall/).
+`outputs/v9_recall/`.
 
 | iter | prompt_hash | change | NT recall | pool recall |
 |---|---|---|---:|---:|
@@ -401,5 +402,5 @@ prompt rewrites against this same eval produced one improvement
 regressions (iter3, iter4 — abstract rewrites). Further prose-tuning
 against the same 67 columns is the overfitting risk D10 warns about.
 Validate the next prompt variant on a held-out CSV set (e.g. one of the
-other curated sources under [data/](data/)) — that's the real test of
+other curated sources under `data/`) — that's the real test of
 the "generalize, don't memorize" goal.

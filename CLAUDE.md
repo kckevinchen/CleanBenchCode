@@ -11,6 +11,8 @@ A modular research harness for data-quality experiments against Azure-hosted GPT
 ./create_venv.sh && source venv/bin/activate
 pip install -r requirements.txt -r requirements-dev.txt   # -dev for ruff/pytest/pre-commit
 az login                                                  # required before any live LLM call
+cp .env.example .env                                     # add your Azure resources
+set -a; source .env; set +a
 
 # Tests (config in pyproject.toml; testpaths=tests)
 pytest                                  # full suite
@@ -64,11 +66,11 @@ The 9-type taxonomy (`prompts/error_types.yaml`) is grouped by Scope, and scope 
 
 ### LLM client
 
-`src/core/llm_client.py::LLMClient` is framework-free and shared by everything. It round-robins across a pool of Azure endpoints (`DEFAULT_ENDPOINTS`, override via `AZURE_OPENAI_ENDPOINTS`), tracks dead `(endpoint, model)` 404 pairs and skips them, and falls back between the Responses API (`RESPONSES_API_MODELS`) and Chat Completions. `GPT5_FAMILY` is the default model rotation when a run requests a family sweep. Reasoning effort is coerced through `RESPONSES_API_VALID_EFFORTS` (`minimal`→`low`).
+`src/core/llm_client.py::LLMClient` is framework-free and shared by everything. It round-robins across the Azure endpoints configured via `AZURE_OPENAI_ENDPOINTS`, tracks dead `(endpoint, model)` 404 pairs and skips them, and falls back between the Responses API (`RESPONSES_API_MODELS`) and Chat Completions. `GPT5_FAMILY` is the default model rotation when a run requests a family sweep. Reasoning effort is coerced through `RESPONSES_API_VALID_EFFORTS` (`minimal`→`low`).
 
 ### Web-grounded verifier (optional post-pass)
 
-`src/verifier/` runs flagged entity clusters through a Microsoft Foundry Agent with the Web Search tool to check "what should this value say" against the web (`run_web_verify`). Has a built-in round-robin agent pool; override via `AZURE_AGENTS_*` env vars. `StubAgentBackend` is used in tests.
+`src/verifier/` runs flagged entity clusters through a Microsoft Foundry Agent with the Web Search tool to check "what should this value say" against the web (`run_web_verify`). Configure one agent or a round-robin pool via `AZURE_AGENTS_*`; `StubAgentBackend` is used in tests.
 
 ### Labeling workbench
 

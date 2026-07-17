@@ -27,7 +27,7 @@ Usage::
 
     python -m experiments.auto_save_llm_corrections \\
         --run-id 20260513T234733Z_gpt5-family \\
-        --annotator kaiwen \\
+        --annotator reviewer \\
         [--scope tp_unsure|tp|missing] \\
         [--dry-run] \\
         [--llm] [--model gpt-5.2] [--reasoning-effort medium]
