@@ -50,6 +50,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from src.labeling.app import RunContext
 from src.labeling._cells import (
     _apply_exclusions_to_cells,
+    _deduplicate_benchmark_cells,
     _make_value_resolver,
     _materialize_inconsistency_cells_for_export,
 )
@@ -340,6 +341,7 @@ def _materialize_run(run_dir: Path):
     )
     cells.extend(_materialize_inconsistency_cells_for_export(ctx))
     cells = _apply_exclusions_to_cells(ctx, cells)
+    cells = _deduplicate_benchmark_cells(cells)
 
     # Backfill bi-directional fixes for inconsistency error cells that the
     # materialiser left without a corrected_value (no LLM/operator canonical):

@@ -1,98 +1,98 @@
-# RFT experiments
+# Reinforcement fine-tuning
 
-Reproducible source snapshots of each Reinforcement Fine-Tuning (RFT)
-experiment run on Azure OpenAI. Versioned folders preserve prompts, grader
-specifications, task configuration, and the scripts that produce each run.
-Generated datasets, predictions, logs, cloud state, and resource identifiers
-remain under ignored runtime directories and are not part of the repository.
-
-## Unified RFT CLI (the way to run jobs now)
-
-The whole Azure lifecycle is one generic engine driven by a declarative
-**task spec**, instead of a per-version launcher. A task spec
-(`RFT/<task>/spec.py`, a `RftTaskSpec`) captures the only things a version
-varies -- the trainee output schema, the grader, the data splits, and the
-defaults. Everything else (upload / submit / poll / supervise / deploy /
-delete / run) lives once in `RFT/_common/engine.py` and is exposed by
-`RFT/cli.py`.
+> **Current status: unavailable while package flattening is incomplete.**
+>
+> The intended task surface is unversioned (`RFT/typo/` and
+> `RFT/inconsistency/`), but stale imports still reference deleted historical
+> packages. Do not submit, resume, or deploy an RFT job until both preconditions
+> below pass.
 
 ```bash
-az login                                   # required for any live call
-python -m RFT.cli --list-tasks             # tasks grouped by error type
-
-# Train: prepare -> upload -> submit -> follow, in one shot
-python -m RFT.cli --task typo_v10 all --reward-variant r1 \
-   --endpoint <azure-openai-endpoint> \
-    --output-dir outputs/rft_typo_v10_r1 --suffix v10-r1
-
-python -m RFT.cli --task typo_v10 status --follow            # monitor
-python -m RFT.cli --task typo_v10 cancel                     # cancel
-
-# Auto-resubmit to the next endpoint on terminal failure (was inconsistency-only)
-python -m RFT.cli --task inconsistency_v1 supervise --attach-job-id <job>
-
-# Deploy the fine-tuned model (management-plane via `az`), then evaluate it
-python -m RFT.cli --task typo_v10 deploy --deployment-name o4-mini-v10-r1 \
-    --resource-group <rg>          # or set $AZURE_RESOURCE_GROUP
-python -m RFT.cli --task typo_v10 run --deployment o4-mini-v10-r1   # micro-F1 on eval split
-python -m RFT.cli --task typo_v10 delete --target deployment --target files
+python -m RFT.cli --list-tasks
+python -m pytest -q RFT/tests/test_rft_cli.py -k 'not prepare_validates_real_splits'
 ```
 
-## Layout: versions grouped by error type
+A failing import is part of the unfinished refactor. Repair it against the
+unversioned packages; do not restore dependencies on `vN` directories.
 
-Versions live nested under their error type, and **no version imports another
-version** -- shared, rulebook-free typo primitives (the trainee schema + the
-deterministic python sub-graders) live in `RFT/_common/typo_task.py`; the
-version-specific rulebook + score-model judge stay in each version:
+## Intended architecture
 
-```
+RFT uses a generic Azure lifecycle engine driven by declarative task specs:
+
+```text
 RFT/
-  _common/      spec.py engine.py cli-helpers, typo_task.py (shared primitives)
-  typo/         v1/ v2/ ... v9/ v10/      (each self-contained)
-  inconsistency/ v1/
-  cli.py registry.py scaffold.py _template/
+  _common/          shared engine, state, scoring, deployment, and graders
+  typo/             current typo prompt, grader, split builder, and spec
+  inconsistency/    current inconsistency prompt, grader, split builder, and spec
+  cli.py            generic command surface
+  registry.py       one registered spec per task
 ```
 
-**Add a new version -- change only data, prompt, grader:**
+A task spec defines:
+
+- trainee response format;
+- grader and reward variants;
+- train, validation, and evaluation split locations;
+- model and hyperparameter defaults;
+- optional prediction parsing and evaluation scoring.
+
+The generic engine owns prepare, upload, submit, status, cancel, supervise,
+deploy, run, delete, and model-listing behavior. Task packages must not copy
+that lifecycle code.
+
+## Non-negotiable data rules
+
+- The evaluation split must never be uploaded as training or validation data.
+- Human benchmark rows, generated splits, model outputs, cloud state, and logs
+  are local ignored artifacts.
+- Cell-level micro-F1 uses summed TP, FP, and FN counts.
+- Ambiguous benchmark cells are false-positive immune.
+- Records in `benchmark.ignored.jsonl` are false-positive and false-negative
+  immune, including wildcard row, column, and CSV exclusions.
+- Azure endpoints, job IDs, deployment IDs, and assistant IDs must come from
+  environment variables, CLI arguments, or ignored state, never committed
+  defaults.
+
+## Completing the flattening
+
+The repair is complete only when:
+
+1. `RFT/registry.py` imports only unversioned task specs.
+2. `RFT/typo/` imports only its own modules and `RFT/_common/`.
+3. `RFT/inconsistency/` imports only its own modules and `RFT/_common/`.
+4. The registry exposes one stable task name per error type.
+5. Split builders do not read data from historical peer-version directories.
+6. Both precondition commands at the top of this file pass from a clean clone.
+7. Documentation and examples contain no `typo_vN`, `inconsistency_vN`, or
+   `RFT/<task>/vN` command paths.
+
+Historical experiment results should live outside the runtime package, for
+example in a paper artifact or an ignored local archive. They should not remain
+as importable peer packages.
+
+## Intended command surface
+
+The commands below describe the target interface. Run them only after the
+preconditions pass:
 
 ```bash
-python -m RFT.cli new mytask v1 --findings-key findings    # -> RFT/mytask/v1/
+az login
+
+python -m RFT.cli --list-tasks
+python -m RFT.cli --task typo prepare
+python -m RFT.cli --task typo all --reward-variant r1 \
+  --endpoint <azure-openai-endpoint> \
+  --output-dir outputs/rft_typo
+python -m RFT.cli --task typo status --follow
+python -m RFT.cli --task typo deploy \
+  --deployment-name <deployment-name> \
+  --resource-group <resource-group>
+python -m RFT.cli --task typo run --deployment <deployment-name>
 ```
 
-scaffolds `RFT/mytask/v1/` from `RFT/_template/` (a working skeleton). Then edit
-three things and register one line:
+State, generated splits, predictions, and logs belong under ignored output
+folders. Before any live work, inspect the task's split paths and confirm that
+the training grader cannot access held-out labels.
 
-1. **prompt** — `_prompt.py` (`TRAINEE_PROMPT` + output schema);
-2. **grader** — `_grader.py` (set `TASK_DESCRIPTION`; the default is the shared
-   gold-free `5*F1` judge in `RFT/_common/graders.py`, so most tasks write no
-   grader code);
-3. **data** — `scripts/build_splits.py --sources <csv_dir>` writes
-   `data/{train,valid,eval}.jsonl` (trainee messages baked in);
-4. register `from RFT.mytask.v1.spec import SPEC as MYTASK_V1` in
-   `RFT/registry.py`.
-
-No launcher, no argparse, no lifecycle code -- the full
-upload/submit/supervise/deploy/run/delete surface comes for free. `spec.py` is
-built by `make_spec(...)`, which wires the `run`-verb parser/scorer from a
-couple of field names. See `RFT/_template/README.md` for the full checklist.
-
-The frozen `typo/v3` … `typo/v8` snapshots keep their own `scripts/*_rft_*.py`
-launchers for historical reproducibility; only the live tasks (`typo/v9`,
-`typo/v10`, `inconsistency/v1`) are migrated to specs and fully decoupled from
-peer versions. (Their eval/data-prep scripts still reuse the shared v5 compare
-harness + v8 label helpers -- analysis tooling, not the RFT runtime path.)
-
-| Experiment        | Task                                                      | Status |
-|-------------------|-----------------------------------------------------------|--------|
-| [typo/v1](typo/v1) | Per-cell typo / clean / ambiguous classifier (3-way) | historical eval complete (label accuracy 0.483) |
-| [typo/v2](typo/v2) | Per-cell typo / clean classifier (BINARY; no trivial errors) | historical run submitted |
-
-The **live** task definition in `experiments/_typo_task.py` is **v2**.
-The v1 task definition is preserved frozen at
-`RFT/typo/v1/scripts/_typo_task.py`. See
-[`typo/v2/README.md`](typo/v2/README.md) for the rationale behind the
-v2 changes.
-
-Add a new sibling folder (`RFT/<task>/`) per new RFT run rather than
-overwriting an existing one -- the folders are versioned snapshots, not
-the live working copies.
+Coding agents must read [`../AGENTS.md`](../AGENTS.md) before changing this
+subsystem.

@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional
 
 from ._helpers import _scalar
 from .inconsistency_export import materialize_inconsistency_benchmark
-from .schema import ExclusionScope
+from .schema import BenchmarkCell, ExclusionScope
 
 if TYPE_CHECKING:
     from .app import RunContext
@@ -154,6 +154,56 @@ def _apply_exclusions_to_cells(
         kept.append(cell)
     return kept
 
+
+def _deduplicate_benchmark_cells(
+    cells: Iterable[BenchmarkCell],
+) -> List[BenchmarkCell]:
+    """Merge cross-pipeline records to one benchmark row per cell key.
+
+    The cluster and inconsistency pipelines can both label the same
+    ``(source, row, column)``. Preserve the first record's correction, union
+    provenance fields, and degrade contradictory labels to ``ambiguous`` so an
+    explicit "export anyway" cannot emit two authoritative rows for one cell.
+    Row-level findings use the same rule with the ``column=""`` sentinel.
+    """
+    by_key: Dict[tuple[str, int, str], BenchmarkCell] = {}
+    merged: List[BenchmarkCell] = []
+
+    def _extend_unique(target: List[str], incoming: Iterable[str]) -> None:
+        for value in incoming:
+            if value not in target:
+                target.append(value)
+
+    for cell in cells:
+        key = (cell.source, cell.row, cell.column)
+        current = by_key.get(key)
+        if current is None:
+            by_key[key] = cell
+            merged.append(cell)
+            continue
+
+        if current.label != cell.label:
+            current.label = "ambiguous"
+            current.corrected_value = None
+            current.low_value = False
+        elif current.corrected_value in (None, "", []):
+            current.corrected_value = cell.corrected_value
+
+        if not current.original_value and cell.original_value:
+            current.original_value = cell.original_value
+        if not current.llm_suggested_value and cell.llm_suggested_value:
+            current.llm_suggested_value = cell.llm_suggested_value
+        current.low_value = current.low_value or cell.low_value
+        _extend_unique(current.error_types, cell.error_types)
+        _extend_unique(current.detection_ids, cell.detection_ids)
+        _extend_unique(current.cluster_ids, cell.cluster_ids)
+        _extend_unique(current.cluster_kinds, cell.cluster_kinds)
+        _extend_unique(current.annotators, cell.annotators)
+        if cell.note and cell.note not in current.note:
+            current.note = " | ".join(part for part in (current.note, cell.note) if part)
+
+    return merged
+
 def _materialize_inconsistency_cells_for_export(
     ctx: "RunContext",
 ) -> List[Any]:
@@ -171,18 +221,11 @@ def _materialize_inconsistency_cells_for_export(
     inconsistency artifacts (no ``column_cluster_drafts.jsonl``
     or no TP/unsure column-cluster verdicts).
 
-    Failures are swallowed and logged: a partial export (typo
-    cells only) is strictly better than failing the download.
+    Failures propagate to the export request. A failed download is safer than
+    silently emitting an incomplete benchmark that omits accepted
+    inconsistency labels.
     """
-    try:
-        return materialize_inconsistency_benchmark(
-            ctx.run_dir, dry_run=True, llm_client=None,
-        )
-    except Exception:  # noqa: BLE001 - export must never crash on bad cache.
-        logger.exception(
-            "[export] inconsistency materialisation failed for "
-            "run %s; falling back to typo-only cells",
-            ctx.run_dir.name,
-        )
-        return []
+    return materialize_inconsistency_benchmark(
+        ctx.run_dir, dry_run=True, llm_client=None,
+    )
 

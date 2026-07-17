@@ -17,9 +17,11 @@ A normal session creates or updates files inside `outputs/<run_id>/`:
 - `benchmark_bundle_<run_id>.zip`: the recommended portable export, containing
   both JSONL files and `MANIFEST.txt` with the scoring contract.
 
-The `data/` and `outputs/` directories are intentionally ignored by Git. Your
-source data and labels remain local unless you explicitly export or back them
-up.
+The `data/` and `outputs/` directories are intentionally ignored by Git. They
+remain untracked and are stored locally in the workspace, but detection sends
+selected table content to the Azure OpenAI endpoints you configure. Optional
+web verification can also send selected values to the configured Foundry Agent.
+Review your organization's data-handling policy before using live services.
 
 ## 1. Prepare the environment
 
@@ -93,7 +95,9 @@ To launch a run from the UI:
 3. For directory mode, keep **CSV glob** as `*.csv` unless you need a narrower
    pattern.
 4. Select only the error types relevant to the benchmark you are building.
-5. Leave the remaining defaults in place for a first pass.
+5. Choose **single** mode for a first pass. The configured adaptive mode can run
+   up to several perturbed LLM passes per arm and is better suited to a later
+   coverage study.
 6. Select **Preview command** and confirm the resolved CSV path, error types,
    model, and output settings.
 7. Select **Launch run**.

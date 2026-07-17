@@ -8,15 +8,20 @@ back-compat with old labels that only carry the scalar ``column`` /
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from src.labeling._cells import (
+    _deduplicate_benchmark_cells,
+    _materialize_inconsistency_cells_for_export,
+)
 from src.labeling._helpers import _is_low_value_fix
 from src.labeling.export import (
     materialize_label_benchmark,
     materialize_skipped_cells,
 )
-from src.labeling.schema import Label, LabelStatus, LabelTarget
+from src.labeling.schema import BenchmarkCell, Label, LabelStatus, LabelTarget
 from src.labeling.store import LabelStore
 
 
@@ -186,6 +191,61 @@ class TestRowLevelFindings:
         assert cells[0].label == "error"
         assert cells[0].error_types == ["row_duplication"]
         assert cells[0].cluster_ids == ["c1"]
+
+
+class TestCrossPipelineDeduplication:
+    def test_merges_same_cell_provenance(self) -> None:
+        typo = BenchmarkCell(
+            source="a.csv", row=2, column="name", original_value="Ailce",
+            label="error", corrected_value="Alice", error_types=["typo"],
+            cluster_ids=["typo-1"], annotators=["reviewer"], note="spelling",
+        )
+        inconsistency = BenchmarkCell(
+            source="a.csv", row=2, column="name", original_value="Ailce",
+            label="error", corrected_value="Alice",
+            error_types=["inconsistency"], cluster_ids=["inc-1"],
+            annotators=["auditor"], note="minority form",
+        )
+
+        merged = _deduplicate_benchmark_cells([typo, inconsistency])
+
+        assert len(merged) == 1
+        assert merged[0].label == "error"
+        assert merged[0].corrected_value == "Alice"
+        assert merged[0].error_types == ["typo", "inconsistency"]
+        assert merged[0].cluster_ids == ["typo-1", "inc-1"]
+        assert merged[0].annotators == ["reviewer", "auditor"]
+        assert merged[0].note == "spelling | minority form"
+
+    def test_conflicting_labels_degrade_to_ambiguous(self) -> None:
+        error = BenchmarkCell(
+            source="a.csv", row=2, column="name", original_value="Alice",
+            label="error", corrected_value="Alicia", error_types=["typo"],
+        )
+        clean = BenchmarkCell(
+            source="a.csv", row=2, column="name", original_value="Alice",
+            label="clean", error_types=["inconsistency"],
+        )
+
+        merged = _deduplicate_benchmark_cells([error, clean])
+
+        assert len(merged) == 1
+        assert merged[0].label == "ambiguous"
+        assert merged[0].corrected_value is None
+
+    def test_inconsistency_failure_is_not_swallowed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def _fail(*args, **kwargs):
+            raise RuntimeError("broken inconsistency cache")
+
+        monkeypatch.setattr(
+            "src.labeling._cells.materialize_inconsistency_benchmark", _fail,
+        )
+        ctx = SimpleNamespace(run_dir=tmp_path / "run")
+
+        with pytest.raises(RuntimeError, match="broken inconsistency cache"):
+            _materialize_inconsistency_cells_for_export(ctx)
 
 
 class TestAffectedRowsPropagation:

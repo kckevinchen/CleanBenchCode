@@ -26,8 +26,9 @@ it needs (decoupled from `RFT/`), like the rest of `external/baseline/`.
   …repeat…  then eval the best prompt on the held-out TEST split ONCE, per dataset.
 ```
 
-Three properties make it sound rather than just runnable (cf. `RFT.md` D10/D14,
-which document prompt-vs-benchmark overfitting and *verbatim* eval-cell leakage):
+Three properties make it sound rather than just runnable. They address two
+failure modes observed during development: prompt-vs-benchmark overfitting and
+*verbatim* eval-cell leakage.
 
 1. **The barrier is data-flow, not trust.** The editor's input is *constructed*
    to contain only the rulebook + filtered suggestions. On top of that,

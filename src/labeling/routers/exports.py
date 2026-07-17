@@ -8,7 +8,6 @@ materialisation + exclusion filtering live in :mod:`src.labeling._cells`.
 
 from __future__ import annotations
 
-import csv
 import json
 import os
 import zipfile
@@ -20,6 +19,7 @@ from fastapi.responses import FileResponse
 
 from .._cells import (
     _apply_exclusions_to_cells,
+    _deduplicate_benchmark_cells,
     _make_value_resolver,
     _materialize_inconsistency_cells_for_export,
 )
@@ -32,8 +32,6 @@ from ..export import (
     materialize_label_benchmark,
     materialize_label_benchmark_by_error_type,
     materialize_skipped_cells,
-    write_benchmark,
-    write_benchmark_by_error_type,
 )
 from ..schema import ExclusionScope
 from ._context import RouterContext
@@ -94,7 +92,6 @@ def _bundle_manifest(run_id: str, n_bench: int, n_ignore: int, n_excl: int) -> s
 
 def register(app: FastAPI, router_ctx: RouterContext) -> None:
     cache = router_ctx.cache
-    annotator = router_ctx.annotator
 
     @app.get("/api/runs/{run_id}/export/conflicts")
     def export_conflicts(run_id: str) -> Dict[str, Any]:
@@ -123,20 +120,8 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
         # original_value) key space so any divergent labels across
         # the typo and inconsistency pipelines surface here too.
         cells.extend(_materialize_inconsistency_cells_for_export(ctx))
-        # A cell can be flagged by both the cluster pipeline and the
-        # inconsistency pipeline; the benchmark must carry one record
-        # per (source, row, column). Keep the first (cluster-pipeline)
-        # occurrence; only dedup well-keyed per-cell records.
-        _seen_cells: set = set()
-        _deduped = []
-        for _c in cells:
-            _key = (_c.source, _c.row, _c.column)
-            if _c.row is not None and _c.column:
-                if _key in _seen_cells:
-                    continue
-                _seen_cells.add(_key)
-            _deduped.append(_c)
-        cells = _deduped
+        # Keep duplicate cross-pipeline rows here: contradictory labels must
+        # remain visible to the conflict dialog. Actual exports deduplicate.
         cells = _apply_exclusions_to_cells(ctx, cells)
         conflicts = find_label_conflicts(cells)
         return {"conflicts": conflicts}
@@ -158,6 +143,7 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
         # benchmark from this single endpoint.
         cells.extend(_materialize_inconsistency_cells_for_export(ctx))
         cells = _apply_exclusions_to_cells(ctx, cells)
+        cells = _deduplicate_benchmark_cells(cells)
         out_path = ctx.run_dir / "benchmark.jsonl"
         tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
         with tmp_path.open("w", encoding="utf-8") as fh:
@@ -228,6 +214,7 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
         )
         cells.extend(_materialize_inconsistency_cells_for_export(ctx))
         cells = _apply_exclusions_to_cells(ctx, cells)
+        cells = _deduplicate_benchmark_cells(cells)
         bench_path = ctx.run_dir / "benchmark.jsonl"
         n_bench = _write_jsonl_atomic(
             bench_path, [full_benchmark_record(c) for c in cells]
@@ -285,6 +272,7 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
         )
         cells.extend(_materialize_inconsistency_cells_for_export(ctx))
         cells = _apply_exclusions_to_cells(ctx, cells)
+        cells = _deduplicate_benchmark_cells(cells)
         low = [c for c in cells if getattr(c, "low_value", False)]
         out_path = ctx.run_dir / "benchmark.low_value.jsonl"
         tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
@@ -325,6 +313,7 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
         )
         cells.extend(_materialize_inconsistency_cells_for_export(ctx))
         cells = _apply_exclusions_to_cells(ctx, cells)
+        cells = _deduplicate_benchmark_cells(cells)
         bench_keys = {(c.source, c.row, c.column) for c in cells}
         skipped = materialize_skipped_cells(
             ctx.clusters, ctx.store,
@@ -389,6 +378,7 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
         filtered: Dict[str, List[Any]] = {}
         for slug, rows in buckets.items():
             kept = _apply_exclusions_to_cells(ctx, rows)
+            kept = _deduplicate_benchmark_cells(kept)
             if kept:
                 filtered[slug] = kept
         # Drop stale per-type files we previously wrote so excluded
@@ -482,6 +472,7 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
         # are missing from sources_<run>.zip.
         if rows:
             rows = _apply_exclusions_to_cells(ctx, rows)
+            rows = _deduplicate_benchmark_cells(rows)
         if not rows:
             available = sorted(
                 k for k, v in buckets.items()
@@ -527,9 +518,9 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
 
         * ``scope=csv``     - the file is omitted from the bundle.
         * ``scope=rows``    - the listed positional row indices are
-                              dropped from the file. Indices match the
-                              same 0-based ``row`` field used in
-                              clusters / the labelling UI.
+                              dropped from the file. ``_ROW_MAP.json``
+                              maps each exported row position back to
+                              the original 0-based benchmark row.
         * ``scope=columns`` - the listed column names are dropped.
 
         Sources with no active exclusion pass through unchanged
@@ -537,8 +528,9 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
         survive). Sources with active row/column exclusions are
         re-emitted via pandas' default CSV writer using the cached,
         normalised frame the rest of the labelling backend uses, so
-        the cell coordinates inside the sanitised file still align
-        with ``original_value`` recorded in the benchmark.
+        ``_ROW_MAP.json`` must be applied when a downstream consumer
+        joins predictions from a row-filtered CSV back to benchmark
+        coordinates.
 
         The ZIP preserves each source's directory structure relative
         to the longest path prefix all sources share - so e.g. a run
@@ -623,6 +615,7 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
         with zipfile.ZipFile(
             tmp_zip, "w", compression=zipfile.ZIP_DEFLATED
         ) as zf:
+            row_maps: List[Dict[str, Any]] = []
             for source, src_path in included:
                 arcname = _arcname(src_path, source)
                 drop_rows = per_source_rows.get(source) or set()
@@ -649,6 +642,11 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
                         i for i in range(len(frame)) if i not in drop_rows
                     ]
                     frame = frame.iloc[keep_mask]
+                    row_maps.append({
+                        "source": source,
+                        "path": arcname,
+                        "exported_to_source": keep_mask,
+                    })
                 # Materialise the sanitised frame to disk first so
                 # zipfile can stream its bytes; the directory is
                 # reused on every export so it doubles as an
@@ -662,6 +660,23 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
                 frame.to_csv(tmp_path, index=False)
                 os.replace(tmp_path, out_path)
                 zf.write(out_path, arcname=arcname)
+            if row_maps:
+                zf.writestr(
+                    "_ROW_MAP.json",
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "description": (
+                                "For each row-filtered CSV, exported_to_source[i] "
+                                "is the original zero-based source row for exported "
+                                "data row i."
+                            ),
+                            "sources": row_maps,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                )
         os.replace(tmp_zip, zip_path)
         return FileResponse(
             zip_path,
