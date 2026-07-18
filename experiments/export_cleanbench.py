@@ -1,4 +1,4 @@
-"""Build the first version of the unified, cross-error-type benchmark.
+"""Build the unified, cross-error-type CleanBench materialization.
 
 Composes the SAME per-run materialisation the live workbench export
 endpoint uses (``src.labeling.routers.exports``) for every (pool x
@@ -22,7 +22,7 @@ flagged the cell -> ``str`` when they agree on one value, ``list`` when
 they genuinely differ (bi-directional), ``null`` when only prose advice
 exists (the per-type fixes stay in the ``per_type`` bundle).
 
-Outputs (default ``benchmark/merged_v1/``)::
+Outputs (default ``benchmark/CleanBench/``)::
 
     benchmark.json       unified per-cell ground truth (source,row,column,
                          original_value,status,error_types,
@@ -35,8 +35,8 @@ Outputs (default ``benchmark/merged_v1/``)::
 
 Read-only w.r.t. the runs. Run::
 
-    python -m experiments.export_merged_benchmark            # all pools
-    python -m experiments.export_merged_benchmark --pools excel_500
+    python -m experiments.export_cleanbench            # all pools
+    python -m experiments.export_cleanbench --pools excel_500
 """
 
 from __future__ import annotations
@@ -118,7 +118,7 @@ def build_exclusion_union(pools: List[str]) -> ExclusionUnion:
 
     An operator marks a CSV / rows / columns as too messy to label in ANY
     one run (e.g. the typo run excludes a file); that immunity must apply to
-    the WHOLE merged benchmark, not just the run that recorded it -- otherwise
+    all of CleanBench, not just the run that recorded it -- otherwise
     a sibling run (inconsistency, semantic, ...) still emits error/ambiguous
     labels inside the excluded slice. This unions every run's ``exclusions.jsonl``
     so a later filter can drop those leaked cells / rows.
@@ -199,7 +199,7 @@ def row_finding_is_excluded(union: ExclusionUnion, rec: Dict[str, Any]) -> bool:
 
 
 def _load_llm_corrected_cache(out_dir: Path) -> Dict[Tuple[str, int, str], str]:
-    """Optional best-effort LLM fixes from ``scripts/llm_fill_corrected_values.py``.
+    """Optional best-effort fixes from ``llm_corrected_cache.jsonl``.
 
     Maps ``(source, row, column) -> corrected_value`` for cells whose fix the
     LLM could supply. Missing file / no-fix entries (``corrected_value: null``)
@@ -371,7 +371,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--pools", nargs="*", default=list(REGISTRY),
                     choices=list(REGISTRY), help="which pools to include")
-    ap.add_argument("--out", default=str(PROJECT_ROOT / "benchmark" / "merged_v1"))
+    ap.add_argument("--out", default=str(PROJECT_ROOT / "benchmark" / "CleanBench"))
     args = ap.parse_args()
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -527,7 +527,7 @@ def main() -> None:
             merged_cv = sorted(concretes)
 
         # Final fallback: a best-effort LLM-supplied fix (cached on disk by
-        # scripts/llm_fill_corrected_values.py) for an otherwise empty cell.
+        # llm_corrected_cache.jsonl) for an otherwise empty cell.
         from_llm = False
         if status == "error" and merged_cv in (None, "", []):
             cached = llm_cv.get((key[0], key[1], key[2]))

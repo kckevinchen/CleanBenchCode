@@ -1,4 +1,4 @@
-# fm_data_tasks (Narayan et al., VLDB'23) on `benchmark/merged_v8`
+# fm_data_tasks (Narayan et al., VLDB'23) on CleanBench
 
 ["Can Foundation Models Wrangle Your Data?"](https://arxiv.org/abs/2205.09911)
 (HazyResearch/[fm_data_tasks](https://github.com/HazyResearch/fm_data_tasks),

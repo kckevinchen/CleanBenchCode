@@ -41,7 +41,7 @@ def main():
 
     # source -> dataset, from the benchmark (manifest doesn't carry it).
     bench = os.path.join(
-        os.path.dirname(MANIFEST), "..", "..", "..", "benchmark", "merged_v2",
+        os.path.dirname(MANIFEST), "..", "..", "..", "benchmark", "CleanBench",
         "benchmark_cell.json",
     )
     src2ds = {}

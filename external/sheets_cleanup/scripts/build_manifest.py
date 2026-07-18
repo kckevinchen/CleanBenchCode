@@ -1,8 +1,8 @@
 """Build a manifest mapping each benchmark source table -> local CSV path.
 
 Output: outputs/manifest.json  [{source, csv_path, n_rows, n_cols, header:[...]}]
-Primary source dir is data/_merged_v2_all_sources (purpose-built for merged_v2);
-falls back to _merged_v2_inconsistency_sources, then a one-time walk of data/.
+Sources are resolved from the canonical ``data/CleanBench`` extraction, with a
+one-time walk of ``data/`` as a fallback.
 """
 
 import csv
@@ -11,9 +11,8 @@ import os
 import sys
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-BENCH = os.path.join(REPO, "benchmark", "merged_v2", "benchmark_cell.json")
-PRIMARY = os.path.join(REPO, "data", "_merged_v2_all_sources")
-SECONDARY = os.path.join(REPO, "data", "_merged_v2_inconsistency_sources")
+BENCH = os.path.join(REPO, "benchmark", "CleanBench", "benchmark_cell.json")
+PRIMARY = os.path.join(REPO, "data", "CleanBench")
 DATA = os.path.join(REPO, "data")
 OUT = os.path.join(os.path.dirname(__file__), "..", "outputs", "manifest.json")
 
@@ -37,10 +36,9 @@ def index_dir(d):
     idx = {}
     if not os.path.isdir(d):
         return idx
-    for name in os.listdir(d):
-        p = os.path.join(d, name)
-        if os.path.isfile(p):
-            idx.setdefault(name, p)
+    for dirpath, _dirs, files in os.walk(d):
+        for name in files:
+            idx.setdefault(name, os.path.join(dirpath, name))
     return idx
 
 
@@ -66,15 +64,12 @@ def probe(path):
 def main():
     srcs = benchmark_sources()
     primary = index_dir(PRIMARY)
-    secondary = index_dir(SECONDARY)
 
     resolved = {}
     missing = []
     for s in srcs:
         if s in primary:
             resolved[s] = primary[s]
-        elif s in secondary:
-            resolved[s] = secondary[s]
         else:
             missing.append(s)
 

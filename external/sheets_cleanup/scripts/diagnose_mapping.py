@@ -12,7 +12,7 @@ from harness import OUT
 from parse_cleanup_html import parse_html
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-BENCH = os.path.join(REPO, "benchmark", "merged_v2", "benchmark_cell.json")
+BENCH = os.path.join(REPO, "benchmark", "CleanBench", "benchmark_cell.json")
 MANIFEST = os.path.join(OUT, "manifest.json")
 HTML_DIR = os.path.join(OUT, "html")
 A1_CELL = re.compile(r"^([A-Z]+)(\d+)$")

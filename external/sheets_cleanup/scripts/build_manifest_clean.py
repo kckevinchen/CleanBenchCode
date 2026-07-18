@@ -1,8 +1,8 @@
-"""Build a manifest of the 785 non-benchmark ("clean") tables in
-data/_merged_v2_all_sources for the false-positive run.
+"""Build a manifest of non-benchmark ("clean") CleanBench source tables for
+the false-positive run.
 
 Output: outputs/manifest_clean.json  [{source, csv_path, n_rows, n_cols, header}]
-Excludes the 217 benchmark sources (those are already captured).
+Excludes sources with cell labels (those are already captured).
 """
 
 import csv
@@ -11,8 +11,8 @@ import os
 import sys
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-BENCH = os.path.join(REPO, "benchmark", "merged_v2", "benchmark_cell.json")
-POOL = os.path.join(REPO, "data", "_merged_v2_all_sources")
+BENCH = os.path.join(REPO, "benchmark", "CleanBench", "benchmark_cell.json")
+POOL = os.path.join(REPO, "data", "CleanBench")
 OUT = os.path.join(os.path.dirname(__file__), "..", "outputs", "manifest_clean.json")
 
 
@@ -34,36 +34,35 @@ def probe(path):
 
 def main():
     bench = benchmark_sources()
-    entries = sorted(os.listdir(POOL))
     manifest = []
     skipped = []
-    for name in entries:
-        if not name.lower().endswith(".csv"):
-            continue
-        if name in bench:
-            continue
-        path = os.path.realpath(os.path.join(POOL, name))
-        if not os.path.isfile(path):
-            skipped.append((name, "missing"))
-            continue
-        try:
-            n_rows, n_cols, header = probe(path)
-        except Exception as e:  # noqa: BLE001
-            skipped.append((name, f"probe:{e}"))
-            continue
-        if n_rows <= 0 or n_cols <= 0:
-            skipped.append((name, f"empty rows={n_rows} cols={n_cols}"))
-            continue
-        manifest.append(
-            {"source": name, "csv_path": path, "n_rows": n_rows,
-             "n_cols": n_cols, "header": header}
-        )
+    csv_entries = 0
+    for dirpath, _dirs, files in os.walk(POOL):
+        for name in sorted(files):
+            if not name.lower().endswith(".csv"):
+                continue
+            csv_entries += 1
+            if name in bench:
+                continue
+            path = os.path.realpath(os.path.join(dirpath, name))
+            try:
+                n_rows, n_cols, header = probe(path)
+            except Exception as e:  # noqa: BLE001
+                skipped.append((name, f"probe:{e}"))
+                continue
+            if n_rows <= 0 or n_cols <= 0:
+                skipped.append((name, f"empty rows={n_rows} cols={n_cols}"))
+                continue
+            manifest.append(
+                {"source": name, "csv_path": path, "n_rows": n_rows,
+                 "n_cols": n_cols, "header": header}
+            )
 
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, "w") as f:
         json.dump(manifest, f, indent=2)
 
-    print(f"pool entries: {len(entries)} | benchmark excluded: {len(bench)}")
+    print(f"pool entries: {csv_entries} | benchmark excluded: {len(bench)}")
     print(f"clean tables in manifest: {len(manifest)}")
     print(f"skipped: {len(skipped)}")
     for s in skipped[:10]:

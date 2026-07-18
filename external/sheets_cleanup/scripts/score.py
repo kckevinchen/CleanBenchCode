@@ -1,4 +1,4 @@
-"""Score Google Sheets 'Cleanup suggestions' against the merged_v2 cell benchmark.
+"""Score Google Sheets 'Cleanup suggestions' against the CleanBench cell benchmark.
 
 Pipeline: parse each captured panel HTML -> interpret suggestions by category
 scope (cell / column / row) -> map Sheets A1 refs to benchmark (source, row,
@@ -12,9 +12,9 @@ Mapping notes:
 Google's categories and their scope:
   WHITESPACE, INVALID DATA -> cell-level (chip like "J78")
   COLUMN FORMAT            -> column-level (chip like "C")        [display format]
-  DUPLICATE ROWS           -> row-level (chips are row numbers)   [no merged_v2 gold]
+    DUPLICATE ROWS           -> row-level (chips are row numbers)   [not cell gold]
 
-merged_v2 contains only cell-level single-column error types, so the headline
+This scorer uses only cell-level CleanBench records, so the headline
 metric is cell-level micro-F1 using Google's cell-scoped predictions.
 """
 
@@ -25,11 +25,11 @@ import os
 import re
 
 from harness import OUT
-from parse_cleanup_html import _col_to_idx, parse_html
+from parse_cleanup_html import parse_html
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-BENCH = os.path.join(REPO, "benchmark", "merged_v2", "benchmark_cell.json")
-NEUTRAL = os.path.join(REPO, "benchmark", "merged_v2", "neutral_cells.jsonl")
+BENCH = os.path.join(REPO, "benchmark", "CleanBench", "benchmark_cell.json")
+NEUTRAL = os.path.join(REPO, "benchmark", "CleanBench", "neutral_cells.jsonl")
 MANIFEST = os.path.join(OUT, "manifest.json")
 HTML_DIR = os.path.join(OUT, "html")
 
@@ -137,7 +137,6 @@ def main():
 
     gold_error = {k for k, v in gold.items() if v["status"] == "error"}
     gold_ambig = {k for k, v in gold.items() if v["status"] == "ambiguous"}
-    tables_with_gold = {k[0] for k in gold}
 
     # Aggregate predictions across all captured tables.
     all_cell_preds = set()
@@ -224,7 +223,7 @@ def main():
 
     # Markdown summary
     lines = [
-        "# Google Sheets Cleanup vs merged_v2 benchmark",
+        "# Google Sheets Cleanup vs CleanBench",
         "",
         f"- Tables captured: **{report['tables_captured']}** "
         f"(scored {report['tables_scored']})",

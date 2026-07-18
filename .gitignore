@@ -5,8 +5,12 @@ outputs/
 checkpoints/
 notebooks/
 label_result/
+benchmark/*
+!benchmark/README.md
+!benchmark/CleanBench/
+benchmark/CleanBench/*
+!benchmark/CleanBench/README.md
 docs/
-benchmark/
 logs/
 runs/
 wandb/

@@ -1,4 +1,4 @@
-# `external/cleanagent/` — CleanAgent on `benchmark/merged_v2`
+# CleanAgent on CleanBench
 
 [CleanAgent](https://github.com/sfu-db/CleanAgent) (Qi, Miao, Wang,
 *Automating Data Standardization with LLM-based Agents*, arXiv:2403.08291)

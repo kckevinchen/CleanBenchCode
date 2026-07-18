@@ -9,9 +9,7 @@ column experiments are independent of CSV experiments are independent
 of cross-CSV experiments. If a caller wants an overall figure they
 must aggregate arm-level estimates explicitly.
 
-The motivation - and the math - are documented in
-``docs/per-arm-good-turing.md`` and the conversation summarised in
-the design doc; the short version is that pooling species across
+The key design rule is that pooling species across
 heterogeneous arms (e.g. ``typo`` on a numeric column vs. on a name
 column) violates the i.i.d. assumption Good-Turing needs and produces
 a missing-mass estimate that hides exactly the heterogeneity the user

@@ -1,4 +1,4 @@
-"""Runner: ForestED (LLM-induced decision-tree ensemble) on benchmark/merged_v2.
+"""Runner: ForestED (LLM-induced decision-tree ensemble) on CleanBench.
 
 ForestED (mengqiwang1/ForestED, "Ensembling LLM-Induced Decision Trees for
 Explainable and Robust Error Detection") is a **few-shot** error detector: from a
@@ -49,9 +49,8 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(REPO_ROOT / "external" / "rein"))
 sys.path.insert(0, str(REPO_ROOT / "external" / "synth_fewshot"))
 
-import common as C  # noqa: E402
-import inject as SI  # noqa: E402
 import adapter  # noqa: E402
+import inject as SI  # noqa: E402
 
 _DF = None  # ForestED module, loaded once with the LLMClient seam patched
 _CATALOG = None

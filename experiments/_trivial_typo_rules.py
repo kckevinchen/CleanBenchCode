@@ -1,6 +1,6 @@
 """Trivial-typo deterministic rules for v4 audit.
 
-The labeling-criteria codebook (``docs/Typo labeling criteria.md``)
+The tracked typo policy in ``prompts/error_types.yaml``
 authorises only ONE class of cells to be auto-flagged as
 "Typo-but-trivial": **repeated / padding whitespace** (e.g.
 ``" James Smith"``, ``"James  Smith"``). The codebook lists

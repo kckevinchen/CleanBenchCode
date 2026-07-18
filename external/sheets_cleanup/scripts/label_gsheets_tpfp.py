@@ -1,4 +1,4 @@
-"""Label Google Sheets 'Data cleanup' detections TP/FP against benchmark/merged_v8,
+"""Label Google Sheets 'Data cleanup' detections TP/FP against CleanBench,
 mirroring the Excel labeled CSV.
 
 Google's cleanup is apply-then-diff: scripts/diff_cleanup.py recovered every cell

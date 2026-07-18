@@ -23,11 +23,10 @@ REIN_REPO = REIN_DIR / "rein-benchmark"
 DATASETS_DIR = REIN_REPO / "datasets"
 RESULTS_DIR = REIN_DIR / "results"
 
-# Benchmark of record. Override with env vars so a v7 (or any other) run is still
-# possible without editing code:
-#   DQ_BENCHMARK_DIR=benchmark/merged_v7 DQ_SOURCES_DIR=data/_merged_v7_all_sources ...
-_DEFAULT_BENCHMARK = REPO_ROOT / "benchmark" / "merged_v8"
-_DEFAULT_SOURCES = REPO_ROOT / "data" / "_merged_v8_all_sources"
+# Benchmark of record. Override with environment variables without editing code.
+#   DQ_BENCHMARK_DIR=/path/to/benchmark DQ_SOURCES_DIR=/path/to/sources ...
+_DEFAULT_BENCHMARK = REPO_ROOT / "benchmark" / "CleanBench"
+_DEFAULT_SOURCES = REPO_ROOT / "data" / "CleanBench"
 DEFAULT_BENCHMARK_DIR = Path(os.environ.get("DQ_BENCHMARK_DIR", str(_DEFAULT_BENCHMARK)))
 DEFAULT_SOURCES_DIR = Path(os.environ.get("DQ_SOURCES_DIR", str(_DEFAULT_SOURCES)))
 

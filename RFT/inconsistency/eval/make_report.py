@@ -314,8 +314,8 @@ def main():
     # Appendix
     doc.add_heading("Appendix -- Reproducibility & Artifacts", 1)
     add_bullets(doc, [
-        "Rulebook (shareable): docs/inconsistency_prompt_shareable.md",
-        "Eval harness: RFT/inconsistency/v1/eval/run_baseline.py "
+        "Rulebook: RFT/inconsistency/prompts/rulebook.md",
+        "Eval harness: RFT/inconsistency/eval/run_baseline.py "
         "(--model gpt-5.5 --reasoning-effort none --temperature 0)",
         "Per-mistake export: outputs/.../gpt55_mistakes_<hash>.jsonl (this report uses it)",
         "Casing gold-gap worklist: outputs/.../gpt55_gold_gap_candidates_casing.jsonl",

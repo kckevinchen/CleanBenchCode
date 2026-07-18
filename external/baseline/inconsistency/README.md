@@ -45,7 +45,7 @@ failure modes observed during development: prompt-vs-benchmark overfitting and
 
 ## Data (auto-resolved)
 
-- Gold: `benchmark/merged_v2/benchmark_inconsistency_cells.jsonl` (per-cell,
+- Gold: `benchmark/CleanBench/benchmark_cell.json` (filtered to inconsistency,
   `label` ∈ {error, ambiguous}, `dataset` ∈ {pbi_500, bing21_500}).
 - Source CSVs resolved from `data/curated_pbi_500_dedup` + `data/curated_bing21_500_dedup`.
 - Scoring (vendored from `RFT.inconsistency.v1.eval.run_baseline`): per distinct
@@ -98,7 +98,7 @@ improve by more than this), `--dev-frac`/`--seed` (the split), `--dev-dataset`
 | file | role |
 |---|---|
 | `_task.py` | user message, response schema, `parse_findings`, **rulebook surgery** |
-| `data.py` | gold loading (merged_v2), CSV lookup, by-source stratified split |
+| `data.py` | CleanBench gold loading, CSV lookup, by-source stratified split |
 | `leakage.py` | blocklist + suggestion scrubber (the mechanical barrier) |
 | `evaluator.py` | pure scoring (`score_column`/`aggregate`) + injected detector + live `Gpt55Detector` |
 | `agents.py` | `review()` / `edit_prompt()` over an injectable `AgentBackend` |

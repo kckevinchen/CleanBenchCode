@@ -1,4 +1,4 @@
-# TabClean on `benchmark/merged_v2` (cell-level)
+# TabClean on CleanBench (cell-level)
 
 [TabClean](https://github.com/Wangyibo321/TabClean) (Wang, Zhang, He, Su,
 Bhargava, Liu — arXiv:2606.25388) is a **few-shot, multi-agent** LLM pipeline

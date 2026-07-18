@@ -8,14 +8,14 @@ never sees data) rewrites the rulebook; candidates are selected on a held-out
 
 - Detector: `gpt-5.5`, `reasoning_effort=none`, `temperature=0`.
 - Agents (reviewer/editor): `gpt-5.5`, `reasoning_effort=medium`.
-- Benchmark: `benchmark/merged_v2/benchmark_inconsistency_cells.jsonl`
+- Benchmark: `benchmark/CleanBench/benchmark_cell.json` (inconsistency records)
   (pbi_500 + bing21_500; 422 error + 229 ambiguous), split **by source**:
   dev 28 / val 14 / test 42. *Corrected 2026-06-22:* 3 missed-FN cells were
   retagged `inconsistency` (2 phone dot→dash, 1 trailing comma); all numbers
   below are re-scored against this corrected gold (`rescored_metrics.json`).
 - Scoring: per distinct `(column, value)`; `ambiguous` is FP-immune; clean
   columns audited for precision. Curator-ignored CSVs/columns/cells
-  (`benchmark/merged_v1/ignored.jsonl`) are excluded from scoring.
+  (`benchmark/CleanBench/ignored.jsonl`) are excluded from scoring.
 
 ## Run `hardened10v2` (12 iterations)
 

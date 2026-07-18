@@ -1,4 +1,4 @@
-"""Runner: evaluate TabClean on benchmark/merged_v2 as a cell-level detector.
+"""Runner: evaluate TabClean on CleanBench as a cell-level detector.
 
 TabClean (https://github.com/Wangyibo321/TabClean) is a FEW-SHOT, multi-agent
 LLM pipeline that synthesizes a reusable Python *cleaning program*: it builds an

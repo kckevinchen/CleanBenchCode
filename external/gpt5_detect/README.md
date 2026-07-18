@@ -163,7 +163,7 @@ dossier; and prompt lock preceded final-test creation.
 | **GPT-5.5 single-prompt** | 214 | 0.403 | 0.773 | **0.530** | 0.843 | 0.693 | 0.808 | 1.000 |
 | raha (reference) | 186 | 0.785 | 0.690 | 0.735 | 0.693 | 0.672 | 1.000 | 0.500 |
 
-These values predate `merged_v7` and the full-universe refresh. Do not copy them
+These values predate the current full-universe CleanBench refresh. Do not copy them
 into the current paper table; use fresh v7 score artifacts.
 
 ## Notes / caveats

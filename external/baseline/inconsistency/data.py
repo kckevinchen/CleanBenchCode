@@ -1,8 +1,8 @@
 """Gold loading, CSV resolution, and the by-source train/test split.
 
-Reads the per-cell inconsistency benchmark
-(``benchmark/merged_v2/benchmark_inconsistency_cells.jsonl`` — fields
-``source,row,column,original_value,label,corrected_value,dataset``) into the
+Reads inconsistency records from the unified cell benchmark
+(``benchmark/CleanBench/benchmark_cell.json`` — fields
+``source,row,column,original_value,status,error_types,corrected_value,dataset``) into the
 ``(source, column)`` gold shape the scorer needs, and splits **by source**
 (stratified by ``dataset`` and has-error) so no CSV straddles dev and test —
 zero leakage. ``dataset`` attribution is kept so the final test report can be
@@ -20,13 +20,13 @@ from typing import Any
 from external.baseline.inconsistency._task import norm
 
 # Repo-relative defaults (verified present at build time).
-DEFAULT_BENCHMARK = "benchmark/merged_v2/benchmark_inconsistency_cells.jsonl"
+DEFAULT_BENCHMARK = "benchmark/CleanBench/benchmark_cell.json"
 DEFAULT_DATA_DIRS = ("data/curated_pbi_500_dedup", "data/curated_bing21_500_dedup")
 # Canonical immunity set produced alongside the benchmark by
-# experiments/export_merged_benchmark.py ("skip + exclusion sentinels"):
+# experiments/export_cleanbench.py ("skip + exclusion sentinels"):
 # whole CSVs / columns / rows the curators ignored, plus individual skipped
 # cells. Flagging any of these is neither a true nor a false positive.
-DEFAULT_EXCLUSIONS = "benchmark/merged_v1/ignored.jsonl"
+DEFAULT_EXCLUSIONS = "benchmark/CleanBench/ignored.jsonl"
 
 
 class Exclusions:
@@ -137,7 +137,7 @@ def _resolve_row_exclusions(exc: Exclusions, csv_map: dict[str, Path]) -> None:
 def acceptable_set(rec: dict[str, Any]) -> set[str]:
     """Normalised acceptable corrections for a gold-error record.
 
-    ``corrected_value`` may be a string, a list, or ``None`` (merged_v2 has all
+    ``corrected_value`` may be a string, a list, or ``None`` (CleanBench has all
     three). An empty acceptable set means "any flag counts as a TP, but no
     specific correction is graded as right".
     """
@@ -166,12 +166,14 @@ def load_gold(
         if not line.strip():
             continue
         r = json.loads(line)
+        if "inconsistency" not in (r.get("error_types") or []):
+            continue
         src = r["source"]
         if r.get("dataset"):
             source_dataset[src] = r["dataset"]
         key = (src, r["column"])
         nv = norm(r["original_value"])
-        label = r.get("label")
+        label = r.get("status")
         if label == "error":
             err[key].setdefault(nv, set()).update(acceptable_set(r))
         elif label == "ambiguous":

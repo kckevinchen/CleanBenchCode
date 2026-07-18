@@ -22,8 +22,8 @@ v2 changes (relative to the frozen v1 in ``RFT/typo/v1/scripts/``):
 The trainee is asked to classify ONE candidate cell value (with the
 column header and a few sibling values for context) into
 ``typo`` / ``clean``, returning a strict-schema JSON object. The grader
-is a ``score_model`` that applies the project rulebook
-(``docs/Typo labeling criteria.md``) and rewards both the right label
+is a ``score_model`` that applies the tracked typo rulebook
+(``RFT/typo/prompts/rulebook.md``) and rewards both the right label
 and, when the cell is a typo, a correction that matches the gold up
 to trivial normalisation.
 
@@ -72,7 +72,7 @@ TYPO_FLAVOURS = ("spelling", "whitespace", "punctuation")
 # Rulebook -- single source of truth for trainee + grader
 # ---------------------------------------------------------------------------
 #
-# Distilled from docs/Typo labeling criteria.md and cross-checked against
+# Distilled from RFT/typo/prompts/rulebook.md and cross-checked against
 # benchmark/benchmark_typo_20260512T213238Z_gpt5-family.jsonl (label
 # counts: 1304 clean / 456 ambiguous / 243 error). Notable adjustments
 # from the raw rulebook:

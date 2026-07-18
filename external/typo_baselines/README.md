@@ -1,4 +1,4 @@
-# `external/typo_baselines/` — SymSpell + NeuSpell on `benchmark/merged_v2`
+# SymSpell and NeuSpell on CleanBench
 
 Two classic spell/typo correctors repurposed as **cell-level error detectors** and
 evaluated on the cell benchmark, reusing the REIN harness so results sit in one
@@ -30,7 +30,7 @@ The benchmark is **exhaustively labeled**: a cell is an error only if labeled
 2. **Positives = labeled `error` cells only.** Recall is measured against these.
 3. **Neutralize `ambiguous` + `skipped` + `excluded` cells** — never scored as
    clean/FP. `ambiguous` comes from the benchmark; `skipped`/`excluded` come from
-   `benchmark/merged_v2/neutral_cells.jsonl` (see
+  `benchmark/CleanBench/neutral_cells.jsonl` (see
    `python -m experiments.export_neutral_cells`). A labeled **error always wins**
    over a neutral rule (so the 20+21 error cells that live in excluded
    files/columns still count).

@@ -28,7 +28,7 @@ is rarely labeled with a concrete fix. So this exporter:
     value (the explanation is still the model's). ``row_duplication`` is
     structural: ``corrected_value="drop_row"``, ``target_column=null``.
 
-Outputs (default ``benchmark/merged_v2/``)::
+Outputs (default ``benchmark/CleanBench/``)::
 
     benchmark_row.json / .csv        per-row ground truth + fix + explanation
     llm_row_cache.jsonl              cached LLM fix+explanation (resumable)
@@ -59,10 +59,7 @@ except ImportError:  # pragma: no cover
     def tqdm(it, **_kw):  # type: ignore
         return it
 
-from src.core.llm_client import LLMClient
-from src.labeling.app import RunContext
-
-from experiments.export_merged_benchmark import (
+from experiments.export_cleanbench import (
     DATASET_OF,
     LABEL_RANK,
     OUTPUTS,
@@ -72,6 +69,8 @@ from experiments.export_merged_benchmark import (
     build_exclusion_union,
     row_finding_is_excluded,
 )
+from src.core.llm_client import LLMClient
+from src.labeling.app import RunContext
 
 PER_ROW_TYPES: Set[str] = {
     "fd_violation",
@@ -112,7 +111,7 @@ INTER_TABLE_REGISTRY: List[Dict[str, Any]] = [
         "run": "20260622T184510Z_gpt5-family",
         "source_root": PROJECT_ROOT / "data" / "curated_bing21_mt100_dedup",
         # ``None`` => every workbook with a confirmed/unsure label in the run.
-        # As of merged_v6 this is 4 workbooks (adds b49031f16271… with 5
+        # This currently covers 4 workbooks (including b49031f16271... with 5
         # confirmed and 44b1a96909… with 2 unsure to the original two), i.e.
         # 12 records (10 error + 2 ambiguous) across 8 sheets.
         "workbooks": None,
@@ -639,7 +638,7 @@ def _materialize_inter_table() -> List[Dict[str, Any]]:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--pools", nargs="*", default=list(REGISTRY), choices=list(REGISTRY))
-    ap.add_argument("--out", default=str(PROJECT_ROOT / "benchmark" / "merged_v2"))
+    ap.add_argument("--out", default=str(PROJECT_ROOT / "benchmark" / "CleanBench"))
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--concurrency", type=int, default=8)
     ap.add_argument("--no-llm", action="store_true")

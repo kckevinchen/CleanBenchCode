@@ -1,4 +1,4 @@
-"""Typo-specialist baselines (SymSpell + NeuSpell) on ``benchmark/merged_v2``.
+"""Typo-specialist baselines (SymSpell + NeuSpell) on CleanBench.
 
 These are string spell/typo correctors repurposed as cell-level error *detectors*:
 a cell is flagged when the corrector judges it misspelled (SymSpell: a token has a
@@ -124,8 +124,8 @@ def _norm(s: str) -> str:
 
 
 def run_neuspell(cells: list[tuple[Cell, str]], args) -> dict[Cell, str | None]:
-    import torch
     import neuspell
+    import torch
 
     # NeuSpell's checkpoints predate torch 2.6, whose torch.load default flipped to
     # weights_only=True and rejects them ("Unsupported operand"). Force the legacy

@@ -1,4 +1,4 @@
-"""Score Excel Copilot findings (external/excel_finding.csv) against merged_v5.
+"""Score Excel Copilot findings against CleanBench.
 
 The findings CSV already provides `data_row` (0-based) and `column` name, so
 mapping to the benchmark's (source,row,column) keys is direct. We report overall
@@ -12,7 +12,7 @@ import json
 import os
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-BENCH = os.path.join(REPO, "benchmark", "merged_v5", "benchmark_cell.json")
+BENCH = os.path.join(REPO, "benchmark", "CleanBench", "benchmark_cell.json")
 FINDINGS = os.path.join(REPO, "external", "excel_finding.csv")
 OUT = os.path.join(os.path.dirname(__file__), "..", "outputs")
 
@@ -48,14 +48,14 @@ def main():
         }
     gold_err = {k for k, v in gold.items() if v["status"] == "error"}
     gold_amb = {k for k, v in gold.items() if v["status"] == "ambiguous"}
-    v5_tables = {k[0] for k in gold}
+    benchmark_tables = {k[0] for k in gold}
 
     raw, preds_all, by_key = load_findings()
     pred_tables = {k[0] for k in preds_all}
 
-    # Restrict scoring to tables that are BOTH in v5 and processed by Excel, so
+    # Restrict scoring to tables that are both in CleanBench and processed by Excel, so
     # gold exists for every prediction (fair precision) and recall is defined.
-    covered = v5_tables & pred_tables
+    covered = benchmark_tables & pred_tables
     preds = {k for k in preds_all if k[0] in covered}
     scope_err = {k for k in gold_err if k[0] in covered}
     scope_amb = {k for k in gold_amb if k[0] in covered}
@@ -84,13 +84,13 @@ def main():
             excel_type_on_tp[t] += 1
 
     report = {
-        "benchmark": "merged_v5",
+        "benchmark": "CleanBench",
         "excel_detections": len(raw),
         "excel_pred_cells_all": len(preds_all),
         "excel_pred_cells_scored": len(preds),
         "excel_tables": len(pred_tables),
-        "v5_tables": len(v5_tables),
-        "v5_tables_excel_covered": len(covered),
+        "benchmark_tables": len(benchmark_tables),
+        "benchmark_tables_excel_covered": len(covered),
         "gold_error_cells_in_covered_tables": len(scope_err),
         "cell_level": {
             "tp": len(tp),
@@ -110,7 +110,7 @@ def main():
         "excel_type_labels_on_true_positives": dict(excel_type_on_tp.most_common()),
     }
     os.makedirs(OUT, exist_ok=True)
-    with open(os.path.join(OUT, "score_excel_v5.json"), "w") as f:
+    with open(os.path.join(OUT, "score_excel_cleanbench.json"), "w") as f:
         json.dump(report, f, indent=2)
     print(json.dumps(report, indent=2))
 

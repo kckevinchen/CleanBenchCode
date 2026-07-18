@@ -1,4 +1,4 @@
-"""Adapter: materialize a merged benchmark into REIN dataset directories.
+"""Adapter: materialize CleanBench into REIN dataset directories.
 
 For every benchmark *source* CSV that has at least one labeled cell, this writes
 ``datasets/<ds>/`` containing:

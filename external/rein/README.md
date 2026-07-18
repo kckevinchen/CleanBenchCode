@@ -1,4 +1,4 @@
-# `external/rein/` — REIN error-detection baselines on `benchmark/merged_v2`
+# REIN error-detection baselines on CleanBench
 
 Runs detectors from the **REIN** data-cleaning benchmark
 ([mohamedyd/rein-benchmark](https://github.com/mohamedyd/rein-benchmark),
@@ -38,7 +38,7 @@ accuracy**, so the integration is deliberately lighter and postgres-free:
    detectors faithfully** (ported from `rein/detectors.py`) and calls the
    underlying tools directly.
 3. **One REIN dataset per benchmark source CSV** (215 of 217 sources are present
-   locally under `data/_merged_v2_all_sources/`).
+  locally under `data/CleanBench/`).
 
 ## Setup
 
@@ -61,7 +61,7 @@ python external/rein/prepare_datasets.py            # --limit N for a smoke test
 #                              are false positives); labeled-only scoring inflates it.
 
 # 1b) (optional) export the skipped/excluded NEUTRAL set so scoring can ignore it
-python -m experiments.export_neutral_cells          # -> benchmark/merged_v2/neutral_cells.jsonl
+python -m experiments.export_neutral_cells          # -> benchmark/CleanBench/neutral_cells.jsonl
 
 # 2) run detector(s) -> predictions JSONL
 python external/rein/run_rein.py --detector raha --tag raha_fewshot20   # FEW-SHOT: see note
@@ -123,7 +123,7 @@ The benchmark is **exhaustively labeled** (unlabeled cell == clean == true
 negative), so scoring runs over the **entire CSV**:
 - **Positives** = labeled `error` cells only (recall is measured against these).
 - **Neutral** (never clean/FP) = `ambiguous` (from the benchmark) plus `skipped`
-  and `excluded` cells from `benchmark/merged_v2/neutral_cells.jsonl`
+  and `excluded` cells from `benchmark/CleanBench/neutral_cells.jsonl`
   (`python -m experiments.export_neutral_cells`, which reuses the same
   `_materialize_run` that built the benchmark). A labeled **error wins** over any
   neutral rule. The scorer's `neut` column reports how many predictions were

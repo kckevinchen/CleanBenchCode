@@ -1,7 +1,7 @@
 """
 Compare the Excel "Clean Data / Ideas" external finding dump
 (``external/excel_finding.csv``) against the curated per-cell benchmark
-(``benchmark/merged_v3/benchmark_cell.csv``), restricted to the
+(``benchmark/CleanBench/benchmark_cell.csv``), restricted to the
 **inconsistency** error type.
 
 Unlike ``compare_external_inconsistency_run`` (which scores a model that
@@ -23,7 +23,7 @@ the benchmark's source normalisation.
 Scope
 -----
 * An Excel finding is *judgeable* iff its source is part of the benchmark
-  coverage (``sources_normalized.zip``); everything else is reported as
+    coverage (``sanitized_sources.zip``); everything else is reported as
   out-of-scope and excluded from precision.
 * For recall we additionally report a "scanned" view restricted to the
   sources that appear anywhere in the Excel dump (the files Excel
@@ -50,10 +50,10 @@ Buckets (per benchmark inconsistency-error cell, recall side)
 Usage::
 
     python -m experiments.compare_excel_finding_inconsistency \\
-        --benchmark benchmark/merged_v3/benchmark_cell.csv \\
+        --benchmark benchmark/CleanBench/benchmark_cell.csv \\
         --predictions external/excel_finding.csv \\
-        --coverage-zip benchmark/merged_v3/sources_normalized.zip \\
-        --out-dir outputs/excel_finding_vs_merged_v3_inconsistency
+        --coverage-zip benchmark/CleanBench/sanitized_sources.zip \\
+        --out-dir outputs/excel_finding_vs_cleanbench_inconsistency
 """
 
 from __future__ import annotations
@@ -432,18 +432,18 @@ def _write_csv(path: Path, rows: list[dict]) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
-        "--benchmark", type=Path, default=Path("benchmark/merged_v3/benchmark_cell.csv")
+        "--benchmark", type=Path, default=Path("benchmark/CleanBench/benchmark_cell.csv")
     )
     ap.add_argument("--predictions", type=Path, default=Path("external/excel_finding.csv"))
     ap.add_argument(
         "--coverage-zip",
         type=Path,
-        default=Path("benchmark/merged_v3/sources_normalized.zip"),
+        default=Path("benchmark/CleanBench/sanitized_sources.zip"),
     )
     ap.add_argument(
         "--out-dir",
         type=Path,
-        default=Path("outputs/excel_finding_vs_merged_v3_inconsistency"),
+        default=Path("outputs/excel_finding_vs_cleanbench_inconsistency"),
     )
     args = ap.parse_args()
 
@@ -467,7 +467,7 @@ def main() -> int:
         _write_csv(args.out_dir / f"{bucket}.csv", result[bucket])
 
     lines: list[str] = []
-    lines.append("Excel findings vs benchmark/merged_v3 -- INCONSISTENCY")
+    lines.append("Excel findings vs CleanBench -- INCONSISTENCY")
     lines.append("=" * 60)
     for k, v in summary.items():
         if k == "precision_by_excel_type":

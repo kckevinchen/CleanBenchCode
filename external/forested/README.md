@@ -1,4 +1,4 @@
-# ForestED (LLM-induced decision-tree ensemble) on `benchmark/merged_v2`
+# ForestED (LLM-induced decision-tree ensemble) on CleanBench
 
 [ForestED](https://github.com/mengqiwang1/ForestED) — *"Ensembling LLM-Induced
 Decision Trees for Explainable and Robust Error Detection"* — is a **few-shot**

@@ -1,4 +1,4 @@
-"""Score Google Sheets Cleanup detections against merged_v5 (cell-level).
+"""Score Google Sheets Cleanup detections against CleanBench (cell-level).
 
 Uses manifest_full.json (headers for all 1002 captured tables) and parses every
 captured panel HTML. Reports overall + per-error-type recall/precision, and how
@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from parse_cleanup_html import parse_html  # noqa: E402
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-BENCH = os.path.join(REPO, "benchmark", "merged_v5", "benchmark_cell.json")
+BENCH = os.path.join(REPO, "benchmark", "CleanBench", "benchmark_cell.json")
 OUT = os.path.join(os.path.dirname(__file__), "..", "outputs")
 HTML_DIR = os.path.join(OUT, "html")
 MANIFEST = os.path.join(OUT, "manifest_full.json")
@@ -47,19 +47,19 @@ def main():
         }
     gold_err = {k for k, v in gold.items() if v["status"] == "error"}
     gold_amb = {k for k, v in gold.items() if v["status"] == "ambiguous"}
-    v5_tables = {k[0] for k in gold}
+    benchmark_tables = {k[0] for k in gold}
 
     manifest = {m["source"]: m for m in json.load(open(MANIFEST))}
     captured = {f[:-5] for f in os.listdir(HTML_DIR) if f.endswith(".html")}
 
-    # aggregate predictions (only tables that are in v5, for well-defined recall)
+    # Aggregate predictions only for benchmark tables, for well-defined recall.
     cell_preds = set()      # (source,row,col_name)
     col_preds = set()       # (source,col_name)
     row_preds = set()       # (source,row)
     cat_counts = collections.Counter()
     cat_tables = collections.Counter()
 
-    for src in v5_tables & captured:
+    for src in benchmark_tables & captured:
         header = manifest.get(src, {}).get("header", [])
         parsed = parse_html(open(os.path.join(HTML_DIR, src + ".html")).read())
         seen_cats = set()
@@ -84,7 +84,7 @@ def main():
         for c in seen_cats:
             cat_tables[c] += 1
 
-    # cell-level scoring vs gold errors (restricted to captured v5 tables)
+    # Cell-level scoring against gold errors in captured benchmark tables.
     scope_err = {k for k in gold_err if k[0] in captured}
     scope_amb = {k for k in gold_amb if k[0] in captured}
     tp = cell_preds & scope_err
@@ -105,10 +105,10 @@ def main():
                 type_hit[t] += 1
 
     report = {
-        "benchmark": "merged_v5",
-        "v5_tables": len(v5_tables),
-        "captured_v5_tables": len(v5_tables & captured),
-        "google_categories_on_v5": dict(cat_counts),
+        "benchmark": "CleanBench",
+        "benchmark_tables": len(benchmark_tables),
+        "captured_benchmark_tables": len(benchmark_tables & captured),
+        "google_categories_on_cleanbench": dict(cat_counts),
         "google_category_tables": dict(cat_tables),
         "predictions": {"cell": len(cell_preds), "column": len(col_preds), "row": len(row_preds)},
         "gold_error_cells_scored": len(scope_err),
@@ -123,7 +123,7 @@ def main():
             for t in sorted(type_total)
         },
     }
-    with open(os.path.join(OUT, "score_v5.json"), "w") as f:
+    with open(os.path.join(OUT, "score_cleanbench.json"), "w") as f:
         json.dump(report, f, indent=2)
     print(json.dumps(report, indent=2))
 

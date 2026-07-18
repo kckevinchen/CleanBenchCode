@@ -1,6 +1,6 @@
 """Export the NEUTRAL cell set (skipped + excluded) for the cell benchmark.
 
-The cell benchmark (``benchmark/merged_v2``) exports only ``error`` and
+The cell benchmark (``benchmark/CleanBench``) exports only ``error`` and
 ``ambiguous`` cells; every other cell is treated as clean. But the labeling
 pipeline also produces **skipped** cells and **exclusion** sentinels (whole
 CSV / rows / columns the reviewer set aside). For a fair "evaluate over the
@@ -8,7 +8,7 @@ entire CSV" protocol those must be *neutral* -- never scored as clean / FP.
 
 This script reuses the canonical ``_materialize_run`` (same code path that built
 the benchmark) over the same ``REGISTRY`` pools and writes one JSONL of neutral
-records to ``benchmark/merged_v2/neutral_cells.jsonl``:
+records to ``benchmark/CleanBench/neutral_cells.jsonl``:
 
     {"kind": "skip",         "source": ..., "row": i, "column": name}
     {"kind": "exclude_csv",  "source": ...}
@@ -29,8 +29,7 @@ import collections
 import json
 from pathlib import Path
 
-from experiments.export_merged_benchmark import (
-    DATASET_OF,
+from experiments.export_cleanbench import (
     OUTPUTS,
     PROJECT_ROOT,
     REGISTRY,
@@ -42,7 +41,7 @@ from src.labeling.schema import ExclusionScope
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--pools", nargs="*", default=list(REGISTRY), choices=list(REGISTRY))
-    ap.add_argument("--out", default=str(PROJECT_ROOT / "benchmark" / "merged_v2" / "neutral_cells.jsonl"))
+    ap.add_argument("--out", default=str(PROJECT_ROOT / "benchmark" / "CleanBench" / "neutral_cells.jsonl"))
     args = ap.parse_args()
 
     skip_keys: set[tuple[str, object, str]] = set()

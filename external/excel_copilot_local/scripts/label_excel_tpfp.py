@@ -1,4 +1,4 @@
-"""Label Excel Copilot predictions TP/FP against benchmark/merged_v8 and report
+"""Label Excel Copilot predictions TP/FP against CleanBench and report
 per-Excel-type performance.
 
 Authoritative source of the scored cells is

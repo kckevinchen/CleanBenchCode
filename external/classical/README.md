@@ -1,4 +1,4 @@
-# Classical (non-LLM) detectors on `benchmark/merged_v2` (cell-level)
+# Classical (non-LLM) detectors on CleanBench (cell-level)
 
 Three zero-shot, label-free, deterministic detectors that fill the **classical /
 statistical paradigms** the rest of the roster lacked (everything else is

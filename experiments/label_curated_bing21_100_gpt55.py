@@ -34,9 +34,8 @@ Usage
 
 To evaluate a different rulebook / system prompt, point
 ``--system-prompt-file`` at the new prompt text file. The default is
-the v5 rulebook bundled in ``RFT/typo_v5/_task.py``; any plain-text
-file (e.g. ``RFT/typo_v4/prompts/rulebook.md``,
-``docs/typo_prompt_bundle/system_prompt.txt``, or a hand-written
+the bundled typo rulebook; any plain-text file (for example
+``external/baseline/prompts/typo/with_rulebook.md`` or a hand-written
 ablation) is accepted -- the user-message format and JSON response
 schema are unchanged across prompts so the rest of the pipeline is
 prompt-agnostic.

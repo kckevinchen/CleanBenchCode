@@ -1,4 +1,4 @@
-# Cocoon (ICDEW'25) on `benchmark/merged_v8` (cell-level)
+# Cocoon (ICDEW'25) on CleanBench (cell-level)
 
 Cocoon — "Data cleaning using large language models" (Zhang, Huang, Wu, *ICDEW
 2025*; project: <https://github.com/Cocoon-Data-Transformation/cocoon>) — is a

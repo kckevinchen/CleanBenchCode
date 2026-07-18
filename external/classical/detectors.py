@@ -1,4 +1,4 @@
-"""Classical (non-LLM) cell-level error detectors for benchmark/merged_v2.
+"""Classical (non-LLM) cell-level error detectors for CleanBench.
 
 Three zero-shot, label-free paradigms that the existing roster lacked, run over
 the entire CSV and emitting ``(row, col)`` cells exactly like every other baseline

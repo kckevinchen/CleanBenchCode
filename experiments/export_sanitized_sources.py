@@ -1,6 +1,6 @@
-"""Emit a SANITISED copy of the merged-benchmark source corpus.
+"""Emit a SANITISED copy of the CleanBench source corpus.
 
-Produces a version of the ~1000 source CSVs behind ``benchmark/merged_v8``
+Produces the source CSVs paired with ``benchmark/CleanBench``
 with every operator EXCLUSION applied, so a downstream data-cleaning step
 sees exactly the slices the benchmark actually scores:
 
@@ -9,7 +9,7 @@ sees exactly the slices the benchmark actually scores:
   * ``scope=columns`` -> the listed columns are dropped.
 
 Exclusions are gathered as the UNION across every ``(pool x error_type)``
-run in :data:`experiments.export_merged_benchmark.REGISTRY` (the same runs
+run in :data:`experiments.export_cleanbench.REGISTRY` (the same runs
 that feed ``benchmark_cell.json`` / ``benchmark_row.json``), so a cell
 excluded under ANY error type is removed once, run-agnostic.
 
@@ -20,7 +20,7 @@ can deterministically backfill with readable, non-empty CSVs from
 The Excel/Bing21 pool writes 500 after 17 whole-file exclusions, including seven
 reviewed-clean corpus-balance files with no benchmark cell or row records.
 
-The inter-table sheets carry no exclusions, but the merged benchmark's
+The inter-table sheets carry no exclusions, but CleanBench's
 ``inter_table_inconsistency`` findings reference a handful of them. To keep
 the corpus self-contained for that task, the FULL workbooks involved in any
 confirmed/unsure inter-table finding (from
@@ -33,6 +33,7 @@ Layout (top-level dir per ``dataset`` label, matching the benchmark)::
 
     <out>/pbi_500/<basename>.csv
     <out>/bing21_500/<basename>.csv          (incl. the inter-table sheets)
+    <out>/_ROW_MAP.json                      original rows for filtered CSVs
     <out>/MANIFEST.json         what was omitted / row-dropped / col-dropped
     <out>.zip                   the same tree, zipped
 
@@ -44,7 +45,7 @@ is read from, so the surviving cells still line up.
 Read-only w.r.t. the runs and the source corpora. Run::
 
     python -m experiments.export_sanitized_sources \
-        --out benchmark/merged_v8/sanitized_sources
+        --out benchmark/CleanBench/sanitized_sources
 """
 
 from __future__ import annotations
@@ -56,9 +57,9 @@ import shutil
 import zipfile
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
-from experiments.export_merged_benchmark import DATASET_OF, OUTPUTS, REGISTRY
+from experiments.export_cleanbench import DATASET_OF, OUTPUTS, REGISTRY
 from experiments.export_row_benchmark import INTER_TABLE_REGISTRY, _materialize_inter_table
 from src.core.data_loader import load_csv
 from src.labeling.app import RunContext
@@ -116,24 +117,25 @@ def _write_sanitised_csv(
     out_path: Path,
     drop_rows: Set[int],
     drop_cols: Set[str],
-) -> str:
-    """Emit one source. Returns the action taken: ``copy`` (verbatim) or
-    ``rewrite`` (row/col drop via the loaded frame)."""
+) -> Tuple[str, Optional[List[int]]]:
+    """Emit one source and return its action plus any exported-row mapping."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if not drop_rows and not drop_cols:
         shutil.copy2(src_path, out_path)
-        return "copy"
+        return "copy", None
     frame = load_csv(src_path)
+    row_map: Optional[List[int]] = None
     if drop_cols:
         keep = [c for c in frame.columns if c not in drop_cols]
         frame = frame.loc[:, keep]
     if drop_rows:
         keep_idx = [i for i in range(len(frame)) if i not in drop_rows]
         frame = frame.iloc[keep_idx]
+        row_map = keep_idx
     tmp = out_path.with_suffix(out_path.suffix + ".tmp")
     frame.to_csv(tmp, index=False)
     tmp.replace(out_path)
-    return "rewrite"
+    return "rewrite", row_map
 
 
 def _sha256(path: Path) -> str:
@@ -219,7 +221,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
         "--out",
-        default=str(PROJECT_ROOT / "benchmark" / "merged_v8" / "sanitized_sources"),
+        default=str(PROJECT_ROOT / "benchmark" / "CleanBench" / "sanitized_sources"),
         help="output directory (a sibling .zip is written too)",
     )
     ap.add_argument(
@@ -241,6 +243,7 @@ def main() -> None:
     n_written = 0
     n_omitted = 0
     n_rewritten = 0
+    row_maps: List[Dict[str, Any]] = []
 
     # ---- the two exclusion-bearing pools -----------------------------
     for pool in SANITISE_POOLS:
@@ -259,7 +262,7 @@ def main() -> None:
                 continue
             drop_rows = excl_rows.get(basename, set())
             drop_cols = excl_cols.get(basename, set())
-            action = _write_sanitised_csv(
+            action, row_map = _write_sanitised_csv(
                 src_path,
                 pool_dir / basename,
                 drop_rows,
@@ -272,6 +275,14 @@ def main() -> None:
                     "dropped_rows": sorted(drop_rows),
                     "dropped_columns": sorted(drop_cols),
                 }
+            if row_map is not None:
+                row_maps.append(
+                    {
+                        "source": basename,
+                        "path": f"{dataset}/{basename}",
+                        "exported_to_source": row_map,
+                    }
+                )
 
         registered_written = written
         backfilled: List[Dict[str, Any]] = []
@@ -376,6 +387,22 @@ def main() -> None:
         "csvs_omitted_fully_excluded": n_omitted,
         "csvs_row_or_col_trimmed": n_rewritten,
     }
+    if row_maps:
+        (out_dir / "_ROW_MAP.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "description": (
+                        "For each row-filtered CSV, exported_to_source[i] is "
+                        "the original zero-based source row for exported data row i."
+                    ),
+                    "sources": row_maps,
+                },
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
     (out_dir / "MANIFEST.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False),
         encoding="utf-8",
