@@ -10,9 +10,9 @@ each shrink to: declare the record ``model``, implement ``_key`` (the
 dedup key), and expose their domain-specific query/write *names* as thin
 wrappers over the primitives here.
 
-The base is also **self-healing against out-of-band writes**: offline CLIs
-(``apply_benchmark_labels``, ``auto_label_*``, ...) or a second worker can
-append to the same file while a server holds a store cached. Each read
+The base is also **self-healing against out-of-band writes**: an offline tool
+or a second worker can append to the same file while a server holds a store
+cached. Each read
 checks the file's ``(mtime, size)`` and reloads if it changed underneath
 us; our own appends refresh that signature so in-process writes never
 trigger a redundant reload. (Previously only ``LabelStore`` and

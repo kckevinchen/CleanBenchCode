@@ -808,12 +808,10 @@ function recomputeState(cell, rec) {
 // Canonicalize-relabels action
 // =====================================================================
 //
-// Heuristic for "this row needs a canonical corrected_value" mirrors the
-// Python ``needs_canonicalization`` in
-// ``experiments/canonicalize_typo_benchmark.py``. We approximate it
-// client-side so the UI can show a live count without hitting the
-// backend on every relabel. The button is authoritative -- it's the
-// server that decides which rows actually run.
+// This client-side heuristic approximates the server's authoritative
+// "needs a canonical corrected_value" predicate so the UI can show a live
+// count without a request after every relabel. The server still decides which
+// rows actually run.
 const _INSTRUCTION_LEADING_VERBS = /^\s*(?:replace|change|correct|fix|review|verify|spell|consider|suggest|rename|update|remove|delete|add|rewrite|use|should|if|possibly)\b/i;
 const _INSTRUCTION_PHRASES = /\bshould be\b|\bpossible correction\b|\bpossibly\b|\bintended (?:value|suffix|spelling)\b|\baffected rows?\b|\b(?:e\.g\.|i\.e\.)\b|\b->\b|\b=>\b|['"][^'"]{1,80}['"]\s+(?:to|with)\s+['"]/i;
 

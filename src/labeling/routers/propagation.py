@@ -18,7 +18,6 @@ from .._helpers import _has_whitespace_anomaly, _normalize_trivial, _scalar
 from ..schema import Label, LabelStatus, LabelTarget, cell_target_id
 from ._context import RouterContext
 
-
 # ``_has_whitespace_anomaly`` (the strict whitespace-only rule) and
 # ``_normalize_trivial`` (its deterministic fix) live in ``_helpers`` so
 # the benchmark exporter can reuse them; they're imported above. Re-exported
@@ -44,8 +43,7 @@ def _scan_dataset_for_trivial(
     ctx: Any, *, source_filter: Optional[str], dry_run: bool, ann: str,
 ) -> Dict[str, Any]:
     """Walk every cell of every (optionally filtered) source and act on
-    each spacing-rule anomaly, mirroring
-    ``experiments/auto_label_whitespace_anomalies.py`` in-process:
+    each spacing-rule anomaly using the workbench's native propagation rules:
 
       * cell covered by a cluster
           - cluster already carries a positive verdict (tp/partial/fn)
@@ -750,9 +748,8 @@ def register(app: FastAPI, router_ctx: RouterContext) -> None:
         TP / PARTIAL / FN label whose underlying cell value matches the
         red-underline whitespace-anomaly rule used by the CSV viewer.
 
-        Why this exists: the auto-whitespace detector (see
-        ``experiments/auto_label_whitespace_anomalies.py``) finds
-        edge / double / non-printable whitespace in cells. Such typos
+        Why this exists: the workbench's whitespace scan finds edge /
+        double / non-printable whitespace in cells. Such typos
         are mechanical and uninteresting compared with semantic typos,
         so the operator wants them flagged ``TRIVIAL`` in the note so
         downstream benchmark consumers can choose to weight or filter
